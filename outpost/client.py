@@ -211,8 +211,6 @@ class OutpostClient:
         the other, so each side should discover its own peers independently
         and only use this relay node itself as a bootstrap `peers:` entry.
         """
-        if header.sender_id == self.config.sender_id:
-            return  # never re-forward our own traffic
         dedup_key = (header.sender_id, header.ptype)
         last_fwd = self._relay_seen.get(dedup_key)
         if last_fwd is not None and header.seq <= last_fwd:
@@ -226,6 +224,14 @@ class OutpostClient:
             self.transport.forward(encode_packet(header, ciphertext), targets)
 
     def _on_packet(self, header, ciphertext: bytes, addr) -> None:
+        if header.sender_id == self.config.sender_id:
+            # Our own traffic looped back to us - e.g. a multi-hop relay mesh
+            # can bounce a packet through a downstream relay and back to its
+            # original sender if that relay also knows us as a peer. Without
+            # this guard we'd decrypt and play our own voice back, which
+            # sounds like a (delayed) audio echo whenever relay mode is on.
+            return
+
         if self.config.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
             self._relay_packet(header, ciphertext, addr)
 
