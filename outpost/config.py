@@ -106,6 +106,91 @@ class OutpostConfig:
         raise KeyError(f"unknown channel {name!r}")
 
 
+def _validate_bool(v):
+    if isinstance(v, bool):
+        return v
+    raise ValueError("must be true or false")
+
+
+def _validate_positive_int(v):
+    v = int(v)
+    if v <= 0:
+        raise ValueError("must be a positive integer")
+    return v
+
+
+def _validate_positive_float(v):
+    v = float(v)
+    if v <= 0:
+        raise ValueError("must be a positive number")
+    return v
+
+
+def _validate_port(v):
+    v = int(v)
+    if not (1 <= v <= 65535):
+        raise ValueError("must be between 1 and 65535")
+    return v
+
+
+def _validate_optional_str(v):
+    if v is None:
+        return None
+    v = str(v).strip()
+    return v or None
+
+
+# Fields the web UI's settings editor is allowed to change, each mapped to
+# (validator, applies_live). applies_live=True means OutpostClient can adopt
+# the new value on the running process immediately; everything else only
+# takes effect after persisting to the YAML file and restarting the client.
+# Deliberately excludes sender_id/mesh_key/channels/peers (identity/secrets,
+# need their own dedicated flows, not blind value edits) and web_ui_host/
+# web_ui_port/web_ui_token (editing the web UI's own bind address/auth via
+# the web UI itself risks a self-lockout or accidental exposure).
+EDITABLE_FIELDS: dict[str, tuple] = {
+    "listen_port": (_validate_port, False),
+    "bitrate": (_validate_positive_int, False),
+    "frame_ms": (_validate_positive_int, False),
+    "max_packet_bytes": (_validate_positive_int, False),
+    "inband_fec": (_validate_bool, False),
+    "enable_mdns": (_validate_bool, False),
+    "enable_pex": (_validate_bool, False),
+    "pex_interval_s": (_validate_positive_float, False),
+    "pex_fanout": (_validate_positive_int, False),
+    "max_peers": (_validate_positive_int, False),
+    "channel_announce_interval_s": (_validate_positive_float, False),
+    "enable_agc": (_validate_bool, True),
+    "agc_target_rms": (_validate_positive_float, True),
+    "noise_suppressor_model_path": (_validate_optional_str, False),
+    "enable_relay": (_validate_bool, True),
+}
+
+
+def editable_config_values(config: OutpostConfig) -> dict:
+    """Current values of every web-UI-editable field, for display - never
+    includes sender_id/mesh_key/channels/peers/web_ui_token."""
+    return {name: getattr(config, name) for name in EDITABLE_FIELDS}
+
+
+def save_config_fields(path: str, updates: dict) -> None:
+    """Persist `updates` (field name -> already-validated value) into the
+    YAML config file at `path`, leaving every other key (including
+    mesh_key/channels/peers) untouched. Only ever called with keys already
+    checked against EDITABLE_FIELDS by the caller.
+
+    Note: re-serializing with yaml.safe_dump does not preserve comments or
+    formatting from the original file - subsequent hand-edits will lose any
+    comments that were present before the first web UI save."""
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    raw.update(updates)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        yaml.safe_dump(raw, f, sort_keys=False)
+    os.replace(tmp_path, path)
+
+
 def _resolve_sender_id(config_path: str, raw: dict) -> int:
     """Returns the configured sender_id, or auto-generates and persists one.
 

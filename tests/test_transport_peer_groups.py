@@ -101,3 +101,19 @@ def test_confirm_peer_new_address_does_not_create_duplicate():
     transport.confirm_peer(7, Peer(host="10.0.0.9", port=9000))
 
     assert len(transport.peers) == 1
+
+
+def test_peer_details_reports_address_candidate_count_and_static_flag():
+    transport = MeshTransport(sender_id=1, peers=[Peer(host="10.0.0.1", port=9000)], on_packet=lambda *a: None)
+    transport.add_peer_group("device-a", [
+        Peer(host="192.168.1.50", port=9000),
+        Peer(host="10.8.0.5", port=9000),
+    ])
+
+    details = {d["key"]: d for d in transport.peer_details()}
+    assert details["static-0"]["static"] is True
+    assert details["static-0"]["candidate_count"] == 1
+    assert details["device-a"]["static"] is False
+    assert details["device-a"]["host"] == "192.168.1.50"
+    assert details["device-a"]["candidate_count"] == 2
+    assert details["device-a"]["age_s"] >= 0

@@ -9,6 +9,7 @@ tests/test_channel_scoping.py for the same pattern)."""
 from __future__ import annotations
 import asyncio
 import pytest
+import yaml
 from aiohttp.test_utils import TestClient, TestServer
 
 from outpost.client import OutpostClient
@@ -17,7 +18,7 @@ from outpost.crypto import generate_channel_key
 from outpost.webui import WebUI
 
 
-def _make_client(**config_overrides) -> OutpostClient:
+def _make_client(config_path=None, **config_overrides) -> OutpostClient:
     ops_key = generate_channel_key()
     tac_key = generate_channel_key()
     defaults = dict(
@@ -29,7 +30,7 @@ def _make_client(**config_overrides) -> OutpostClient:
         enable_pex=False,
     )
     defaults.update(config_overrides)
-    return OutpostClient(OutpostConfig(**defaults), "ops")
+    return OutpostClient(OutpostConfig(**defaults), "ops", config_path=config_path)
 
 
 def test_status_reports_active_channel_and_channel_list():
@@ -151,3 +152,98 @@ def test_webui_raises_clear_error_without_aiohttp(monkeypatch):
     monkeypatch.setattr(webui_module, "web", None)
     with pytest.raises(RuntimeError, match="pip install -e '.\\[web\\]'|web.*extra"):
         webui_module.WebUI(_make_client())
+
+
+def test_status_includes_peer_and_channel_member_detail():
+    asyncio.run(_status_includes_peer_and_channel_member_detail())
+
+
+async def _status_includes_peer_and_channel_member_detail():
+    client = _make_client()
+    from outpost.config import Peer
+    client.transport.add_peer("gossip-10.0.0.5:9000", Peer(host="10.0.0.5", port=9000))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        body = await (await tc.get("/api/status")).json()
+        assert body["peer_count"] == 1
+        assert body["peers"][0]["host"] == "10.0.0.5"
+        assert body["channel_members"] == []
+        assert body["agc_enabled"] is True
+        assert body["relay_enabled"] is False
+
+
+def test_get_config_lists_editable_fields_with_live_flag_and_save_capability():
+    asyncio.run(_get_config_lists_editable_fields_with_live_flag_and_save_capability())
+
+
+async def _get_config_lists_editable_fields_with_live_flag_and_save_capability():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        body = await (await tc.get("/api/config")).json()
+        assert body["can_save"] is False  # no config_path given
+        assert body["fields"]["enable_agc"]["live"] is True
+        assert body["fields"]["bitrate"]["live"] is False
+        assert body["fields"]["bitrate"]["value"] == 16000
+
+
+def test_set_config_requires_a_config_path():
+    asyncio.run(_set_config_requires_a_config_path())
+
+
+async def _set_config_requires_a_config_path():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config", json={"enable_agc": False})
+        assert resp.status == 400
+
+
+def test_set_config_rejects_unknown_field(tmp_path):
+    asyncio.run(_set_config_rejects_unknown_field(tmp_path))
+
+
+async def _set_config_rejects_unknown_field(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\n")
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config", json={"mesh_key": "nope"})
+        assert resp.status == 400
+
+
+def test_set_config_rejects_invalid_value(tmp_path):
+    asyncio.run(_set_config_rejects_invalid_value(tmp_path))
+
+
+async def _set_config_rejects_invalid_value(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\n")
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config", json={"bitrate": -5})
+        assert resp.status == 400
+
+
+def test_set_config_persists_to_yaml_and_applies_live_fields(tmp_path):
+    asyncio.run(_set_config_persists_to_yaml_and_applies_live_fields(tmp_path))
+
+
+async def _set_config_persists_to_yaml_and_applies_live_fields(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\nbitrate: 16000\n")
+
+    client = _make_client(config_path=str(config_path))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config", json={"enable_agc": False, "agc_target_rms": 3000, "bitrate": 8000})
+        assert resp.status == 200
+        body = await resp.json()
+        assert set(body["saved"]) == {"enable_agc", "agc_target_rms", "bitrate"}
+        assert set(body["applied_live"]) == {"enable_agc", "agc_target_rms"}
+        assert body["restart_required"] == ["bitrate"]
+
+    assert client.agc_enabled is False
+    assert client.agc.target_rms == 3000
+
+    saved_raw = yaml.safe_load(config_path.read_text())
+    assert saved_raw["bitrate"] == 8000
+    assert saved_raw["mesh_key"] == "x"  # pre-existing, untouched key preserved

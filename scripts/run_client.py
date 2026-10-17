@@ -57,7 +57,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
     config = load_config(args.config)
-    client = OutpostClient(config, args.channel)
+    client = OutpostClient(config, args.channel, config_path=args.config)
     ptt = build_ptt(args, client.set_ptt)
 
     await client.start()

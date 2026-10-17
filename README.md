@@ -151,16 +151,31 @@ flowchart LR
 - **Web UI** (`outpost/webui.py`, `enable_web_ui`, off by default): a
   lightweight local control panel - single static HTML page, no build step
   or frontend framework, served by a small `aiohttp` app - for viewing live
-  status (active channel, PTT state, peer count, AGC/noise-suppressor state)
-  and controlling the client (switch active channel, press-and-hold web PTT)
-  from a browser instead of the CLI/hardware PTT alone. Requires the `web`
-  extra (`pip install -e ".[web]"`) - importing `outpost.webui` never
-  requires `aiohttp` unless the feature is actually turned on. Binds to
-  `127.0.0.1` by default; set `web_ui_token` (checked as a bearer token on
-  every request) before pointing `web_ui_host` at anything reachable by
-  others, since the channel/PTT control endpoints are otherwise
-  unauthenticated - the status/HTML responses never include channel or mesh
-  keys regardless.
+  status (active channel, PTT state, peer table with per-peer address/
+  candidate-count/last-seen age, confirmed channel members, AGC/relay/
+  noise-suppressor state) and controlling the client (switch active
+  channel, press-and-hold web PTT, generate a channel/mesh key) from a
+  browser instead of the CLI/hardware PTT alone. Also exposes a **settings
+  editor** (`/api/config`) for the non-secret fields of `OutpostConfig`
+  (network profile, mDNS/PEX tuning, AGC, relay mode, etc. - see
+  `outpost.config.EDITABLE_FIELDS`): saving writes the new values back into
+  the client's `outpost.yaml` (only if it was started with `--config`, i.e.
+  `scripts/run_client.py`'s normal usage), and `enable_agc`/`agc_target_rms`/
+  `enable_relay` additionally apply immediately on the running client -
+  every other field needs a client restart to take effect, which the UI
+  flags per-field. `sender_id`, `mesh_key`, `channels`/`peers`, and the web
+  UI's own bind address/port/token are deliberately never editable from the
+  web UI itself (identity/secrets need their own flow, and editing the web
+  UI's own auth/bind settings through itself risks a self-lockout or
+  accidental exposure). Note: saving rewrites the whole YAML file via
+  PyYAML, which does **not** preserve comments/formatting from the
+  original file. Requires the `web` extra (`pip install -e ".[web]"`) -
+  importing `outpost.webui` never requires `aiohttp` unless the feature is
+  actually turned on. Binds to `127.0.0.1` by default; set `web_ui_token`
+  (checked as a bearer token on every request, including the settings
+  editor) before pointing `web_ui_host` at anything reachable by others,
+  since the control endpoints are otherwise unauthenticated - the status/
+  HTML/config responses never include channel or mesh keys regardless.
 
 ## Network profiles: LAN / VPN vs. constrained mesh radio
 
@@ -358,7 +373,9 @@ pytest tests/ -v
    hardware.
 6. Optional: set `enable_web_ui: true` in the config (plus the `web` extra)
    to get a local status/control page at `http://127.0.0.1:8765` - see "Web
-   UI" above.
+   UI" above. When run via `scripts/run_client.py --config ...`, its
+   Settings panel can also persist non-secret config changes straight back
+   into that same `outpost.yaml`.
 
 ## Known platform issue: Opus bitrate/FEC control on some ARM builds
 

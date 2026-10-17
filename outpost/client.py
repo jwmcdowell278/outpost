@@ -29,17 +29,26 @@ class OutpostClient:
         active_channel_name: str,
         noise_suppressor: NoiseSuppressor | None = None,
         agc: AutomaticGainControl | None = None,
+        config_path: str | None = None,
     ):
         self.config = config
+        # Path to the YAML file `config` was loaded from, if any - lets the
+        # web UI's settings editor persist changes back (see
+        # config.save_config_fields). None in tests/embedding scenarios that
+        # construct OutpostConfig directly rather than via load_config.
+        self.config_path = config_path
         self.active_channel = config.channel_by_name(active_channel_name)
         self.noise_suppressor = noise_suppressor or (
             OnnxNoiseSuppressor(config.noise_suppressor_model_path)
             if config.noise_suppressor_model_path
             else PassthroughSuppressor()
         )
-        self.agc = agc if agc is not None else (
-            AutomaticGainControl(target_rms=config.agc_target_rms) if config.enable_agc else None
-        )
+        # Always construct the AGC object (cheap, pure DSP) and gate its use
+        # with a separate mutable flag, rather than leaving self.agc None
+        # when disabled - this lets the web UI toggle AGC on/off live
+        # without restarting the client.
+        self.agc = agc if agc is not None else AutomaticGainControl(target_rms=config.agc_target_rms)
+        self.agc_enabled = config.enable_agc
 
         self.codec = OpusCodec(
             bitrate=config.bitrate,
@@ -97,6 +106,10 @@ class OutpostClient:
         # could vary freely to grow this table.
         self._relay_seen: dict[tuple[int, int], int] = {}
 
+        # Mutable so the web UI can toggle relay mode live - see __init__'s
+        # agc_enabled for the same pattern/rationale.
+        self.enable_relay = config.enable_relay
+
     # --- PTT control --------------------------------------------------
 
     def set_ptt(self, pressed: bool) -> None:
@@ -111,6 +124,18 @@ class OutpostClient:
 
     def set_active_channel(self, name: str) -> None:
         self.active_channel = self.config.channel_by_name(name)
+
+    def channel_member_details(self, channel_id: int | None = None) -> list[dict]:
+        """Confirmed members (sender_id + address + seconds since last
+        announce) of a channel - defaults to the active channel. For
+        display only (e.g. the web UI's status detail)."""
+        if channel_id is None:
+            channel_id = self.active_channel.id
+        now = time.monotonic()
+        return [
+            {"sender_id": sender_id, "host": peer.host, "port": peer.port, "age_s": round(now - last_seen, 1)}
+            for sender_id, (peer, last_seen) in self._channel_members.get(channel_id, {}).items()
+        ]
 
     # --- lifecycle ------------------------------------------------------
 
@@ -163,7 +188,7 @@ class OutpostClient:
             frame = await loop.run_in_executor(None, self.mic.read_frame)
             if not self._ptt_active:
                 continue
-            if self.agc:
+            if self.agc_enabled:
                 frame = self.agc.process(frame)
             frame = self.noise_suppressor.process(frame)
             opus_bytes = self.codec.encode(frame)
@@ -234,7 +259,7 @@ class OutpostClient:
             # sounds like a (delayed) audio echo whenever relay mode is on.
             return
 
-        if self.config.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
+        if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
             self._relay_packet(header, ciphertext, addr)
 
         if header.ptype == TYPE_PEX:

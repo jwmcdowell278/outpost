@@ -77,6 +77,24 @@ class MeshTransport:
         with self._lock:
             return list(self._peers.values())
 
+    def peer_details(self) -> list[dict]:
+        """One dict per logical peer - key, active address, how many
+        candidate addresses it has, and seconds since last refreshed (for
+        display, e.g. the web UI's peer table)."""
+        now = time.monotonic()
+        with self._lock:
+            return [
+                {
+                    "key": key,
+                    "host": peer.host,
+                    "port": peer.port,
+                    "candidate_count": len(self._candidates.get(key, [peer])),
+                    "age_s": round(now - self._last_seen.get(key, now), 1),
+                    "static": key.startswith("static-"),
+                }
+                for key, peer in self._peers.items()
+            ]
+
     def add_peer(self, key: str, peer: Peer) -> None:
         self.add_peer_group(key, [peer])
 

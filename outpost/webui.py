@@ -19,6 +19,7 @@ except ImportError:
     web = None
 
 from .crypto import generate_channel_key
+from .config import EDITABLE_FIELDS, editable_config_values, save_config_fields
 
 log = logging.getLogger(__name__)
 
@@ -30,33 +31,92 @@ _INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outpost</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.25rem; }
-  .row { margin: 0.75rem 0; }
-  button { font-size: 1rem; padding: 0.5rem 1rem; margin: 0.15rem; cursor: pointer; }
-  button.active { background: #2a7; color: white; }
-  #ptt { width: 100%; padding: 1rem; font-size: 1.1rem; }
-  #ptt.pressed { background: #c33; color: white; }
-  #status { font-size: 0.85rem; color: #555; white-space: pre-wrap; }
-  label { font-size: 0.85rem; color: #555; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7; --card: #fff; --text: #1a1a1a; --muted: #666;
+    --border: #e1e3e6; --accent: #2a7; --accent-text: #fff; --danger: #c33;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15171a; --card: #1e2125; --text: #eee; --muted: #9aa0a6; --border: #2c3034; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 0 auto;
+    padding: 1rem 1rem 3rem; background: var(--bg); color: var(--text);
+  }
+  h1 { font-size: 1.35rem; margin: 1rem 0 0.5rem; }
+  h2 { font-size: 0.95rem; margin: 0 0 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 0.6rem; padding: 1rem; margin: 0.9rem 0; }
+  .row { margin: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  button {
+    font-size: 0.95rem; padding: 0.45rem 0.9rem; cursor: pointer; border-radius: 0.4rem;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  #ptt { width: 100%; padding: 1.1rem; font-size: 1.1rem; font-weight: 600; }
+  #ptt.pressed { background: var(--danger); color: white; border-color: var(--danger); }
+  label { font-size: 0.85rem; color: var(--muted); }
+  input[type=text], input[type=password], input[type=number] {
+    font-size: 0.9rem; padding: 0.3rem 0.5rem; border-radius: 0.35rem; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 0.3rem 0.4rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; font-size: 0.72rem; background: var(--border); }
+  .pill.live { background: var(--accent); color: var(--accent-text); }
+  .field-row { justify-content: space-between; }
+  .field-row .name { font-size: 0.88rem; }
+  .muted { color: var(--muted); font-size: 0.8rem; }
+  #saveMsg { font-size: 0.82rem; min-height: 1.1rem; }
+  #saveMsg.error { color: var(--danger); }
+  #saveMsg.ok { color: var(--accent); }
 </style>
 </head>
 <body>
 <h1>Outpost</h1>
-<div class="row">
-  <label>Token (if configured): <input id="token" type="password" size="20"></label>
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+  <div class="muted" id="statusLine">loading...</div>
 </div>
-<div class="row" id="channels"></div>
-<div class="row">
+
+<div class="card">
+  <h2>Channel</h2>
+  <div class="row" id="channels"></div>
   <button id="ptt">Hold to talk</button>
 </div>
-<div class="row">
-  <button id="genkey">Generate key</button>
-  <input id="genkeyOut" type="text" size="46" readonly placeholder="generated key appears here">
-  <button id="copykey" type="button">Copy</button>
-  <div><label>Paste into a channel's or mesh_key's "key:" field in your config file - not saved automatically.</label></div>
+
+<div class="card">
+  <h2>Peers (<span id="peerCount">0</span>)</h2>
+  <table id="peerTable"><thead><tr><th>Address</th><th>Candidates</th><th>Age</th></tr></thead><tbody></tbody></table>
 </div>
-<pre id="status">loading...</pre>
+
+<div class="card">
+  <h2>Channel members</h2>
+  <table id="memberTable"><thead><tr><th>Sender</th><th>Address</th><th>Age</th></tr></thead><tbody></tbody></table>
+</div>
+
+<div class="card">
+  <h2>Settings</h2>
+  <div id="settingsFields">loading...</div>
+  <div class="row">
+    <button id="saveSettings">Save</button>
+    <span id="saveMsg"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Key generator</h2>
+  <div class="row">
+    <button id="genkey">Generate key</button>
+    <input id="genkeyOut" type="text" size="40" readonly placeholder="generated key appears here">
+    <button id="copykey" type="button">Copy</button>
+  </div>
+  <div class="muted">Paste into a channel's or mesh_key's "key:" field in your config file - not saved automatically.</div>
+</div>
+
 <script>
 const tokenInput = document.getElementById('token');
 tokenInput.value = localStorage.getItem('outpost_token') || '';
@@ -73,10 +133,28 @@ async function api(path, options) {
   return resp.json();
 }
 
+function fmtAge(s) {
+  if (s < 60) return s.toFixed(0) + 's';
+  if (s < 3600) return (s / 60).toFixed(0) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}
+
+function fillTable(bodyId, rows, renderRow) {
+  const tbody = document.querySelector('#' + bodyId + ' tbody');
+  tbody.textContent = '';
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = renderRow(row);
+    tbody.appendChild(tr);
+  }
+}
+
 async function refresh() {
   try {
     const s = await api('/api/status');
-    document.getElementById('status').textContent = JSON.stringify(s, null, 2);
+    document.getElementById('statusLine').textContent =
+      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'} · ${s.noise_suppressor}`;
+
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
     for (const name of s.channels) {
@@ -89,8 +167,14 @@ async function refresh() {
       }).then(refresh).catch(e => alert(e.message));
       channelsDiv.appendChild(btn);
     }
+
+    document.getElementById('peerCount').textContent = s.peer_count;
+    fillTable('peerTable', s.peers, p =>
+      `<td>${p.host}:${p.port}${p.static ? ' <span class="pill">static</span>' : ''}</td><td>${p.candidate_count}</td><td>${fmtAge(p.age_s)}</td>`);
+    fillTable('memberTable', s.channel_members, m =>
+      `<td>${m.sender_id}</td><td>${m.host}:${m.port}</td><td>${fmtAge(m.age_s)}</td>`);
   } catch (e) {
-    document.getElementById('status').textContent = 'error: ' + e.message;
+    document.getElementById('statusLine').textContent = 'error: ' + e.message;
   }
 }
 
@@ -108,6 +192,62 @@ for (const ev of ['mouseup', 'mouseleave', 'touchend', 'touchcancel']) {
   pttBtn.addEventListener(ev, () => { pttBtn.classList.remove('pressed'); setPtt(false); });
 }
 
+function settingsInput(name, field) {
+  const v = field.value;
+  if (typeof v === 'boolean') {
+    return `<input type="checkbox" data-field="${name}" ${v ? 'checked' : ''}>`;
+  }
+  if (typeof v === 'number') {
+    return `<input type="number" step="any" data-field="${name}" value="${v}" size="10">`;
+  }
+  return `<input type="text" data-field="${name}" value="${v ?? ''}" size="20">`;
+}
+
+async function loadSettings() {
+  const container = document.getElementById('settingsFields');
+  try {
+    const cfg = await api('/api/config');
+    container.textContent = '';
+    for (const [name, field] of Object.entries(cfg.fields)) {
+      const row = document.createElement('div');
+      row.className = 'row field-row';
+      const livePill = field.live ? '<span class="pill live">live</span>' : '<span class="pill">restart</span>';
+      row.innerHTML = `<span class="name">${name} ${livePill}</span>${settingsInput(name, field)}`;
+      container.appendChild(row);
+    }
+    document.getElementById('saveSettings').disabled = !cfg.can_save;
+    if (!cfg.can_save) {
+      document.getElementById('saveMsg').textContent = 'no config file path - settings are read-only here';
+    }
+  } catch (e) {
+    container.textContent = 'error: ' + e.message;
+  }
+}
+
+document.getElementById('saveSettings').addEventListener('click', async () => {
+  const msg = document.getElementById('saveMsg');
+  msg.className = ''; msg.textContent = 'saving...';
+  const updates = {};
+  for (const el of document.querySelectorAll('#settingsFields [data-field]')) {
+    const name = el.dataset.field;
+    updates[name] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
+  }
+  try {
+    const result = await api('/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    msg.className = 'ok';
+    msg.textContent = result.restart_required.length
+      ? `saved - restart required for: ${result.restart_required.join(', ')}`
+      : 'saved and applied';
+    refresh();
+  } catch (e) {
+    msg.className = 'error';
+    msg.textContent = e.message;
+  }
+});
+
 document.getElementById('genkey').addEventListener('click', () => {
   api('/api/generate_key', { method: 'POST' })
     .then(r => { document.getElementById('genkeyOut').value = r.key; })
@@ -119,6 +259,7 @@ document.getElementById('copykey').addEventListener('click', () => {
 });
 
 refresh();
+loadSettings();
 setInterval(refresh, 2000);
 </script>
 </body>
@@ -145,6 +286,8 @@ class WebUI:
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
             web.post("/api/generate_key", self._handle_generate_key),
+            web.get("/api/config", self._handle_get_config),
+            web.post("/api/config", self._handle_set_config),
         ])
 
     def _make_auth_middleware(self):
@@ -167,9 +310,13 @@ class WebUI:
             "active_channel": c.active_channel.name,
             "channels": [ch.name for ch in c.config.channels.values()],
             "ptt_active": c._ptt_active,
-            "agc_enabled": c.agc is not None,
+            "agc_enabled": c.agc_enabled,
+            "agc_target_rms": c.agc.target_rms,
+            "relay_enabled": c.enable_relay,
             "noise_suppressor": type(c.noise_suppressor).__name__,
             "peer_count": len(c.transport.peers),
+            "peers": c.transport.peer_details(),
+            "channel_members": c.channel_member_details(),
         })
 
     async def _handle_set_channel(self, request) -> web.Response:
@@ -194,6 +341,54 @@ class WebUI:
         # loaded from config at startup.
         key = base64.b64encode(generate_channel_key()).decode()
         return web.json_response({"key": key})
+
+    async def _handle_get_config(self, request) -> web.Response:
+        values = editable_config_values(self.client.config)
+        fields = {
+            name: {"value": values[name], "live": live}
+            for name, (_validator, live) in EDITABLE_FIELDS.items()
+        }
+        return web.json_response({"fields": fields, "can_save": self.client.config_path is not None})
+
+    async def _handle_set_config(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        data = await request.json()
+        if not isinstance(data, dict) or not data:
+            raise web.HTTPBadRequest(text="expected a non-empty JSON object of field -> value")
+
+        validated = {}
+        for name, raw_value in data.items():
+            spec = EDITABLE_FIELDS.get(name)
+            if spec is None:
+                raise web.HTTPBadRequest(text=f"{name!r} is not an editable setting")
+            validator, _live = spec
+            try:
+                validated[name] = validator(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise web.HTTPBadRequest(text=f"{name}: {exc}")
+
+        save_config_fields(self.client.config_path, validated)
+
+        applied_live = []
+        restart_required = []
+        for name, value in validated.items():
+            if EDITABLE_FIELDS[name][1]:
+                applied_live.append(name)
+            else:
+                restart_required.append(name)
+        if "enable_agc" in validated:
+            self.client.agc_enabled = validated["enable_agc"]
+        if "agc_target_rms" in validated:
+            self.client.agc.target_rms = validated["agc_target_rms"]
+        if "enable_relay" in validated:
+            self.client.enable_relay = validated["enable_relay"]
+
+        return web.json_response({
+            "saved": sorted(validated),
+            "applied_live": applied_live,
+            "restart_required": restart_required,
+        })
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self.app)

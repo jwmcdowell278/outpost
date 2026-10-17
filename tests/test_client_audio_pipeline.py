@@ -25,8 +25,11 @@ def test_agc_enabled_by_default_from_config():
 
 
 def test_agc_disabled_when_config_turns_it_off():
+    # The AGC object is always constructed (so the web UI can toggle it live
+    # without a restart) - config.enable_agc=False just starts it gated off.
     client = OutpostClient(_make_config(enable_agc=False), "ops")
-    assert client.agc is None
+    assert isinstance(client.agc, AutomaticGainControl)
+    assert client.agc_enabled is False
 
 
 def test_web_ui_disabled_by_default_from_config():
