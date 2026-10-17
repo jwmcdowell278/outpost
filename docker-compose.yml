@@ -1,0 +1,22 @@
+services:
+  outpost:
+    build: .
+    # host networking is the recommended default: Outpost relies on mDNS
+    # multicast and raw peer-to-peer UDP, both of which bridge/NAT networking
+    # complicates or breaks outright (see README's "Running with Docker").
+    network_mode: host
+    volumes:
+      - ./config:/config:ro
+    devices:
+      # Microphone/speaker (ALSA) - list yours with `aspl ay -L`/`arecord -L`.
+      - /dev/snd:/dev/snd
+      # Uncomment whichever PTT hardware you're using:
+      # - /dev/gpiomem:/dev/gpiomem        # --ptt gpio (Raspberry Pi)
+      # - /dev/ttyUSB0:/dev/ttyUSB0        # --ptt serial
+      # - /dev/bus/usb:/dev/bus/usb        # --ptt hid
+    command:
+      - --config=/config/outpost.yaml
+      - --channel=ops
+      - --ptt=gpio
+      - --gpio-pin=17
+    restart: unless-stopped

@@ -425,6 +425,65 @@ pytest tests/ -v
    Settings panel can also persist non-secret config changes straight back
    into that same `outpost.yaml`.
 
+## Running with Docker
+
+A `Dockerfile` and `docker-compose.yml` are provided. The image installs the
+`[hardware]` extra too (hidapi/pyserial/gpiozero), so one image works for any
+`--ptt` source.
+
+```bash
+docker build -t outpost .
+docker run --rm -it --network host \
+  -v "$(pwd)/config:/config:ro" \
+  --device /dev/snd \
+  outpost --config /config/outpost.yaml --channel ops --ptt gpio --gpio-pin 17
+```
+
+Or via Compose (edit the `command:`/`devices:` in [docker-compose.yml](docker-compose.yml) first):
+```bash
+docker compose up --build
+```
+
+A few things that need host access and can't just work out of the box in a
+container:
+
+- **`--network host` is the recommended default**, not an afterthought:
+  mDNS discovery needs the host's real multicast domain (bridge networking
+  puts the container in its own network namespace, which breaks it), and
+  plain peer-to-peer UDP is simplest without NAT/port-mapping in the way. If
+  you must use bridge networking, set `enable_mdns: false` and rely on PEX
+  gossip plus static `peers:` entries, and publish `listen_port`/
+  `web_ui_port` explicitly (`-p 5555:5555/udp -p 8765:8765`).
+- **Multi-homed peers (see "Design" above) need `--network host` too.**
+  With default bridge networking the container only has its own virtual
+  `eth0` and a minimal routing table pointing at the Docker bridge gateway -
+  it cannot see the host's other interfaces (a second LAN NIC, a VPN tunnel
+  like WireGuard, a mesh radio/batman-adv interface) at all, so mDNS can
+  only advertise the container's one bridge-network address and
+  `add_peer_group`'s same-subnet-preferred/fallback-on-failure logic has
+  nothing to fail over to. `--network host` avoids this entirely by sharing
+  the host's network namespace outright - every interface and the host's
+  real routing table are visible to Outpost exactly as if it weren't
+  containerized. This matters most for a relay/bridge-mode node (see
+  "Relay / bridge mode" below) that specifically needs two live interfaces
+  (e.g. `bat0` **and** `wg0`) at once - that configuration requires host
+  networking; it's not achievable with an isolated bridge network.
+- **Config is never baked into the image** (`config/` is excluded via
+  `.dockerignore`) - mount your real `outpost.yaml` (with its actual channel/
+  mesh keys) as a volume at `/config` instead, so secrets don't end up
+  committed into an image layer.
+- **Audio devices**: mount `/dev/snd` (`--device /dev/snd`) so `sounddevice`/
+  PortAudio can reach the host's mic/speaker (via ALSA); add the container's
+  user to the host's `audio` group if you hit permission errors.
+- **Hardware PTT**: mount whichever device the chosen `--ptt` source needs -
+  `/dev/gpiomem` for `gpio`, `/dev/ttyUSB0`(or similar) for `serial`,
+  `/dev/bus/usb` for `hid`. `--ptt keyboard` is **not practical in a
+  container** - it relies on `pynput`'s OS-level global keyboard hook, which
+  a container doesn't have a sensible path to (and see the "thumping" PTT
+  caveat elsewhere in this README for why you wouldn't want it listening to
+  normal typing anyway) - use `hid`/`gpio`/`serial` for any containerized
+  deployment.
+
 ## Known platform issue: Opus bitrate/FEC control on some ARM builds
 
 On some arm64 (Apple Silicon) Python builds, `ctypes` fails to correctly
