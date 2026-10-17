@@ -60,6 +60,28 @@ def test_explicit_sender_id_is_respected_and_not_overwritten(tmp_path):
     assert not (tmp_path / "outpost.yaml.identity").exists()
 
 
+def test_highpass_and_squelch_fields_are_loaded_from_yaml(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(
+        config_path,
+        extra=(
+            "enable_highpass: false\n"
+            "highpass_cutoff_hz: 150\n"
+            "enable_squelch: true\n"
+            "squelch_threshold_rms: 450\n"
+            "squelch_hold_ms: 250\n"
+        ),
+    )
+
+    config = load_config(str(config_path))
+
+    assert config.enable_highpass is False
+    assert config.highpass_cutoff_hz == 150
+    assert config.enable_squelch is True
+    assert config.squelch_threshold_rms == 450
+    assert config.squelch_hold_ms == 250
+
+
 def test_editable_config_values_excludes_secrets_and_identity():
     cfg = OutpostConfig(sender_id=1, listen_port=5555, mesh_key=generate_channel_key())
     values = editable_config_values(cfg)

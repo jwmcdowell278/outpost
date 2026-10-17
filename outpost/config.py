@@ -109,6 +109,18 @@ class OutpostConfig:
     # mode" section. Off by default - most nodes are plain clients.
     enable_relay: bool = False
 
+    # Soft half-duplex lockout: while enabled, a new local PTT press is
+    # ignored if audio from another peer on the active channel was received
+    # within the last tx_lockout_timeout_ms (cleared immediately once that
+    # peer's STOP packet arrives). Best-effort only - there's no central
+    # arbiter in a P2P mesh, so two peers keying up within one network
+    # round-trip of each other can still both get through. Off by default,
+    # since it changes behavior (a held PTT press can silently not
+    # transmit) - see README's "Preventing people from talking over each
+    # other" section.
+    enable_tx_lockout: bool = False
+    tx_lockout_timeout_ms: float = 500.0
+
     def channel_by_name(self, name: str) -> Channel:
         for ch in self.channels.values():
             if ch.name == name:
@@ -178,6 +190,8 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "enable_squelch": (_validate_bool, True),
     "squelch_threshold_rms": (_validate_nonnegative_float, True),
     "squelch_hold_ms": (_validate_nonnegative_float, True),
+    "enable_tx_lockout": (_validate_bool, True),
+    "tx_lockout_timeout_ms": (_validate_positive_float, True),
 }
 
 
@@ -262,9 +276,16 @@ def load_config(path: str) -> OutpostConfig:
         pex_fanout=raw.get("pex_fanout", 8),
         max_peers=raw.get("max_peers", 128),
         channel_announce_interval_s=raw.get("channel_announce_interval_s", 60.0),
+        enable_highpass=raw.get("enable_highpass", True),
+        highpass_cutoff_hz=raw.get("highpass_cutoff_hz", 100.0),
         enable_agc=raw.get("enable_agc", True),
         agc_target_rms=raw.get("agc_target_rms", 4000.0),
+        enable_squelch=raw.get("enable_squelch", False),
+        squelch_threshold_rms=raw.get("squelch_threshold_rms", 300.0),
+        squelch_hold_ms=raw.get("squelch_hold_ms", 300.0),
         enable_relay=raw.get("enable_relay", False),
+        enable_tx_lockout=raw.get("enable_tx_lockout", False),
+        tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
         web_ui_port=raw.get("web_ui_port", 8765),

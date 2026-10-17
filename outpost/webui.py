@@ -153,7 +153,8 @@ async function refresh() {
   try {
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'}`;
+      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'}` +
+      (s.tx_lockout_enabled ? ` · lockout ${s.channel_busy ? 'BUSY' : 'on'}` : '');
 
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
@@ -316,6 +317,8 @@ class WebUI:
             "highpass_enabled": c.highpass_enabled,
             "squelch_enabled": c.squelch_enabled,
             "squelch_threshold_rms": c.squelch.threshold_rms,
+            "tx_lockout_enabled": c.enable_tx_lockout,
+            "channel_busy": c.channel_busy(),
             "peer_count": len(c.transport.peers),
             "peers": c.transport.peer_details(),
             "channel_members": c.channel_member_details(),
@@ -395,6 +398,10 @@ class WebUI:
             self.client.squelch.threshold_rms = validated["squelch_threshold_rms"]
         if "squelch_hold_ms" in validated:
             self.client.squelch.hold_frames = max(1, round(validated["squelch_hold_ms"] / self.client.config.frame_ms))
+        if "enable_tx_lockout" in validated:
+            self.client.enable_tx_lockout = validated["enable_tx_lockout"]
+        if "tx_lockout_timeout_ms" in validated:
+            self.client.tx_lockout_timeout_s = validated["tx_lockout_timeout_ms"] / 1000.0
 
         return web.json_response({
             "saved": sorted(validated),

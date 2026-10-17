@@ -118,6 +118,10 @@ flowchart LR
   serial/RS-232 (radio interface boxes) implementations. Releasing PTT sends
   an explicit STOP packet so remote clients stop playback immediately
   instead of waiting for a timeout.
+- **Soft half-duplex lockout** (`enable_tx_lockout`, off by default - see
+  "Preventing people from talking over each other" below): ignores a local
+  PTT press while another peer's audio on the active channel was received
+  within the last `tx_lockout_timeout_ms`.
 - **Automatic gain control** (`outpost/agc.py`, `enable_agc`, on by default):
   pure DSP (no model, no extra dependency) that normalizes captured mic
   volume toward a target RMS level, with gradual/bounded gain changes (no
@@ -191,6 +195,37 @@ settings editor without a restart (see "Web UI" above).
 - Not a DSP setting, but also relevant: push-to-talk itself is a big win in
   noisy environments versus open-mic/VOX, since nothing is transmitted
   (or even captured) outside of a deliberate PTT press.
+
+## Preventing people from talking over each other
+
+`enable_tx_lockout` (off by default) makes a client ignore its own new PTT
+press while another peer's audio on the active channel was received within
+the last `tx_lockout_timeout_ms` (default 500ms) - the receiving peer's STOP
+packet clears this immediately, instead of waiting for the timeout to
+expire. This mirrors the discipline of a real half-duplex radio net (only
+one transmitter at a time) rather than a conference-call-style mix of
+simultaneous speakers - deliberately so: this project's audio pipeline has
+one shared Opus decoder and a single speaker playback queue per client, with
+no per-sender jitter buffering or PCM mixing, so two people's audio arriving
+at once wouldn't blend into an intelligible conference call - it would
+garble the shared decoder state and interleave choppily in the speaker
+queue. On a bandwidth-constrained mesh radio link, letting multiple people
+transmit simultaneously would also multiply airtime/bandwidth cost by the
+number of simultaneous talkers.
+
+This is a **best-effort, local-only** lockout, not a true collision-free
+arbiter - there is no central authority in a P2P mesh, so two peers keying
+up within one network round-trip of each other can still both get through.
+Live-toggleable from the web UI's settings editor without a restart.
+
+A blocked PTT press also plays a short (~150ms) local busy tone through the
+same client's own speaker, so the person holding PTT gets immediate audible
+feedback that they weren't actually transmitting instead of silently talking
+to no one. This tone is never sent over the network - it's local feedback
+only. Because there's a single shared speaker output queue (see Design
+above), the tone is queued alongside whatever audio is currently playing, so
+it may briefly interrupt/overlay the other peer's ongoing transmission
+rather than play on a separate line like a phone's busy signal would.
 
 ## Network profiles: LAN / VPN vs. constrained mesh radio
 

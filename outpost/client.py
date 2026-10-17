@@ -3,8 +3,11 @@ the mesh transport for a configured set of channels."""
 from __future__ import annotations
 import asyncio
 import logging
+import math
 import random
 import time
+
+import numpy as np
 
 from .agc import AutomaticGainControl
 from .audio import MicCapture, SpeakerPlayback
@@ -21,6 +24,34 @@ from .webui import WebUI
 from zeroconf._exceptions import EventLoopBlocked
 
 log = logging.getLogger(__name__)
+
+# Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
+# not to be mistaken for an incoming transmission.
+_LOCKOUT_TONE_HZ = 480.0
+_LOCKOUT_TONE_MS = 150.0
+_LOCKOUT_TONE_AMPLITUDE = 8000
+
+
+def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duration_ms: float, amplitude: int) -> list[bytes]:
+    """Synthesizes a mono int16 PCM sine tone (with a short fade in/out to
+    avoid clicks), chunked into frame_size-sized frames matching what
+    SpeakerPlayback.play_frame expects."""
+    total_samples = int(sample_rate * duration_ms / 1000)
+    t = np.arange(total_samples)
+    tone = amplitude * np.sin(2 * math.pi * freq_hz * t / sample_rate)
+
+    fade_samples = min(total_samples // 4, int(sample_rate * 0.01))
+    if fade_samples > 0:
+        fade = np.linspace(0.0, 1.0, fade_samples)
+        tone[:fade_samples] *= fade
+        tone[-fade_samples:] *= fade[::-1]
+
+    pcm = tone.astype(np.int16)
+    pad = (-len(pcm)) % frame_size
+    if pad:
+        pcm = np.concatenate([pcm, np.zeros(pad, dtype=np.int16)])
+
+    return [pcm[i:i + frame_size].tobytes() for i in range(0, len(pcm), frame_size)]
 
 
 class OutpostClient:
@@ -122,10 +153,47 @@ class OutpostClient:
         # agc_enabled for the same pattern/rationale.
         self.enable_relay = config.enable_relay
 
+        # Soft half-duplex lockout (see OutpostConfig.enable_tx_lockout) -
+        # same always-construct/mutable-flag pattern as AGC/relay above.
+        self.enable_tx_lockout = config.enable_tx_lockout
+        self.tx_lockout_timeout_s = config.tx_lockout_timeout_ms / 1000.0
+        # channel_id -> monotonic time of the last AUDIO frame received from
+        # another peer on that channel - drives channel_busy() below.
+        self._channel_last_audio: dict[int, float] = {}
+        # Precomputed once - sample rate/frame size are fixed for the life
+        # of the client.
+        self._lockout_tone_frames = _make_tone_frames(
+            self.codec.frame_size, self.codec.sample_rate,
+            _LOCKOUT_TONE_HZ, _LOCKOUT_TONE_MS, _LOCKOUT_TONE_AMPLITUDE,
+        )
+
     # --- PTT control --------------------------------------------------
+
+    def channel_busy(self, channel_id: int | None = None) -> bool:
+        """True if another peer's audio on `channel_id` (default: active
+        channel) was received recently enough to still count as an ongoing
+        transmission. Best-effort only - see enable_tx_lockout."""
+        if channel_id is None:
+            channel_id = self.active_channel.id
+        last_audio = self._channel_last_audio.get(channel_id)
+        if last_audio is None:
+            return False
+        return (time.monotonic() - last_audio) < self.tx_lockout_timeout_s
+
+    def _play_lockout_tone(self) -> None:
+        """Local-only audible feedback that a PTT press was blocked - never
+        transmitted. Shares the speaker's single output queue with any audio
+        currently playing, so it may briefly interrupt/overlay whoever is
+        already talking rather than play on a separate line."""
+        for frame in self._lockout_tone_frames:
+            self.speaker.play_frame(frame)
 
     def set_ptt(self, pressed: bool) -> None:
         """Call from a PTTSource callback (may run on any thread)."""
+        if pressed and self.enable_tx_lockout and self.channel_busy(self.active_channel.id):
+            log.debug("PTT press ignored - channel busy (tx lockout)")
+            self._play_lockout_tone()
+            return
         self._ptt_active = pressed
         if not pressed:
             cipher = self.ciphers[self.active_channel.id]
@@ -312,6 +380,7 @@ class OutpostClient:
                 return
             self._last_seq_seen.pop(header.sender_id, None)
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+            self._channel_last_audio.pop(header.channel_id, None)
             return
         if header.ptype != TYPE_AUDIO:
             return
@@ -329,6 +398,7 @@ class OutpostClient:
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.
         self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+        self._channel_last_audio[header.channel_id] = time.monotonic()
 
         if last_seq is not None and header.seq == last_seq + 2:
             # Exactly one frame missing - try Opus in-band FEC to recover it

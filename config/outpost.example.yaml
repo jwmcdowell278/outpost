@@ -86,6 +86,17 @@ enable_squelch: false
 squelch_threshold_rms: 300   # raise for noisier environments, lower if quiet speech gets cut off
 squelch_hold_ms: 300         # how long the gate stays open after signal drops, to avoid clipping word endings
 
+# Soft half-duplex lockout: while enabled, a new local PTT press is ignored
+# if another peer's audio on the active channel was received within the last
+# tx_lockout_timeout_ms (cleared immediately once that peer releases PTT).
+# Best-effort only - there's no central arbiter in a P2P mesh, so two people
+# keying up within one network round-trip of each other can still both get
+# through. Off by default since it changes behavior (a held PTT press can
+# silently not transmit) - see README's "Preventing people from talking over
+# each other" section.
+enable_tx_lockout: false
+tx_lockout_timeout_ms: 500
+
 # Lightweight local web UI (view status, switch channels, web-based PTT) -
 # off by default. Requires the 'web' extra: pip install -e ".[web]".
 # Binds to loopback (127.0.0.1) by default; if you change web_ui_host to
