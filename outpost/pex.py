@@ -126,7 +126,7 @@ class PexGossip:
             return
 
         # The sender itself is a confirmed, authenticated peer.
-        self._transport.add_peer(f"peer-{header.sender_id}", Peer(host=addr[0], port=addr[1]))
+        self._transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
 
         for peer in unpack_peers(plaintext):
             self._transport.add_peer(f"gossip-{peer.host}:{peer.port}", peer)

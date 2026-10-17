@@ -55,15 +55,26 @@ def _all_local_ipv4s() -> list[str]:
     return ips
 
 
+def _subnet_prefix(ip: str) -> str:
+    return ".".join(ip.split(".")[:3])
+
+
+def _order_candidates(hosts: list[str], port: int) -> list[Peer]:
+    """Same-subnet ("shortest path" - likely a direct LAN hop) addresses
+    first, other addresses (e.g. only reachable via a VPN/routed hop) as
+    fallback - see MeshTransport.add_peer_group."""
+    local_prefixes = {_subnet_prefix(ip) for ip in _all_local_ipv4s()}
+    peers = [Peer(host=host, port=port) for host in hosts]
+    local_first = [p for p in peers if _subnet_prefix(p.host) in local_prefixes]
+    others = [p for p in peers if _subnet_prefix(p.host) not in local_prefixes]
+    return local_first + others
+
+
 class _Listener(ServiceListener):
     def __init__(self, own_name, on_add, on_remove):
         self._own_name = own_name
         self._on_add = on_add
         self._on_remove = on_remove
-        # A discovered device can advertise several addresses (one per its
-        # own interfaces); track which peer-table keys came from which mDNS
-        # service name so remove_service can clean all of them up.
-        self._keys_by_name: dict[str, list[str]] = {}
 
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         self._handle(zc, type_, name)
@@ -74,8 +85,7 @@ class _Listener(ServiceListener):
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         if name == self._own_name:
             return
-        for key in self._keys_by_name.pop(name, []):
-            self._on_remove(key)
+        self._on_remove(name)
 
     def _handle(self, zc: Zeroconf, type_: str, name: str) -> None:
         if name == self._own_name:
@@ -83,13 +93,11 @@ class _Listener(ServiceListener):
         info = zc.get_service_info(type_, name)
         if info is None or not info.addresses:
             return
-        keys = []
-        for i, raw in enumerate(info.addresses):
-            host = socket.inet_ntoa(raw)
-            key = f"{name}#{i}"
-            keys.append(key)
-            self._on_add(key, Peer(host=host, port=info.port))
-        self._keys_by_name[name] = keys
+        # One mDNS service name is one device - its several advertised
+        # addresses (one per its own interfaces) are candidates for the
+        # SAME logical peer, not separate peers (see add_peer_group).
+        hosts = [socket.inet_ntoa(raw) for raw in info.addresses]
+        self._on_add(name, _order_candidates(hosts, info.port))
 
 
 class PeerDiscovery:

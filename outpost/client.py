@@ -61,7 +61,7 @@ class OutpostClient:
             PeerDiscovery(
                 config.sender_id,
                 config.listen_port,
-                on_peer_added=self.transport.add_peer,
+                on_peer_added=self.transport.add_peer_group,
                 on_peer_removed=self.transport.remove_peer,
             )
             if config.enable_mdns
@@ -89,6 +89,7 @@ class OutpostClient:
         # target only known members instead of every peer in the mesh.
         self._channel_members: dict[int, dict[int, tuple[Peer, float]]] = {}
         self._membership_ttl_s = max(config.channel_announce_interval_s * 2.5, 60.0)
+        self._peer_ttl_s = max(config.pex_interval_s * 2.5, 90.0)
 
         # (sender_id, ptype) -> highest seq already relayed - loop/duplicate
         # guard for relay mode (see `_relay_packet`). Bounded below since
@@ -179,6 +180,7 @@ class OutpostClient:
         whole mesh forever."""
         await asyncio.sleep(random.uniform(0, min(2.0, self.config.channel_announce_interval_s)))
         while True:
+            self.transport.prune_stale(self._peer_ttl_s)
             for channel_id, cipher in self.ciphers.items():
                 seq = self.transport.next_seq()
                 ciphertext = cipher.encrypt(self.config.sender_id, seq, b"")
@@ -250,7 +252,7 @@ class OutpostClient:
                 log.debug("dropping unauthenticated channel announce from %s", addr)
                 return
             peer = Peer(host=addr[0], port=addr[1])
-            self.transport.add_peer(f"peer-{header.sender_id}", peer)
+            self.transport.confirm_peer(header.sender_id, peer)
             self._channel_members.setdefault(header.channel_id, {})[header.sender_id] = (peer, time.monotonic())
             return
 
@@ -268,7 +270,7 @@ class OutpostClient:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
             self._last_seq_seen.pop(header.sender_id, None)
-            self.transport.add_peer(f"peer-{header.sender_id}", Peer(host=addr[0], port=addr[1]))
+            self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             return
         if header.ptype != TYPE_AUDIO:
             return
@@ -285,7 +287,7 @@ class OutpostClient:
 
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.
-        self.transport.add_peer(f"peer-{header.sender_id}", Peer(host=addr[0], port=addr[1]))
+        self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
 
         if last_seq is not None and header.seq == last_seq + 2:
             # Exactly one frame missing - try Opus in-band FEC to recover it

@@ -35,6 +35,26 @@ flowchart LR
   additionally flood-forward traffic between two peer groups that can't
   otherwise reach each other (e.g. a local mesh segment and a
   WireGuard-connected uplink) - see "Relay / bridge mode" below.
+- **Multi-homed peers** (`outpost/transport.py`'s `add_peer_group`): a
+  device reachable via more than one live path at once (e.g. both the local
+  subnet/mesh radio *and* a VPN tunnel to the same peer) is tracked as ONE
+  logical peer with several candidate addresses, not one entry per address
+  - so it counts once (status/web UI `peer_count`) and costs one send per
+  frame, not one per path. The same-subnet ("shortest path") candidate is
+  preferred; if sending to it fails at the socket level (e.g. that
+  interface/tunnel just went down), the transport automatically falls back
+  to the next candidate address and keeps using it until that one also
+  fails. mDNS discovery (which sees all of a device's interfaces at once)
+  produces these grouped candidates directly; PEX-gossiped and raw mDNS
+  entries otherwise carry no sender identity, so `transport.confirm_peer()`
+  additionally ties a peer to its real `sender_id` the moment ANY of its
+  candidate addresses is seen in actually-authenticated (decrypted) traffic
+  - at that point its whole candidate group (e.g. mDNS's LAN+VPN pair) is
+  adopted under that confirmed identity and the old, identity-less entry is
+  retired, so the grouping survives even once we've learned who the peer
+  really is. This identity link is only ever established by a real
+  decrypt - an mDNS/gossip source can group addresses together as a hint,
+  but can never claim a `sender_id` on its own.
 - **Peer discovery - two complementary mechanisms**:
   - **mDNS/DNS-SD** (`outpost/discovery.py`, `zeroconf`): zero-config, and
     advertises every active local interface's address (not just the default-
