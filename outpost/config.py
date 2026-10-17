@@ -67,12 +67,28 @@ class OutpostConfig:
     # size rather than just channel membership.
     channel_announce_interval_s: float = 60.0
 
+    # High-pass filter - strips DC offset and sub-audible rumble/handling
+    # noise below the cutoff before AGC/squelch see that energy. Pure DSP,
+    # on by default (cheap, rarely harms voice quality).
+    enable_highpass: bool = True
+    highpass_cutoff_hz: float = 100.0
+
     # Automatic gain control - normalizes captured mic volume toward a
     # target RMS level before encoding, so nodes with different mics/gain
     # settings don't need per-device manual volume tuning. On by default
     # since it's pure DSP (no extra dependency, no model to vet).
     enable_agc: bool = True
     agc_target_rms: float = 4000.0
+
+    # Noise gate (squelch) - mutes frames whose RMS stays below
+    # squelch_threshold_rms for longer than squelch_hold_ms, so continuous
+    # background noise between words isn't transmitted. Off by default -
+    # needs the threshold calibrated to your mic/environment to avoid
+    # clipping quiet speech; see README's "Improving audio in noisy
+    # environments" section.
+    enable_squelch: bool = False
+    squelch_threshold_rms: float = 300.0
+    squelch_hold_ms: float = 300.0
 
     # Optional path to an ONNX speech-enhancement model (see
     # outpost/noise_suppression.py's OnnxNoiseSuppressor) - requires the
@@ -140,6 +156,13 @@ def _validate_optional_str(v):
     return v or None
 
 
+def _validate_nonnegative_float(v):
+    v = float(v)
+    if v < 0:
+        raise ValueError("must not be negative")
+    return v
+
+
 # Fields the web UI's settings editor is allowed to change, each mapped to
 # (validator, applies_live). applies_live=True means OutpostClient can adopt
 # the new value on the running process immediately; everything else only
@@ -164,6 +187,11 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "agc_target_rms": (_validate_positive_float, True),
     "noise_suppressor_model_path": (_validate_optional_str, False),
     "enable_relay": (_validate_bool, True),
+    "enable_highpass": (_validate_bool, True),
+    "highpass_cutoff_hz": (_validate_positive_float, True),
+    "enable_squelch": (_validate_bool, True),
+    "squelch_threshold_rms": (_validate_nonnegative_float, True),
+    "squelch_hold_ms": (_validate_nonnegative_float, True),
 }
 
 

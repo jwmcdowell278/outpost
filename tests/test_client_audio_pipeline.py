@@ -88,6 +88,55 @@ async def _tx_loop_runs_agc_before_noise_suppressor():
     assert order[1] == "noise_suppressor"
 
 
+def test_highpass_enabled_by_default_and_squelch_disabled_by_default():
+    client = OutpostClient(_make_config(), "ops")
+    assert client.highpass_enabled is True
+    assert client.squelch_enabled is False
+
+
+def test_tx_loop_runs_highpass_and_squelch_before_agc():
+    asyncio.run(_tx_loop_runs_highpass_and_squelch_before_agc())
+
+
+async def _tx_loop_runs_highpass_and_squelch_before_agc():
+    config = _make_config(enable_squelch=True)
+    order: list[str] = []
+
+    class _TaggedProcessor:
+        def __init__(self, tag: str):
+            self.tag = tag
+
+        def process(self, pcm_bytes: bytes) -> bytes:
+            order.append(self.tag)
+            return pcm_bytes
+
+    client = OutpostClient(
+        config, "ops",
+        noise_suppressor=_TaggedProcessor("noise_suppressor"),
+        agc=_TaggedProcessor("agc"),
+        highpass=_TaggedProcessor("highpass"),
+        squelch=_TaggedProcessor("squelch"),
+    )
+    await client.transport.start(config.listen_port)
+    client._ptt_active = True
+
+    silence = b"\x00" * (client.codec.frame_size * 2)
+    client.mic.read_frame = lambda timeout=None: silence
+
+    try:
+        tx_task = asyncio.create_task(client._tx_loop())
+        await asyncio.sleep(0.1)
+    finally:
+        tx_task.cancel()
+        client.transport.stop()
+
+    assert len(order) > 0
+    assert order[0] == "highpass"
+    assert order[1] == "squelch"
+    assert order[2] == "agc"
+    assert order[3] == "noise_suppressor"
+
+
 def test_client_builds_onnx_suppressor_from_config_model_path(tmp_path):
     import onnx
     from onnx import helper, TensorProto

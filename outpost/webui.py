@@ -153,7 +153,7 @@ async function refresh() {
   try {
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'} · ${s.noise_suppressor}`;
+      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'} · ${s.noise_suppressor}`;
 
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
@@ -313,6 +313,9 @@ class WebUI:
             "agc_enabled": c.agc_enabled,
             "agc_target_rms": c.agc.target_rms,
             "relay_enabled": c.enable_relay,
+            "highpass_enabled": c.highpass_enabled,
+            "squelch_enabled": c.squelch_enabled,
+            "squelch_threshold_rms": c.squelch.threshold_rms,
             "noise_suppressor": type(c.noise_suppressor).__name__,
             "peer_count": len(c.transport.peers),
             "peers": c.transport.peer_details(),
@@ -383,6 +386,16 @@ class WebUI:
             self.client.agc.target_rms = validated["agc_target_rms"]
         if "enable_relay" in validated:
             self.client.enable_relay = validated["enable_relay"]
+        if "enable_highpass" in validated:
+            self.client.highpass_enabled = validated["enable_highpass"]
+        if "highpass_cutoff_hz" in validated:
+            self.client.highpass.set_cutoff(validated["highpass_cutoff_hz"])
+        if "enable_squelch" in validated:
+            self.client.squelch_enabled = validated["enable_squelch"]
+        if "squelch_threshold_rms" in validated:
+            self.client.squelch.threshold_rms = validated["squelch_threshold_rms"]
+        if "squelch_hold_ms" in validated:
+            self.client.squelch.hold_frames = max(1, round(validated["squelch_hold_ms"] / self.client.config.frame_ms))
 
         return web.json_response({
             "saved": sorted(validated),

@@ -70,6 +70,22 @@ channel_announce_interval_s: 60
 enable_agc: true
 agc_target_rms: 4000   # out of the int16 range (+/-32767); raise for a louder target level
 
+# High-pass filter: strips DC offset and sub-audible rumble/handling noise
+# below the cutoff frequency, before AGC/squelch see that energy. Pure DSP,
+# on by default - rarely hurts voice quality since human speech sits well
+# above typical cutoffs.
+enable_highpass: true
+highpass_cutoff_hz: 100   # Hz; raise toward 150-200 for heavy handling/wind noise
+
+# Noise gate (squelch): mutes frames whose RMS stays below the threshold for
+# longer than the hold time, so continuous background noise (wind, engine,
+# chatter) between words isn't transmitted. Off by default - calibrate
+# squelch_threshold_rms to sit between your room noise floor and your
+# quietest real speech before enabling, or quiet speech may get clipped.
+enable_squelch: false
+squelch_threshold_rms: 300   # raise for noisier environments, lower if quiet speech gets cut off
+squelch_hold_ms: 300         # how long the gate stays open after signal drops, to avoid clipping word endings
+
 # Optional path to a real ONNX speech-enhancement model (requires the 'nn'
 # extra - pip install -e ".[nn]"). No model is bundled - pick/vet your own,
 # e.g. a model matching the "streaming" export pattern (one audio input,

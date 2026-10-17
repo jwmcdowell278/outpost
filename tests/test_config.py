@@ -69,6 +69,11 @@ def test_editable_config_values_excludes_secrets_and_identity():
     assert "sender_id" not in values
     assert "channels" not in values
     assert "web_ui_token" not in values
+    assert "enable_highpass" in values
+    assert "highpass_cutoff_hz" in values
+    assert "enable_squelch" in values
+    assert "squelch_threshold_rms" in values
+    assert "squelch_hold_ms" in values
 
 
 @pytest.mark.parametrize("field,bad_value", [
@@ -76,11 +81,22 @@ def test_editable_config_values_excludes_secrets_and_identity():
     ("listen_port", 70000),
     ("pex_interval_s", 0),
     ("enable_agc", "yes"),
+    ("highpass_cutoff_hz", -1),
+    ("squelch_threshold_rms", -1),
+    ("squelch_hold_ms", -1),
 ])
 def test_editable_field_validators_reject_bad_values(field, bad_value):
     validator, _live = EDITABLE_FIELDS[field]
     with pytest.raises(ValueError):
         validator(bad_value)
+
+
+def test_squelch_threshold_and_hold_accept_zero():
+    # Zero is a valid (if degenerate) value - "always open" gate / no hold.
+    threshold_validator, _ = EDITABLE_FIELDS["squelch_threshold_rms"]
+    hold_validator, _ = EDITABLE_FIELDS["squelch_hold_ms"]
+    assert threshold_validator(0) == 0.0
+    assert hold_validator(0) == 0.0
 
 
 def test_save_config_fields_updates_only_given_keys(tmp_path):

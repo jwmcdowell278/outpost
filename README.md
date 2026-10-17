@@ -10,7 +10,9 @@ clients, and real push-to-talk hardware (USB HID, GPIO, serial/RS-232).
 flowchart LR
     Mic[Microphone] --> Capture[MicCapture\nPCM 16kHz mono]
     PTT[PTT source\nkeyboard/HID/GPIO/serial] -- gates --> Capture
-    Capture --> AGC[AGC\nauto gain normalization]
+    Capture --> HPF[High-pass filter\nDC/rumble removal]
+    HPF --> Squelch[Squelch\nnoise gate, off by default]
+    Squelch --> AGC[AGC\nauto gain normalization]
     AGC --> NoiseSuppress[Noise suppressor\npassthrough by default]
     NoiseSuppress --> Codec[Opus encoder\nconfigurable bitrate/frame + FEC]
     Codec --> Crypto[XSalsa20-Poly1305\nper-channel key]
@@ -123,6 +125,22 @@ flowchart LR
   audible "pumping") and a silence gate so it doesn't amplify background
   noise during gaps in speech. This is what lets a mesh of nodes with
   different mics/gain levels work without per-device manual volume tuning.
+- **High-pass filter and squelch** (`outpost/dsp.py`): two more pure-DSP
+  stages in the tx path, applied before AGC - see "Improving audio in noisy
+  environments" below for when/how to use them.
+  - `HighPassFilter` (`enable_highpass`, on by default) is a one-pole
+    RC-style high-pass that strips DC offset and sub-audible rumble/handling
+    noise below `highpass_cutoff_hz` (default 100Hz) before AGC/squelch see
+    that energy. Safe to leave on - human speech sits well above typical
+    cutoffs, so it rarely affects voice quality.
+  - `Squelch` (`enable_squelch`, off by default) is a hold-time noise gate:
+    it mutes frames whose RMS stays below `squelch_threshold_rms` for longer
+    than `squelch_hold_ms`, so continuous background noise (wind, engine,
+    chatter) between words isn't transmitted - the hold time keeps the gate
+    open briefly after the signal drops so trailing syllables aren't
+    clipped. Off by default because the threshold needs calibrating to your
+    mic/environment (too high clips quiet speech, too low doesn't gate
+    anything).
 - **Noise suppression hook** (`outpost/noise_suppression.py`): a
   `NoiseSuppressor` abstraction (same pattern as `PTTSource` - a narrow
   interface, injected via `OutpostClient(..., noise_suppressor=...)` rather
@@ -176,6 +194,35 @@ flowchart LR
   editor) before pointing `web_ui_host` at anything reachable by others,
   since the control endpoints are otherwise unauthenticated - the status/
   HTML/config responses never include channel or mesh keys regardless.
+
+## Improving audio in noisy environments
+
+Three pure-DSP stages run in the tx path before encoding, in this order:
+high-pass filter -> squelch -> AGC -> noise suppressor (see Design above).
+All four are configurable in `config/outpost.yaml` and, except for the noise
+suppressor's model path, all live-toggleable from the web UI's settings
+editor without a restart (see "Web UI" above).
+
+- **Already on by default**: `enable_agc` (volume normalization) and
+  `enable_highpass` (removes DC offset/rumble below `highpass_cutoff_hz`,
+  default 100Hz) - both cheap and safe to leave on for any deployment.
+- **Worth enabling for a specifically noisy environment**:
+  `enable_squelch` - mutes continuous background noise (wind, engine,
+  crowd chatter) during pauses within a held PTT transmission, instead of
+  transmitting it at a normalized volume like AGC alone would. Calibrate
+  `squelch_threshold_rms` to sit above your room/vehicle noise floor but
+  below your quietest real speech (start around 300-500 and adjust while
+  watching for either continuous background hiss getting through, or the
+  start/end of words getting clipped); raise `squelch_hold_ms` (default
+  300ms) if word endings are being cut off.
+- **For a real noisy environment where DSP tuning isn't enough**: set
+  `noise_suppressor_model_path` to a real ONNX speech-enhancement model
+  (see "Noise suppression hook" above) - this is the one stage that needs
+  a restart to change, since it requires the `nn` extra and loads a model
+  file at startup.
+- Not a DSP setting, but also relevant: push-to-talk itself is a big win in
+  noisy environments versus open-mic/VOX, since nothing is transmitted
+  (or even captured) outside of a deliberate PTT press.
 
 ## Network profiles: LAN / VPN vs. constrained mesh radio
 

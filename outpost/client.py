@@ -11,6 +11,7 @@ from .audio import MicCapture, SpeakerPlayback
 from .codec import OpusCodec
 from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
+from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, OnnxNoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
 from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
@@ -29,6 +30,8 @@ class OutpostClient:
         active_channel_name: str,
         noise_suppressor: NoiseSuppressor | None = None,
         agc: AutomaticGainControl | None = None,
+        highpass: HighPassFilter | None = None,
+        squelch: Squelch | None = None,
         config_path: str | None = None,
     ):
         self.config = config
@@ -55,6 +58,19 @@ class OutpostClient:
             frame_ms=config.frame_ms,
             inband_fec=config.inband_fec,
         )
+
+        # High-pass filter and squelch - same always-construct/separate-flag
+        # pattern as AGC above, so the web UI can toggle/retune them live.
+        self.highpass = highpass if highpass is not None else HighPassFilter(
+            cutoff_hz=config.highpass_cutoff_hz, sample_rate=self.codec.sample_rate
+        )
+        self.highpass_enabled = config.enable_highpass
+        self.squelch = squelch if squelch is not None else Squelch(
+            threshold_rms=config.squelch_threshold_rms,
+            hold_frames=max(1, round(config.squelch_hold_ms / config.frame_ms)),
+        )
+        self.squelch_enabled = config.enable_squelch
+
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
         self.mic = MicCapture(self.codec.sample_rate, self.codec.frame_size)
@@ -188,6 +204,10 @@ class OutpostClient:
             frame = await loop.run_in_executor(None, self.mic.read_frame)
             if not self._ptt_active:
                 continue
+            if self.highpass_enabled:
+                frame = self.highpass.process(frame)
+            if self.squelch_enabled:
+                frame = self.squelch.process(frame)
             if self.agc_enabled:
                 frame = self.agc.process(frame)
             frame = self.noise_suppressor.process(frame)
