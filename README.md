@@ -474,7 +474,14 @@ container:
   committed into an image layer.
 - **Audio devices**: mount `/dev/snd` (`--device /dev/snd`) so `sounddevice`/
   PortAudio can reach the host's mic/speaker (via ALSA); add the container's
-  user to the host's `audio` group if you hit permission errors.
+  user to the host's `audio` group if you hit permission errors. **This only
+  works on a real Linux host** - Docker Desktop on macOS/Windows runs
+  containers inside a VM with no host audio (or GPIO/USB/serial) devices to
+  pass through, so `--device /dev/snd` / the `devices:` entries in
+  `docker-compose.yml` will fail there with "no such file or directory".
+  They're commented out by default in `docker-compose.yml` for exactly this
+  reason - only uncomment them when deploying to Linux (e.g. the Raspberry
+  Pi this is actually meant to run on).
 - **Hardware PTT**: mount whichever device the chosen `--ptt` source needs -
   `/dev/gpiomem` for `gpio`, `/dev/ttyUSB0`(or similar) for `serial`,
   `/dev/bus/usb` for `hid`. `--ptt keyboard` is **not practical in a
