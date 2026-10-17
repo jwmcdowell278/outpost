@@ -5,9 +5,10 @@ wiring - shape resolution, float<->int16 conversion, and recurrent-state
 passing - works correctly end to end)."""
 from __future__ import annotations
 import numpy as np
-import onnx
-from onnx import helper, TensorProto
 import pytest
+
+onnx = pytest.importorskip("onnx")  # no prebuilt wheel on some platforms (e.g. armv7l); building from source needs CMake>=3.26
+from onnx import helper, TensorProto
 
 from outpost import noise_suppression as ns_module
 from outpost.noise_suppression import OnnxNoiseSuppressor
