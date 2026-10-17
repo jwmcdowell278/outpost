@@ -46,11 +46,14 @@ class OpusCodec:
                 # some extra bitrate, hence tied to the configured loss rate.
                 self._encoder.inband_fec = True
                 self._encoder.packet_loss_perc = expected_packet_loss_perc
-        except opuslib.OpusError:
-            # Some ctypes/libopus builds (observed on arm64 Macs) can't marshal
-            # the variadic opus_encoder_ctl() call used for this - audio still
+        except (opuslib.OpusError, TypeError):
+            # Some ctypes/libopus builds can't marshal the variadic
+            # opus_encoder_ctl() call used for this - audio still
             # encodes/decodes fine, it just uses libopus's own defaults
-            # instead of our explicit low-throughput/FEC targets.
+            # instead of our explicit low-throughput/FEC targets. Observed as
+            # OpusError on some arm64 Mac builds, and as a TypeError from
+            # opuslib's own ctypes wrapper (missing positional arg) on some
+            # armv7l builds - same underlying platform limitation either way.
             log.warning(
                 "Opus encoder does not support ctl configuration on this platform; "
                 "falling back to library defaults (bitrate, FEC)."

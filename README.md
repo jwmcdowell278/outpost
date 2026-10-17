@@ -340,18 +340,21 @@ pytest tests/ -v
    to get a local status/control page at `http://127.0.0.1:8765` - see "Web
    UI" above.
 
-## Known platform issue: Opus bitrate control on some arm64 builds
+## Known platform issue: Opus bitrate/FEC control on some ARM builds
 
 On some arm64 (Apple Silicon) Python builds, `ctypes` fails to correctly
 marshal **variadic** C calls (this affects any variadic libc call, not just
 Opus - e.g. `libc.printf` with a variadic int argument silently receives the
 wrong value on the affected build tested here). `opus_encoder_ctl` is
-variadic, so setting an explicit encoder bitrate can fail with
-`OpusError: invalid argument` on affected systems. `outpost/codec.py` catches
-this and falls back to libopus's own default bitrate (audio still works,
-there is just no explicit low-throughput cap on `OpusEncoder.bitrate` on
-these systems). No action needed, but worth knowing about if profiling
-throughput and the achieved bitrate doesn't match `DEFAULT_BITRATE`.
+variadic, so setting an explicit encoder bitrate/FEC can fail -
+`OpusError: invalid argument` on affected arm64 builds, or a bare
+`TypeError: ...missing 1 required positional argument: 'value'` from
+opuslib's own ctypes wrapper on some armv7l (32-bit Raspberry Pi) builds.
+`outpost/codec.py` catches both and falls back to libopus's own default
+bitrate/FEC settings (audio still works, there is just no explicit
+low-throughput cap or FEC tuning applied on these systems). No action
+needed, but worth knowing about if profiling throughput and the achieved
+bitrate doesn't match `DEFAULT_BITRATE`.
 
 ## Roadmap / next increments
 
