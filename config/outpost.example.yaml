@@ -88,6 +88,14 @@ enable_web_ui: false
 # web_ui_port: 8765
 # web_ui_token: some-shared-secret
 
+# Relay/bridge mode: blind-floods AUDIO/STOP/CHANNEL_ANNOUNCE packets to
+# every other known peer, keyed only on the cleartext header - no channel
+# key needed. Only set this on a node meant to bridge two otherwise-
+# unreachable peer groups (e.g. a local batman-adv mesh segment and a
+# WireGuard-connected HQ/uplink segment) - see README's "Relay / bridge
+# mode" section. Off by default; most nodes are plain clients.
+enable_relay: false
+
 # Only needed to seed PEX on a link mDNS can't reach (VPN/mesh radio) - a
 # single reachable peer is enough for the rest to be learned via gossip.
 peers: []

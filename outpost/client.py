@@ -13,7 +13,7 @@ from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
 from .noise_suppression import NoiseSuppressor, OnnxNoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
-from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE
+from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
 from .transport import MeshTransport
 from .config import OutpostConfig, Peer
 from .webui import WebUI
@@ -89,6 +89,12 @@ class OutpostClient:
         # target only known members instead of every peer in the mesh.
         self._channel_members: dict[int, dict[int, tuple[Peer, float]]] = {}
         self._membership_ttl_s = max(config.channel_announce_interval_s * 2.5, 60.0)
+
+        # (sender_id, ptype) -> highest seq already relayed - loop/duplicate
+        # guard for relay mode (see `_relay_packet`). Bounded below since
+        # sender_id here is an unauthenticated cleartext field an attacker
+        # could vary freely to grow this table.
+        self._relay_seen: dict[tuple[int, int], int] = {}
 
     # --- PTT control --------------------------------------------------
 
@@ -192,7 +198,37 @@ class OutpostClient:
 
     # --- receive path -----------------------------------------------------
 
+    _RELAY_SEEN_MAX = 4096
+
+    def _relay_packet(self, header, ciphertext: bytes, addr) -> None:
+        """Blind flood-forward for AUDIO/STOP/CHANNEL_ANNOUNCE packets to
+        every other known peer, keyed only on the cleartext header - no
+        channel key needed, so a relay node can bridge two otherwise-
+        unreachable peer groups (e.g. a local batman-adv mesh segment and a
+        WireGuard-connected HQ/uplink segment) without ever being able to
+        decrypt the traffic it forwards. Deliberately does NOT forward PEX:
+        gossiped peer addresses from one side are typically unroutable from
+        the other, so each side should discover its own peers independently
+        and only use this relay node itself as a bootstrap `peers:` entry.
+        """
+        if header.sender_id == self.config.sender_id:
+            return  # never re-forward our own traffic
+        dedup_key = (header.sender_id, header.ptype)
+        last_fwd = self._relay_seen.get(dedup_key)
+        if last_fwd is not None and header.seq <= last_fwd:
+            return  # already forwarded this or an older/duplicate packet
+        if len(self._relay_seen) > self._RELAY_SEEN_MAX:
+            self._relay_seen.clear()  # safety valve - sender_id is spoofable, don't grow unbounded
+        self._relay_seen[dedup_key] = header.seq
+
+        targets = [p for p in self.transport.peers if (p.host, p.port) != (addr[0], addr[1])]
+        if targets:
+            self.transport.forward(encode_packet(header, ciphertext), targets)
+
     def _on_packet(self, header, ciphertext: bytes, addr) -> None:
+        if self.config.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
+            self._relay_packet(header, ciphertext, addr)
+
         if header.ptype == TYPE_PEX:
             if self.pex:
                 self.pex.handle_incoming(header, ciphertext, addr)

@@ -90,6 +90,15 @@ class OutpostConfig:
     web_ui_port: int = 8765
     web_ui_token: str | None = None
 
+    # Relay/bridge mode: blind-floods AUDIO/STOP/CHANNEL_ANNOUNCE packets to
+    # every other known peer, keyed only on the cleartext header (no channel
+    # key needed) - lets a multi-homed node (e.g. local batman-adv mesh +
+    # WireGuard uplink to HQ/other relays) bridge two otherwise-unreachable
+    # peer groups without ever being able to decrypt their traffic. See
+    # outpost/client.py's `_relay_packet` and the README's "Relay/bridge
+    # mode" section. Off by default - most nodes are plain clients.
+    enable_relay: bool = False
+
     def channel_by_name(self, name: str) -> Channel:
         for ch in self.channels.values():
             if ch.name == name:
@@ -157,6 +166,7 @@ def load_config(path: str) -> OutpostConfig:
         enable_agc=raw.get("enable_agc", True),
         agc_target_rms=raw.get("agc_target_rms", 4000.0),
         noise_suppressor_model_path=raw.get("noise_suppressor_model_path"),
+        enable_relay=raw.get("enable_relay", False),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
         web_ui_port=raw.get("web_ui_port", 8765),

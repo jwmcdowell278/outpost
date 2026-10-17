@@ -27,11 +27,14 @@ flowchart LR
 
 - **Transport**: plain UDP, peer-to-peer. Every client sends its audio to
   every known peer; a failed send to one unreachable peer doesn't block
-  delivery to the rest. No server, no multi-hop relaying of our own - we
-  ride on whatever unicast routing the underlying network already provides
-  (normal IP routing on LAN/VPN, or the mesh radio firmware's own routing),
-  so this works unmodified over LAN, VPN tunnels/mesh, and IP-capable mesh
-  radio links.
+  delivery to the rest. No central server - we ride on whatever unicast
+  routing the underlying network already provides (normal IP routing on
+  LAN/VPN, or the mesh radio firmware's own routing), so this works
+  unmodified over LAN, VPN tunnels/mesh, and IP-capable mesh radio links. An
+  optional opt-in **relay/bridge mode** (`enable_relay`) lets a node
+  additionally flood-forward traffic between two peer groups that can't
+  otherwise reach each other (e.g. a local mesh segment and a
+  WireGuard-connected uplink) - see "Relay / bridge mode" below.
 - **Peer discovery - two complementary mechanisms**:
   - **mDNS/DNS-SD** (`outpost/discovery.py`, `zeroconf`): zero-config, and
     advertises every active local interface's address (not just the default-
@@ -162,6 +165,80 @@ practical at all; tune `bitrate`/`frame_ms`/`max_packet_bytes` down and keep
 concurrent-channel usage sparse, and treat per-hop latency/jitter as
 significantly higher than LAN/VPN.
 
+## Relay / bridge mode
+
+By default every node only reaches peers it can address directly over IP.
+`enable_relay: true` turns a node into a **blind flood-forwarder**: on
+receipt of any `AUDIO`/`STOP`/`CHANNEL_ANNOUNCE` packet, it re-sends the
+packet (byte-for-byte, original sender/sequence header untouched) to every
+*other* peer it knows about. This works purely off the packet's cleartext
+header (`outpost/protocol.py`'s 15-byte header carries `channel_id`,
+`sender_id`, `seq` in the clear) - **a relay never needs any channel key or
+the mesh key to do its job**, so a relay/bridge device can be deployed and
+operated without trusting it with any traffic's actual content.
+
+Typical use: a device with interfaces on two otherwise-disconnected
+segments (e.g. a local radio/batman-adv mesh **and** a WireGuard tunnel to
+HQ or another relay) is configured with `enable_relay: true` and at least
+one `peers:` bootstrap entry reachable on each side. Every other device on
+either side only needs ONE `peers:` entry pointing at the relay - normal PEX
+gossip then has each side learn the *rest of its own* segment, while the
+relay bridges `AUDIO`/`STOP`/`CHANNEL_ANNOUNCE` traffic across.
+
+Design notes/trade-offs:
+- **Loop/duplicate prevention**: a relay tracks the highest sequence number
+  it has forwarded per `(sender_id, ptype)` pair and drops anything at or
+  below that, so a packet that loops back through multiple relays (or
+  arrives twice) is forwarded at most once.
+- **PEX is deliberately NOT relayed.** Gossiped peer addresses learned on
+  one side are usually unroutable from the other (different subnet/overlay),
+  so blindly forwarding PEX across the bridge would teach nodes about
+  addresses they can't reach. Each side should discover its own peers
+  independently via its own PEX/mDNS, using the relay purely as a bootstrap
+  `peers:` entry - not as a source of cross-segment address gossip.
+- **Not channel-aware**: a relay floods every `AUDIO`/`STOP`/
+  `CHANNEL_ANNOUNCE` packet to every known peer regardless of channel
+  membership (the same "flood to everyone known" fallback the rest of the
+  mesh already uses before channel-scoped targeting kicks in - see Design
+  above), since determining real membership would require holding every
+  channel's key. Fine for small/medium deployments (tens of nodes); a large
+  deployment relying heavily on relaying may want multiple channel-scoped
+  relays instead of one that bridges everything.
+- **Unauthenticated by design**: since a relay works off the cleartext
+  header only, `sender_id`/`seq` here are not authenticated at the relay -
+  this is fine for its purpose (worst case is a wasted forward; the
+  eventual receiver still independently authenticates/decrypts before
+  trusting or playing anything), but don't rely on a relay for any kind of
+  access control.
+
+### Example deployment: batman-adv local mesh + WireGuard uplink (LTE)
+
+For a multi-team tactical/field deployment (voice + general network
+connectivity across local mesh radios plus an LTE backhaul to HQ), Outpost's
+relay mode is meant to sit on top of, not replace, two mature pieces of
+infrastructure - **neither requires any Outpost code changes**, since both
+present themselves to Linux as ordinary network interfaces:
+
+- **batman-adv** for the local mesh: each field device runs batman-adv
+  across its local mesh radio (WiFi ad-hoc/HaLow, etc.), producing a normal
+  `bat0` interface. Outpost just binds to `0.0.0.0` as usual - set
+  `enable_mdns: true` if the mesh radio's driver actually forwards multicast
+  (batman-adv itself supports broadcast/multicast; the underlying radio
+  hardware/driver might not - verify in the field), otherwise rely on PEX
+  plus static `peers:` entries within the segment.
+- **WireGuard** for the LTE uplink/bridge to HQ (or to other relay nodes):
+  a WireGuard tunnel gives a stable, NAT-traversing, encrypted point-to-point
+  (or hub-and-spoke) link over consumer LTE, presenting as a `wg0` interface.
+  Only the device(s) acting as the bridge need `enable_relay: true` and a
+  WireGuard interface; plain field units don't need WireGuard at all.
+- A device bridging both (local mesh relay with an LTE uplink) simply has
+  both interfaces up with normal OS routing between them, `enable_relay:
+  true`, and a `peers:` entry for at least one already-reachable device on
+  each side. Outpost's single UDP socket (bound to `0.0.0.0`) already
+  receives from and sends out whichever interface the OS routing table
+  picks for a given peer's address - no per-interface Outpost
+  configuration is needed beyond the relay flag and bootstrap peers.
+
 ## Scaling to large meshes (hundreds to thousands of nodes)
 
 This is a pure peer-to-peer design with no relay/server, so some costs are
@@ -183,12 +260,14 @@ remaining hard limits worth knowing about:
   multicast storms) - set `enable_mdns: false` and rely on PEX plus a couple
   of static bootstrap peers for meshes beyond roughly a hundred devices.
 - **A single channel with very many simultaneous members is still
-  fundamentally expensive**: with no relay, delivering one transmission to
-  N channel members costs N sends from the talker, every frame. Channel
-  scoping avoids paying that cost for every *other* channel, but it cannot
-  avoid it for a channel that itself has hundreds/thousands of concurrent
-  members - that would need a relay/supernode architecture, which this
-  project does not currently have.
+  fundamentally expensive**: delivering one transmission to N channel
+  members costs N sends from the talker, every frame (relay mode bridges
+  otherwise-unreachable peer groups, but it still blind-floods rather than
+  reducing this fan-out). Channel scoping avoids paying that cost for every
+  *other* channel, but it cannot avoid it for a channel that itself has
+  hundreds/thousands of concurrent members - that would need a
+  channel-aware supernode architecture, which this project does not
+  currently have.
 
 ## Status
 
@@ -281,9 +360,15 @@ throughput and the achieved bitrate doesn't match `DEFAULT_BITRATE`.
   window would handle network jitter/reordering better, which matters more
   on higher-latency mesh radio/VPN hops than on a LAN.
 - **NAT traversal**: for internet-scale deployment across NATs without a
-  VPN/mesh overlay, add STUN/hole-punching or fall back to a relay - today's
-  PEX gossip assumes peers are mutually reachable by UDP (true on LAN, VPN
-  overlays, and mesh radio, but not across arbitrary NATs).
+  VPN/mesh overlay or an Outpost relay node (see "Relay / bridge mode"
+  above), add STUN/hole-punching - today's PEX gossip still assumes peers
+  within a segment are mutually reachable by UDP (true on LAN, VPN overlays,
+  and mesh radio, but not across arbitrary NATs without a relay/bridge).
+- **Channel-aware relaying**: today's relay mode (see above) blind-floods
+  regardless of channel membership; a relay that also held relevant channel
+  keys could filter forwarding to only actual members, cutting cross-segment
+  bandwidth for large deployments with many channels. Deliberately not done
+  by default, since it would require trusting the relay with channel keys.
 - **Multi-channel simultaneous receive**: currently a client only plays
   audio for its one active channel; could support monitoring multiple
   channels at once with per-channel volume/mute.

@@ -124,3 +124,17 @@ class MeshTransport:
                 # everyone else.
                 log.debug("send to %s:%d failed: %s", peer.host, peer.port, exc)
 
+    def forward(self, packet: bytes, targets: list[Peer]) -> None:
+        """Resend an already-encoded packet verbatim (header untouched, so
+        the original sender_id/seq a receiver needs for decryption/replay
+        checks is preserved) - used by relay-enabled nodes to bridge two
+        otherwise-unreachable peer groups without re-originating the packet
+        under their own identity. See client.py's `_relay_packet`."""
+        if self._transport is None:
+            raise RuntimeError("transport not started")
+        for peer in targets:
+            try:
+                self._transport.sendto(packet, (peer.host, peer.port))
+            except OSError as exc:
+                log.debug("relay forward to %s:%d failed: %s", peer.host, peer.port, exc)
+
