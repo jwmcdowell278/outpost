@@ -12,7 +12,7 @@ from .codec import OpusCodec
 from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
 from .dsp import HighPassFilter, Squelch
-from .noise_suppression import NoiseSuppressor, OnnxNoiseSuppressor, PassthroughSuppressor
+from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
 from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
 from .transport import MeshTransport
@@ -41,11 +41,7 @@ class OutpostClient:
         # construct OutpostConfig directly rather than via load_config.
         self.config_path = config_path
         self.active_channel = config.channel_by_name(active_channel_name)
-        self.noise_suppressor = noise_suppressor or (
-            OnnxNoiseSuppressor(config.noise_suppressor_model_path)
-            if config.noise_suppressor_model_path
-            else PassthroughSuppressor()
-        )
+        self.noise_suppressor = noise_suppressor or PassthroughSuppressor()
         # Always construct the AGC object (cheap, pure DSP) and gate its use
         # with a separate mutable flag, rather than leaving self.agc None
         # when disabled - this lets the web UI toggle AGC on/off live

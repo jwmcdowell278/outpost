@@ -13,8 +13,7 @@ flowchart LR
     Capture --> HPF[High-pass filter\nDC/rumble removal]
     HPF --> Squelch[Squelch\nnoise gate, off by default]
     Squelch --> AGC[AGC\nauto gain normalization]
-    AGC --> NoiseSuppress[Noise suppressor\npassthrough by default]
-    NoiseSuppress --> Codec[Opus encoder\nconfigurable bitrate/frame + FEC]
+    AGC --> Codec[Opus encoder\nconfigurable bitrate/frame + FEC]
     Codec --> Crypto[XSalsa20-Poly1305\nper-channel key]
     Crypto --> Wire[UDP packet\nheader + ciphertext]
     Wire -- mesh: send to every known peer --> Net((Network:\nLAN / VPN / radio mesh))
@@ -141,37 +140,12 @@ flowchart LR
     clipped. Off by default because the threshold needs calibrating to your
     mic/environment (too high clips quiet speech, too low doesn't gate
     anything).
-- **Noise suppression hook** (`outpost/noise_suppression.py`): a
-  `NoiseSuppressor` abstraction (same pattern as `PTTSource` - a narrow
-  interface, injected via `OutpostClient(..., noise_suppressor=...)` rather
-  than hardcoded) runs each captured PCM frame through it right before Opus
-  encoding. Ships with a no-op `PassthroughSuppressor` default, plus a real
-  `OnnxNoiseSuppressor` backend that runs a user-supplied ONNX
-  speech-enhancement model via `onnxruntime`. No model is bundled -
-  picking/vetting a specific pretrained model (e.g. DTLN, Silero) is a
-  decision for whoever deploys this, not something to fetch automatically.
-  `OnnxNoiseSuppressor` doesn't hardcode any one model's tensor names:
-  it introspects the model's declared inputs/outputs at load time, treats
-  the first input/output as the audio frame (float32, `[-1, 1]`, same
-  convention most of these models export), and pairs any remaining
-  inputs/outputs positionally as recurrent state tensors carried forward
-  call-to-call (zero-initialized on first use) - this matches the common
-  "streaming" export pattern used by lightweight real-time models. To use
-  one: install the `nn` extra (`pip install -e ".[nn]"`), set
-  `noise_suppressor_model_path` in your config to the `.onnx` file, and
-  make sure your chosen model's audio tensor shape is compatible with the
-  configured frame size (a fixed per-call block size in the model requires
-  matching your capture frame length to it). The project's venv runs Python
-  3.11 (see Setup below) so `onnxruntime` installs and imports cleanly; a
-  classical DSP fallback (`webrtc-noise-gain`) does NOT currently install on
-  any Python version due to an upstream build-system bug in that package,
-  unrelated to the interpreter.
 - **Web UI** (`outpost/webui.py`, `enable_web_ui`, off by default): a
   lightweight local control panel - single static HTML page, no build step
   or frontend framework, served by a small `aiohttp` app - for viewing live
   status (active channel, PTT state, peer table with per-peer address/
-  candidate-count/last-seen age, confirmed channel members, AGC/relay/
-  noise-suppressor state) and controlling the client (switch active
+  candidate-count/last-seen age, confirmed channel members, AGC/relay
+  state) and controlling the client (switch active
   channel, press-and-hold web PTT, generate a channel/mesh key) from a
   browser instead of the CLI/hardware PTT alone. Also exposes a **settings
   editor** (`/api/config`) for the non-secret fields of `OutpostConfig`
@@ -198,10 +172,9 @@ flowchart LR
 ## Improving audio in noisy environments
 
 Three pure-DSP stages run in the tx path before encoding, in this order:
-high-pass filter -> squelch -> AGC -> noise suppressor (see Design above).
-All four are configurable in `config/outpost.yaml` and, except for the noise
-suppressor's model path, all live-toggleable from the web UI's settings
-editor without a restart (see "Web UI" above).
+high-pass filter -> squelch -> AGC (see Design above). All three are
+configurable in `config/outpost.yaml` and live-toggleable from the web UI's
+settings editor without a restart (see "Web UI" above).
 
 - **Already on by default**: `enable_agc` (volume normalization) and
   `enable_highpass` (removes DC offset/rumble below `highpass_cutoff_hz`,
@@ -215,11 +188,6 @@ editor without a restart (see "Web UI" above).
   watching for either continuous background hiss getting through, or the
   start/end of words getting clipped); raise `squelch_hold_ms` (default
   300ms) if word endings are being cut off.
-- **For a real noisy environment where DSP tuning isn't enough**: set
-  `noise_suppressor_model_path` to a real ONNX speech-enhancement model
-  (see "Noise suppression hook" above) - this is the one stage that needs
-  a restart to change, since it requires the `nn` extra and loads a model
-  file at startup.
 - Not a DSP setting, but also relevant: push-to-talk itself is a big win in
   noisy environments versus open-mic/VOX, since nothing is transmitted
   (or even captured) outside of a deliberate PTT press.
@@ -368,16 +336,14 @@ which is what lets `ctypes`-based libraries like `opuslib` find
 Homebrew-installed `libopus` automatically. A standalone/non-Homebrew
 interpreter's `ctypes.util.find_library("opus")` can return `None` even with
 `libopus` correctly installed via `brew install opus`. Avoid the very
-newest Python release too: some optional/experimental dependencies
-(`onnxruntime`, see "Noise suppression hook" above) take a while to publish
-wheels for it, forcing an unreliable from-source build.
+newest Python release too: some optional/experimental dependencies take a
+while to publish wheels for it, forcing an unreliable from-source build.
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'              # core deps + pytest
 pip install -e '.[hardware]'         # optional: only if using HID/GPIO/serial PTT
-pip install -e '.[nn]'               # optional: only to run a real NN NoiseSuppressor backend
 pip install -e '.[web]'              # optional: only to run the local web UI
 ```
 

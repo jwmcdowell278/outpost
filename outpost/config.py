@@ -90,12 +90,6 @@ class OutpostConfig:
     squelch_threshold_rms: float = 300.0
     squelch_hold_ms: float = 300.0
 
-    # Optional path to an ONNX speech-enhancement model (see
-    # outpost/noise_suppression.py's OnnxNoiseSuppressor) - requires the
-    # 'nn' extra (onnxruntime) installed. Left unset by default since no
-    # model is bundled; falls back to a no-op passthrough.
-    noise_suppressor_model_path: str | None = None
-
     # Lightweight local web UI (see outpost/webui.py) for viewing status and
     # switching channels/PTT without a hardware PTT source. Off by default -
     # requires the 'web' extra (aiohttp). Binds to loopback only by default;
@@ -149,13 +143,6 @@ def _validate_port(v):
     return v
 
 
-def _validate_optional_str(v):
-    if v is None:
-        return None
-    v = str(v).strip()
-    return v or None
-
-
 def _validate_nonnegative_float(v):
     v = float(v)
     if v < 0:
@@ -185,7 +172,6 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "channel_announce_interval_s": (_validate_positive_float, False),
     "enable_agc": (_validate_bool, True),
     "agc_target_rms": (_validate_positive_float, True),
-    "noise_suppressor_model_path": (_validate_optional_str, False),
     "enable_relay": (_validate_bool, True),
     "enable_highpass": (_validate_bool, True),
     "highpass_cutoff_hz": (_validate_positive_float, True),
@@ -278,7 +264,6 @@ def load_config(path: str) -> OutpostConfig:
         channel_announce_interval_s=raw.get("channel_announce_interval_s", 60.0),
         enable_agc=raw.get("enable_agc", True),
         agc_target_rms=raw.get("agc_target_rms", 4000.0),
-        noise_suppressor_model_path=raw.get("noise_suppressor_model_path"),
         enable_relay=raw.get("enable_relay", False),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),

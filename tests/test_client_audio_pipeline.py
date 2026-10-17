@@ -137,26 +137,6 @@ async def _tx_loop_runs_highpass_and_squelch_before_agc():
     assert order[3] == "noise_suppressor"
 
 
-def test_client_builds_onnx_suppressor_from_config_model_path(tmp_path):
-    import onnx
-    from onnx import helper, TensorProto
-
-    audio_in = helper.make_tensor_value_info("audio_in", TensorProto.FLOAT, [1, "frame_len"])
-    audio_out = helper.make_tensor_value_info("audio_out", TensorProto.FLOAT, [1, "frame_len"])
-    node = helper.make_node("Identity", ["audio_in"], ["audio_out"])
-    graph = helper.make_graph([node], "identity", [audio_in], [audio_out])
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
-    model.ir_version = 10
-    model_path = str(tmp_path / "identity.onnx")
-    onnx.save(model, model_path)
-
-    from outpost.noise_suppression import OnnxNoiseSuppressor
-    config = _make_config(noise_suppressor_model_path=model_path)
-    client = OutpostClient(config, "ops")
-
-    assert isinstance(client.noise_suppressor, OnnxNoiseSuppressor)
-
-
 def _make_config(**overrides) -> OutpostConfig:
     ops_key = generate_channel_key()
     defaults = dict(

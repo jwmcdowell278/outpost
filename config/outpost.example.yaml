@@ -86,14 +86,6 @@ enable_squelch: false
 squelch_threshold_rms: 300   # raise for noisier environments, lower if quiet speech gets cut off
 squelch_hold_ms: 300         # how long the gate stays open after signal drops, to avoid clipping word endings
 
-# Optional path to a real ONNX speech-enhancement model (requires the 'nn'
-# extra - pip install -e ".[nn]"). No model is bundled - pick/vet your own,
-# e.g. a model matching the "streaming" export pattern (one audio input,
-# zero or more recurrent-state tensors) described in
-# outpost/noise_suppression.py's OnnxNoiseSuppressor. Leave unset to use the
-# no-op passthrough.
-# noise_suppressor_model_path: /path/to/model.onnx
-
 # Lightweight local web UI (view status, switch channels, web-based PTT) -
 # off by default. Requires the 'web' extra: pip install -e ".[web]".
 # Binds to loopback (127.0.0.1) by default; if you change web_ui_host to

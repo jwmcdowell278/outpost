@@ -1,3 +1,2 @@
 pytest>=8.0
-onnx>=1.16          # only needed to build synthetic test models for OnnxNoiseSuppressor tests
 aiohttp>=3.9        # only needed for the web UI tests (see outpost/webui.py)

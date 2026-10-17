@@ -20,12 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hardware = ["hidapi>=0.14.0", "pyserial>=3.5", "gpiozero>=2.0"]
-# onnx (not onnxruntime) is only needed to build the tiny synthetic test
-# models in tests/test_onnx_noise_suppression.py - not used at runtime.
-dev = ["pytest>=8.0", "onnx>=1.16", "aiohttp>=3.9"]
-# Needed only to run a real neural-network NoiseSuppressor backend (e.g. an
-# ONNX speech-enhancement model) - no model is bundled, see README.
-nn = ["onnxruntime>=1.17"]
+dev = ["pytest>=8.0", "aiohttp>=3.9"]
 # Needed only for the optional local web UI (outpost/webui.py) - status view
 # and remote channel/PTT control. Not required otherwise.
 web = ["aiohttp>=3.9"]

@@ -153,7 +153,7 @@ async function refresh() {
   try {
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'} · ${s.noise_suppressor}`;
+      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'}`;
 
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
@@ -316,7 +316,6 @@ class WebUI:
             "highpass_enabled": c.highpass_enabled,
             "squelch_enabled": c.squelch_enabled,
             "squelch_threshold_rms": c.squelch.threshold_rms,
-            "noise_suppressor": type(c.noise_suppressor).__name__,
             "peer_count": len(c.transport.peers),
             "peers": c.transport.peer_details(),
             "channel_members": c.channel_member_details(),
