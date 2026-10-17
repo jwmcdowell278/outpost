@@ -1,0 +1,165 @@
+"""Channel and peer configuration loading (YAML)."""
+from __future__ import annotations
+import base64
+import os
+import secrets
+from dataclasses import dataclass, field
+import yaml
+
+from .crypto import KEY_SIZE
+
+DEFAULT_LISTEN_PORT = 5555
+
+
+@dataclass(frozen=True)
+class Channel:
+    id: int
+    name: str
+    key: bytes
+
+
+@dataclass(frozen=True)
+class Peer:
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
+class OutpostConfig:
+    sender_id: int
+    listen_port: int
+    mesh_key: bytes
+    channels: dict[int, Channel] = field(default_factory=dict)
+    peers: list[Peer] = field(default_factory=list)
+
+    # Network-profile knobs - tune down for constrained links (mesh radio),
+    # leave at defaults for LAN/VPN. See config/outpost.example.yaml.
+    bitrate: int = 16000
+    frame_ms: int = 20
+    max_packet_bytes: int = 1200
+    inband_fec: bool = True
+
+    # Discovery - mDNS only works where multicast is reachable (typically
+    # plain LAN, not most VPNs or mesh radio links); PEX gossip works over
+    # any unicast-reachable network, including VPN mesh and multi-hop radio
+    # mesh, as long as it is seeded with at least one reachable peer.
+    enable_mdns: bool = True
+    enable_pex: bool = True
+    pex_interval_s: float = 30.0
+
+    # Bounded random subset of known peers to gossip to each round, instead
+    # of every known peer - keeps PEX control-plane traffic per node roughly
+    # constant (not growing with total mesh size) while still reaching
+    # everyone within a few rounds via hop-by-hop propagation. Matters once a
+    # mesh has many hundreds-to-thousands of nodes.
+    pex_fanout: int = 8
+
+    # Ceiling on how many peer addresses a single node will track at once
+    # (static + mDNS + PEX-gossiped). The default suits small/medium
+    # deployments; raise it for a mesh with many hundreds/thousands of
+    # devices so legitimate peers/channel members aren't silently dropped.
+    max_peers: int = 128
+
+    # How often to flood a small per-channel presence beacon so senders can
+    # learn which known peers actually hold a given channel's key and target
+    # AUDIO/STOP sends only at them instead of every known peer - this is
+    # what keeps per-transmission bandwidth from scaling with total mesh
+    # size rather than just channel membership.
+    channel_announce_interval_s: float = 60.0
+
+    # Automatic gain control - normalizes captured mic volume toward a
+    # target RMS level before encoding, so nodes with different mics/gain
+    # settings don't need per-device manual volume tuning. On by default
+    # since it's pure DSP (no extra dependency, no model to vet).
+    enable_agc: bool = True
+    agc_target_rms: float = 4000.0
+
+    # Optional path to an ONNX speech-enhancement model (see
+    # outpost/noise_suppression.py's OnnxNoiseSuppressor) - requires the
+    # 'nn' extra (onnxruntime) installed. Left unset by default since no
+    # model is bundled; falls back to a no-op passthrough.
+    noise_suppressor_model_path: str | None = None
+
+    # Lightweight local web UI (see outpost/webui.py) for viewing status and
+    # switching channels/PTT without a hardware PTT source. Off by default -
+    # requires the 'web' extra (aiohttp). Binds to loopback only by default;
+    # set web_ui_token before binding anywhere else reachable by others, as
+    # the control endpoints are otherwise unauthenticated.
+    enable_web_ui: bool = False
+    web_ui_host: str = "127.0.0.1"
+    web_ui_port: int = 8765
+    web_ui_token: str | None = None
+
+    def channel_by_name(self, name: str) -> Channel:
+        for ch in self.channels.values():
+            if ch.name == name:
+                return ch
+        raise KeyError(f"unknown channel {name!r}")
+
+
+def _resolve_sender_id(config_path: str, raw: dict) -> int:
+    """Returns the configured sender_id, or auto-generates and persists one.
+
+    This lets the exact same outpost.yaml (mesh_key, channels, network
+    profile) be copied to every node unmodified - the one genuinely
+    per-node value is picked automatically on first run and cached next to
+    the config so it stays stable across restarts (sender_id feeds the
+    encryption nonce, so it must not change while old sequence numbers are
+    still in play - see crypto.py).
+    """
+    if "sender_id" in raw and raw["sender_id"] is not None:
+        return raw["sender_id"]
+
+    identity_path = config_path + ".identity"
+    if os.path.exists(identity_path):
+        with open(identity_path, "r") as f:
+            return int(f.read().strip())
+
+    sender_id = secrets.randbits(32)
+    with open(identity_path, "w") as f:
+        f.write(str(sender_id))
+    return sender_id
+
+
+def load_config(path: str) -> OutpostConfig:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    channels: dict[int, Channel] = {}
+    for entry in raw["channels"]:
+        key = base64.b64decode(entry["key"])
+        if len(key) != KEY_SIZE:
+            raise ValueError(f"channel {entry['name']!r} key must decode to {KEY_SIZE} bytes")
+        channels[entry["id"]] = Channel(id=entry["id"], name=entry["name"], key=key)
+
+    peers = [Peer(host=p["host"], port=p["port"]) for p in raw.get("peers", [])]
+
+    mesh_key = base64.b64decode(raw["mesh_key"])
+    if len(mesh_key) != KEY_SIZE:
+        raise ValueError(f"mesh_key must decode to {KEY_SIZE} bytes")
+
+    return OutpostConfig(
+        sender_id=_resolve_sender_id(path, raw),
+        listen_port=raw.get("listen_port", DEFAULT_LISTEN_PORT),
+        mesh_key=mesh_key,
+        channels=channels,
+        peers=peers,
+        bitrate=raw.get("bitrate", 16000),
+        frame_ms=raw.get("frame_ms", 20),
+        max_packet_bytes=raw.get("max_packet_bytes", 1200),
+        inband_fec=raw.get("inband_fec", True),
+        enable_mdns=raw.get("enable_mdns", True),
+        enable_pex=raw.get("enable_pex", True),
+        pex_interval_s=raw.get("pex_interval_s", 30.0),
+        pex_fanout=raw.get("pex_fanout", 8),
+        max_peers=raw.get("max_peers", 128),
+        channel_announce_interval_s=raw.get("channel_announce_interval_s", 60.0),
+        enable_agc=raw.get("enable_agc", True),
+        agc_target_rms=raw.get("agc_target_rms", 4000.0),
+        noise_suppressor_model_path=raw.get("noise_suppressor_model_path"),
+        enable_web_ui=raw.get("enable_web_ui", False),
+        web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
+        web_ui_port=raw.get("web_ui_port", 8765),
+        web_ui_token=raw.get("web_ui_token"),
+    )
+

@@ -1,0 +1,105 @@
+# Both of these are optional - omit them entirely (or leave sender_id unset)
+# and this exact file can be copied, unmodified, to every node in the mesh.
+# sender_id is auto-generated on first run and cached in a sibling
+# "<this file>.identity" file so it stays stable across restarts (don't copy
+# that file between nodes - it's what makes each node unique). Set sender_id
+# explicitly only if you need a deterministic/reproducible value.
+# sender_id: 1
+listen_port: 5555
+
+# Shared control-plane secret used to authenticate peer-exchange (PEX) gossip
+# messages (not used for audio - each channel has its own key for that).
+# Every node in the mesh must share this same key. Generate with:
+#   python scripts/gen_channel_key.py
+mesh_key: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+
+# Each channel is a separate pre-shared key - only peers holding a channel's
+# key can decrypt (and are treated as members of) that channel. Generate new
+# keys with: python scripts/gen_channel_key.py
+channels:
+  - id: 1
+    name: ops
+    key: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+  - id: 2
+    name: tac
+    key: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+
+# Peer discovery: two complementary mechanisms, both optional to disable.
+#  - mDNS (enable_mdns): zero-config, but only reaches multicast-capable LAN
+#    segments - most VPNs and multi-hop mesh radio links won't carry it.
+#    Also doesn't scale to large meshes (hundreds+ devices on one segment
+#    can cause multicast storms) - disable it and rely on PEX for big
+#    deployments.
+#  - PEX gossip (enable_pex): each node periodically shares its known peer
+#    list with the peers it already has. Works over ANY unicast-reachable
+#    network (LAN, VPN mesh, multi-hop radio mesh) - a new device only needs
+#    ONE reachable bootstrap peer below (or one found via mDNS) and it will
+#    learn the rest of the mesh automatically, and existing devices will
+#    learn about it in turn. No config changes needed on already-deployed
+#    devices.
+enable_mdns: true
+enable_pex: true
+pex_interval_s: 30
+
+# How many of its known peers each node gossips to per round (not how many
+# peers are IN the gossiped list - that is capped separately). Keeps PEX's
+# control-plane traffic roughly constant per node instead of growing with
+# total mesh size; full propagation still happens within a few rounds via
+# hop-by-hop spread. Raise only on a small mesh for faster convergence.
+pex_fanout: 8
+
+# Ceiling on how many peer addresses one node will track at once (static +
+# mDNS + gossiped). Raise this for a mesh with many hundreds/thousands of
+# devices so legitimate peers aren't silently dropped once the table fills.
+max_peers: 128
+
+# How often each node floods a tiny presence beacon per channel it holds the
+# key for. Peers use this to confirm real channel membership and then target
+# AUDIO/STOP sends only at confirmed members instead of every known peer -
+# this is what keeps per-transmission bandwidth from growing with total mesh
+# size instead of just the number of people actually on that channel. Lower
+# this for faster convergence on a new channel join; raise it on a
+# bandwidth-constrained mesh radio link.
+channel_announce_interval_s: 60
+
+# Automatic gain control: normalizes captured mic volume toward a target RMS
+# level before encoding, so nodes with different mics/input gain don't need
+# per-device manual volume tuning. Pure DSP (no model, no extra dependency).
+# Disable if you'd rather control input levels yourself (e.g. a fixed-gain
+# hardware mic preamp already tuned correctly).
+enable_agc: true
+agc_target_rms: 4000   # out of the int16 range (+/-32767); raise for a louder target level
+
+# Optional path to a real ONNX speech-enhancement model (requires the 'nn'
+# extra - pip install -e ".[nn]"). No model is bundled - pick/vet your own,
+# e.g. a model matching the "streaming" export pattern (one audio input,
+# zero or more recurrent-state tensors) described in
+# outpost/noise_suppression.py's OnnxNoiseSuppressor. Leave unset to use the
+# no-op passthrough.
+# noise_suppressor_model_path: /path/to/model.onnx
+
+# Lightweight local web UI (view status, switch channels, web-based PTT) -
+# off by default. Requires the 'web' extra: pip install -e ".[web]".
+# Binds to loopback (127.0.0.1) by default; if you change web_ui_host to
+# anything reachable by others, set web_ui_token too, since the control
+# endpoints are otherwise unauthenticated.
+enable_web_ui: false
+# web_ui_host: 127.0.0.1
+# web_ui_port: 8765
+# web_ui_token: some-shared-secret
+
+# Only needed to seed PEX on a link mDNS can't reach (VPN/mesh radio) - a
+# single reachable peer is enough for the rest to be learned via gossip.
+peers: []
+#  - host: 10.0.0.2
+#    port: 5555
+
+# Network-profile knobs - defaults suit a normal LAN/VPN. For constrained
+# mesh radio links (e.g. LoRa), lower bitrate/max_packet_bytes and raise
+# frame_ms to cut airtime per voice-second; inband_fec helps recover single
+# lost frames on lossy links at the cost of a bit more bandwidth.
+bitrate: 16000           # bits/sec, e.g. 6000-8000 for very constrained radio links
+frame_ms: 20             # 20-60ms; larger frames mean fewer, bigger packets
+max_packet_bytes: 1200   # lower for small-MTU radio links (e.g. 200 for LoRa)
+inband_fec: true
+

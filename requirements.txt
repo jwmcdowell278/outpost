@@ -1,0 +1,8 @@
+sounddevice>=0.4.6
+numpy>=1.26
+opuslib>=3.0.1
+PyNaCl>=1.5.0
+PyYAML>=6.0
+pynput>=1.7.6
+zeroconf>=0.132.0
+ifaddr>=0.2.0

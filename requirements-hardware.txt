@@ -1,0 +1,6 @@
+# Optional, platform-specific dependencies for real push-to-talk hardware.
+# Install only the ones relevant to your device, e.g.:
+#   pip install -r requirements-hardware.txt
+hidapi>=0.14.0      # USB HID PTT devices (footswitches, buttons) - needs system hidapi lib (brew/apt install hidapi)
+pyserial>=3.5       # Serial/RS-232 PTT interfaces (e.g. radio interface boxes)
+gpiozero>=2.0       # GPIO PTT buttons on embedded boards (Raspberry Pi etc.)
