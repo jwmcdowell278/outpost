@@ -55,18 +55,19 @@ _STYLE = """
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f4f5f7; --card: #fff; --text: #1a1a1a; --muted: #666;
-    --border: #e1e3e6; --accent: #2a7; --accent-text: #fff; --danger: #c33;
+    --bg: #f3f1e7; --card: #fff; --text: #1a1a1a; --muted: #716b59;
+    --border: #ddd6c0; --accent: #b9791f; --accent-text: #fff; --danger: #c33;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #15171a; --card: #1e2125; --text: #eee; --muted: #9aa0a6; --border: #2c3034; }
+    :root { --bg: #14160f; --card: #1c2016; --text: #ece6d8; --muted: #9aa083; --border: #363c2c; --accent: #e8a33d; --accent-text: #14160f; }
   }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 0 auto;
     padding: 1rem 1rem 3rem; background: var(--bg); color: var(--text);
   }
-  h1 { font-size: 1.35rem; margin: 1rem 0 0.5rem; }
+  h1 { font-size: 1.35rem; margin: 1rem 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; letter-spacing: 0.02em; }
+  h1 img.brand { height: 1.5em; width: 1.5em; }
   h2 { font-size: 0.95rem; margin: 0 0 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   nav.tabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0 0 0.2rem; }
   nav.tabs a {
@@ -101,6 +102,8 @@ _STYLE = """
   #saveMsg.ok { color: var(--accent); }
 </style>
 """
+
+_BRAND_H1 = '<h1><img class="brand" src="/favicon.svg" alt="">Outpost</h1>'
 
 # Shared token-input + fetch helper script, included on both pages since
 # each is a separate full page load (no client-side router).
@@ -143,7 +146,7 @@ _INDEX_HTML = f"""<!doctype html>
 {_STYLE}
 </head>
 <body>
-<h1>Outpost</h1>
+{_BRAND_H1}
 {_nav('status')}
 
 <div class="card">
@@ -254,7 +257,7 @@ _SETTINGS_HTML = f"""<!doctype html>
 {_STYLE}
 </head>
 <body>
-<h1>Outpost</h1>
+{_BRAND_H1}
 {_nav('settings')}
 
 <div class="card">
@@ -432,7 +435,7 @@ _CHANNELS_HTML = f"""<!doctype html>
 {_STYLE}
 </head>
 <body>
-<h1>Outpost</h1>
+{_BRAND_H1}
 {_nav('channels')}
 
 <div class="card">
@@ -568,7 +571,7 @@ _PEERS_HTML = f"""<!doctype html>
 {_STYLE}
 </head>
 <body>
-<h1>Outpost</h1>
+{_BRAND_H1}
 {_nav('peers')}
 
 <div class="card">
