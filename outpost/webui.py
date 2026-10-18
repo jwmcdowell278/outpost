@@ -36,6 +36,19 @@ from .config import (
 
 log = logging.getLogger(__name__)
 
+# Compass-star-over-mesh-nodes glyph (see branding/outpost-icon.svg for the
+# full badge this is a simplified, small-size-legible version of).
+_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="256" cy="256" r="248" fill="#181b12"/>
+  <circle cx="256" cy="256" r="234" fill="none" stroke="#4b5320" stroke-width="20"/>
+  <path d="M 256.0,150.0 L 272.0,222.0 L 330.4,184.0 L 294.0,242.4 L 362.0,256.0 L 294.0,269.6 L 330.4,328.0 L 272.0,290.0 L 256.0,362.0 L 240.0,290.0 L 181.6,328.0 L 218.0,269.6 L 150.0,256.0 L 218.0,242.4 L 181.6,184.0 L 240.0,222.0 Z"
+        fill="#e8a33d"/>
+  <circle cx="256" cy="256" r="26" fill="#181b12" stroke="#e8a33d" stroke-width="10"/>
+</svg>
+"""
+
+_FAVICON_LINK = '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
+
 # Shared <head> styling for both pages - kept as one constant so the two
 # pages can't visually drift apart.
 _STYLE = """
@@ -126,6 +139,7 @@ _INDEX_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outpost</title>
+{_FAVICON_LINK}
 {_STYLE}
 </head>
 <body>
@@ -236,6 +250,7 @@ _SETTINGS_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outpost · Settings</title>
+{_FAVICON_LINK}
 {_STYLE}
 </head>
 <body>
@@ -413,6 +428,7 @@ _CHANNELS_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outpost · Channels</title>
+{_FAVICON_LINK}
 {_STYLE}
 </head>
 <body>
@@ -548,6 +564,7 @@ _PEERS_HTML = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Outpost · Peers</title>
+{_FAVICON_LINK}
 {_STYLE}
 </head>
 <body>
@@ -662,6 +679,7 @@ class WebUI:
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([
             web.get("/", self._handle_index),
+            web.get("/favicon.svg", self._handle_favicon),
             web.get("/settings", self._handle_settings_page),
             web.get("/channels", self._handle_channels_page),
             web.get("/peers", self._handle_peers_page),
@@ -687,7 +705,7 @@ class WebUI:
     # Authorization header (a plain browser navigation can never send one) -
     # every api/* route stays behind the token below, so viewing live status
     # and every settings/channel/peer/PTT change still requires it.
-    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers"})
+    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/favicon.svg"})
 
     def _make_auth_middleware(self):
         # A plain closure, not a bound method - aiohttp's `middleware`
@@ -705,6 +723,9 @@ class WebUI:
 
     async def _handle_index(self, request) -> web.Response:
         return web.Response(text=_INDEX_HTML, content_type="text/html")
+
+    async def _handle_favicon(self, request) -> web.Response:
+        return web.Response(text=_FAVICON_SVG, content_type="image/svg+xml")
 
     async def _handle_settings_page(self, request) -> web.Response:
         return web.Response(text=_SETTINGS_HTML, content_type="text/html")

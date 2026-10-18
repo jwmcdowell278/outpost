@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#23281a"/>
+      <stop offset="100%" stop-color="#11130d"/>
+    </radialGradient>
+  </defs>
+
+  <!-- badge -->
+  <circle cx="256" cy="256" r="248" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="240" fill="none" stroke="#4b5320" stroke-width="10"/>
+  <circle cx="256" cy="256" r="252" fill="none" stroke="#e8a33d" stroke-width="3" opacity="0.8"/>
+
+  <!-- mesh network: hub-and-spoke + perimeter links around the compass -->
+  <g stroke="#e8a33d" stroke-width="3" opacity="0.55">
+    <line x1="256" y1="256" x2="256" y2="68"/>
+    <line x1="256" y1="256" x2="418.8" y2="162"/>
+    <line x1="256" y1="256" x2="418.8" y2="350"/>
+    <line x1="256" y1="256" x2="256" y2="444"/>
+    <line x1="256" y1="256" x2="93.2" y2="350"/>
+    <line x1="256" y1="256" x2="93.2" y2="162"/>
+    <polygon points="256,68 418.8,162 418.8,350 256,444 93.2,350 93.2,162" fill="none"/>
+  </g>
+
+  <!-- mesh nodes -->
+  <g fill="#e8a33d" stroke="#11130d" stroke-width="3">
+    <circle cx="256" cy="68" r="12"/>
+    <circle cx="418.8" cy="162" r="12"/>
+    <circle cx="418.8" cy="350" r="12"/>
+    <circle cx="256" cy="444" r="12"/>
+    <circle cx="93.2" cy="350" r="12"/>
+    <circle cx="93.2" cy="162" r="12"/>
+  </g>
+
+  <!-- compass rose / search-and-rescue star -->
+  <path d="M 256.0,170.0 L 269.0,224.6 L 316.8,195.2 L 287.4,243.0 L 342.0,256.0 L 287.4,269.0 L 316.8,316.8 L 269.0,287.4 L 256.0,342.0 L 243.0,287.4 L 195.2,316.8 L 224.6,269.0 L 170.0,256.0 L 224.6,243.0 L 195.2,195.2 L 243.0,224.6 Z"
+        fill="#e8a33d" stroke="#8a5a16" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- center hub / compass pivot -->
+  <circle cx="256" cy="256" r="22" fill="#11130d" stroke="#e8a33d" stroke-width="4"/>
+  <g stroke="#e8a33d" stroke-width="3">
+    <line x1="256" y1="238" x2="256" y2="246"/>
+    <line x1="256" y1="266" x2="256" y2="274"/>
+    <line x1="238" y1="256" x2="246" y2="256"/>
+    <line x1="266" y1="256" x2="274" y2="256"/>
+  </g>
+</svg>
