@@ -607,6 +607,40 @@ pytest tests/ -v
    Settings panel can also persist non-secret config changes straight back
    into that same `outpost.yaml`.
 
+## Logging
+
+By default, `scripts/run_client.py` only logs to the console: `INFO` level
+normally, or `DEBUG` with `-v/--verbose`. For diagnosing intermittent issues
+(dropped audio, a flaky peer, etc.) after the fact, it's useful to also
+archive logs to disk, since console scrollback is easily lost - especially
+on a headless/unattended device.
+
+Set `log_file` in the config (or pass `--log-file /path/to/outpost.log` to
+override it for a single run without editing the config) to enable this:
+
+```yaml
+log_file: /var/log/outpost/outpost.log
+log_max_bytes: 10000000   # 10MB per file (default)
+log_backup_count: 5       # keep 5 rolled-over files (default)
+```
+
+- The parent directory is created automatically if it doesn't exist.
+- Rotation is purely size-based: once the active file reaches
+  `log_max_bytes`, it's rolled over and a fresh one started; once
+  `log_backup_count` rolled-over files exist, the oldest is deleted - so
+  total disk usage stays bounded at roughly
+  `log_max_bytes * (log_backup_count + 1)` no matter how long the process
+  runs, rather than growing unboundedly like a plain append-only log file.
+- The file always captures full `DEBUG`-level detail regardless of
+  `--verbose`, since the whole point is to have enough detail to diagnose
+  an issue that wasn't anticipated at the time it happened - console output
+  is still governed by `--verbose` independently.
+- `log_file`/`log_max_bytes`/`log_backup_count` are deliberately **not**
+  editable from the web UI's Settings panel (unlike most other fields) -
+  letting a remote web UI user redirect log output to an arbitrary
+  filesystem path would be an arbitrary-file-write primitive. Set them in
+  the YAML config (or via `--log-file`) directly.
+
 ## Running with Docker
 
 A `Dockerfile` and `docker-compose.yml` are provided. The image installs the

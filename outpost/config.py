@@ -156,6 +156,21 @@ class OutpostConfig:
     enable_echo_guard: bool = False
     echo_guard_hold_ms: float = 500.0
 
+    # Rotating file logging, in addition to scripts/run_client.py's console
+    # output - off by default (None). Set log_file to also archive logs to
+    # disk for diagnosing intermittent issues after the fact (console
+    # scrollback is easily lost). Rotates purely by size: once a file
+    # reaches log_max_bytes it's rolled over and a fresh one started; once
+    # log_backup_count rolled-over files exist, the oldest is deleted - so
+    # total disk usage stays bounded at roughly
+    # log_max_bytes * (log_backup_count + 1) regardless of how long the
+    # process runs. Not exposed to the web UI's settings editor (unlike
+    # most other fields) since it's a filesystem path - letting a remote web
+    # UI user redirect it would be an arbitrary-file-write primitive.
+    log_file: str | None = None
+    log_max_bytes: int = 10_000_000
+    log_backup_count: int = 5
+
     def channel_by_name(self, name: str) -> Channel:
         for ch in self.channels.values():
             if ch.name == name:
@@ -470,6 +485,9 @@ def load_config(path: str) -> OutpostConfig:
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_echo_guard=raw.get("enable_echo_guard", False),
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
+        log_file=raw.get("log_file"),
+        log_max_bytes=raw.get("log_max_bytes", 10_000_000),
+        log_backup_count=raw.get("log_backup_count", 5),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
         web_ui_port=raw.get("web_ui_port", 8765),

@@ -132,6 +132,46 @@ def test_validate_alias_strips_whitespace_and_rejects_too_long():
         validator(123)
 
 
+def test_log_file_defaults_to_none_when_omitted(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+
+    config = load_config(str(config_path))
+
+    assert config.log_file is None
+    assert config.log_max_bytes == 10_000_000
+    assert config.log_backup_count == 5
+
+
+def test_log_file_settings_are_loaded_from_yaml(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(
+        config_path,
+        extra='log_file: "/var/log/outpost/outpost.log"\nlog_max_bytes: 500000\nlog_backup_count: 2\n',
+    )
+
+    config = load_config(str(config_path))
+
+    assert config.log_file == "/var/log/outpost/outpost.log"
+    assert config.log_max_bytes == 500000
+    assert config.log_backup_count == 2
+
+
+def test_log_file_settings_are_not_editable_via_web_ui():
+    # A filesystem path must never be editable through the web UI's config
+    # endpoint - that would be an arbitrary-file-write primitive for anyone
+    # holding (or guessing) web_ui_token.
+    assert "log_file" not in EDITABLE_FIELDS
+    assert "log_max_bytes" not in EDITABLE_FIELDS
+    assert "log_backup_count" not in EDITABLE_FIELDS
+
+    cfg = OutpostConfig(sender_id=1, listen_port=5555, mesh_key=generate_channel_key())
+    values = editable_config_values(cfg)
+    assert "log_file" not in values
+    assert "log_max_bytes" not in values
+    assert "log_backup_count" not in values
+
+
 def test_editable_config_values_excludes_secrets_and_identity():
     cfg = OutpostConfig(sender_id=1, listen_port=5555, mesh_key=generate_channel_key())
     values = editable_config_values(cfg)

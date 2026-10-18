@@ -16,10 +16,11 @@ import logging
 import os
 import signal
 import sys
+from logging.handlers import RotatingFileHandler
 
 import ifaddr
 
-from outpost.config import load_config
+from outpost.config import load_config, OutpostConfig
 from outpost.client import OutpostClient
 from outpost.ptt import PTTSource
 
@@ -74,14 +75,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpio-pin", type=int, default=None)
     parser.add_argument("--serial-port", default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--log-file", default=None,
+                        help="path to a size-rotated log file for diagnosing issues after the fact "
+                             "(overrides the config's log_file; omit both to log to console only)")
     return parser.parse_args()
+
+
+def configure_logging(verbose: bool, config: OutpostConfig, log_file_override: str | None) -> None:
+    """Console output is controlled by -v/--verbose as before. log_file (if
+    set, via config or --log-file) additionally archives full DEBUG-level
+    detail to a size-rotated file regardless of console verbosity, so
+    diagnosing an intermittent issue after the fact doesn't depend on having
+    had --verbose on at the time it happened."""
+    log_file = log_file_override if log_file_override is not None else config.log_file
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    # Only elevate the root logger itself to DEBUG when file logging is on
+    # (needed so DEBUG records reach the file handler at all - logger-level
+    # filtering happens before handler-level filtering) - otherwise behavior
+    # is unchanged from before this feature existed.
+    root.setLevel(logging.DEBUG if (verbose or log_file) else logging.INFO)
+    root.addHandler(console_handler)
+
+    if log_file:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=config.log_max_bytes, backupCount=config.log_backup_count,
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
 
 
 async def main() -> None:
     args = parse_args()
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
-
     config = load_config(args.config)
+    configure_logging(args.verbose, config, args.log_file)
     if args.channel is not None:
         channel_name = args.channel
     else:

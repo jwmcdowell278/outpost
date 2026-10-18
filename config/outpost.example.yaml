@@ -130,6 +130,20 @@ tx_lockout_timeout_ms: 500
 enable_echo_guard: false
 echo_guard_hold_ms: 500
 
+# Rotating file logging, in addition to scripts/run_client.py's console
+# output - off by default (unset). Set log_file to also archive logs to
+# disk for diagnosing intermittent issues after the fact (easy to lose
+# console scrollback on a long-running headless device). Rotates purely by
+# size: once a file reaches log_max_bytes it's rolled over and a fresh one
+# started, and once log_backup_count rolled-over files exist, the oldest is
+# deleted - total disk usage stays bounded at roughly
+# log_max_bytes * (log_backup_count + 1) however long the process runs.
+# Always captures full DEBUG-level detail regardless of --verbose. Can also
+# be set/overridden per-run with --log-file without editing this file.
+# log_file: /var/log/outpost/outpost.log
+# log_max_bytes: 10000000   # 10MB per file
+# log_backup_count: 5       # keep 5 rolled-over files (~60MB total at defaults)
+
 # Lightweight local web UI (view status, switch channels, web-based PTT) -
 # off by default. Requires the 'web' extra: pip install -e ".[web]".
 # Binds to loopback (127.0.0.1) by default; if you change web_ui_host to
