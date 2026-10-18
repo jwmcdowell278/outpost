@@ -7,6 +7,8 @@ import os
 import threading
 import time
 
+import ifaddr
+
 from .protocol import Header, TYPE_AUDIO, VERSION, encode_packet, decode_packet
 from .config import Peer
 
@@ -38,6 +40,28 @@ _SEQ_PERSIST_MARGIN = 256_000
 # would be wasteful. A larger value only costs a larger (but still bounded
 # by the margin above) resume gap after an unclean shutdown.
 _SEQ_PERSIST_EVERY = 1000
+
+# How long a cached snapshot of this host's own local addresses is trusted
+# before being recomputed - see MeshTransport._is_own_address. Interfaces
+# can come and go (e.g. a VPN tunnel), but checking this on every packet
+# would mean re-enumerating adapters ~50 times/sec during active audio.
+_OWN_ADDRESS_CACHE_TTL_S = 30.0
+
+
+def _local_addresses() -> set[str]:
+    """Every IP address (any family) currently assigned to a local
+    interface, plus loopback - used to recognize our own address in a
+    gossiped/discovered peer candidate. Best-effort: an enumeration failure
+    just means we temporarily can't self-filter, not a hard error."""
+    hosts = {"127.0.0.1", "::1", "0.0.0.0"}
+    try:
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                addr = ip.ip[0] if isinstance(ip.ip, tuple) else ip.ip
+                hosts.add(addr)
+    except OSError:
+        pass
+    return hosts
 
 
 class _MeshProtocol(asyncio.DatagramProtocol):
@@ -87,6 +111,9 @@ class MeshTransport:
         self._seq_persist_path = seq_persist_path
         self._seq_calls_since_persist = 0
         self._seq = self._load_seq_start(seq_persist_path)
+        self.listen_port: int | None = None
+        self._own_hosts: set[str] = set()
+        self._own_hosts_checked_at = 0.0
         self._lock = threading.Lock()
         self._peers: dict[str, Peer] = {f"static-{i}": p for i, p in enumerate(peers)}
         # Static (config-file) peers are a deliberate, operator-chosen
@@ -158,6 +185,9 @@ class MeshTransport:
         if not candidates:
             return
         primary = candidates[0]
+        if self._is_own_address(primary.host, primary.port):
+            log.debug("ignoring peer %s -> %s:%d: that's our own listening address", key, primary.host, primary.port)
+            return
         with self._lock:
             if key not in self._peers and any(p.host == primary.host and p.port == primary.port for p in self._peers.values()):
                 return  # already tracked under a different key - avoid duplicate fan-out
@@ -187,12 +217,21 @@ class MeshTransport:
         mDNS/gossip gets permanently tied to its real sender_id once any one
         of its addresses is cryptographically confirmed.
 
+        Refuses to confirm our own listening address under someone else's
+        sender_id - see _is_own_address for why (a relayed loop-back packet
+        would otherwise be trusted at face value and silently redirect that
+        real peer's outbound traffic to ourselves).
+
         If the donor was a static (config-file) entry, the new identity key
         is kept "static-" prefixed too, so confirming a static peer doesn't
         silently strip its exemption from prune_stale() - without this, the
         first authenticated packet from a static peer would demote it to a
         normal prunable entry, defeating the point of configuring it as a
         permanent rendezvous address."""
+        if self._is_own_address(peer.host, peer.port):
+            log.debug("ignoring confirm_peer for sender %d at %s:%d: that's our own listening address",
+                      sender_id, peer.host, peer.port)
+            return
         peer_key = f"peer-{sender_id}"
         static_key = f"static-{sender_id}"
         with self._lock:
@@ -258,11 +297,31 @@ class MeshTransport:
             log.info("peer removed: %s", key)
 
     async def start(self, listen_port: int) -> None:
+        self.listen_port = listen_port
         loop = asyncio.get_running_loop()
         self._transport, _ = await loop.create_datagram_endpoint(
             lambda: _MeshProtocol(self._on_packet),
             local_addr=("0.0.0.0", listen_port),
         )
+
+    def _is_own_address(self, host: str, port: int) -> bool:
+        """True if host:port is this node's own listening endpoint.
+
+        A peer-exchange gossip message naturally includes us (we're one of
+        OUR peers' peers), and would otherwise get added as a regular peer.
+        With relay mode on, that makes us bounce our own relayed packets
+        back to ourselves - mostly harmless for AUDIO (deduped by seq), but
+        TYPE_STOP has no such dedup, so a looped-back STOP would blindly
+        confirm_peer() a real peer's address as "ourselves", permanently
+        redirecting all further outbound traffic to that peer into a black
+        hole. Called on every authenticated packet (confirm_peer), so the
+        local address set is cached rather than re-enumerated each time."""
+        if self.listen_port is None or port != self.listen_port:
+            return False
+        if time.monotonic() - self._own_hosts_checked_at > _OWN_ADDRESS_CACHE_TTL_S:
+            self._own_hosts = _local_addresses()
+            self._own_hosts_checked_at = time.monotonic()
+        return host in self._own_hosts
 
     def stop(self) -> None:
         if self._transport:

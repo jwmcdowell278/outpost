@@ -453,6 +453,15 @@ Design notes/trade-offs:
   it has forwarded per `(sender_id, ptype)` pair and drops anything at or
   below that, so a packet that loops back through multiple relays (or
   arrives twice) is forwarded at most once.
+- **Never relay/confirm-peer our own address**: a PEX gossip message
+  naturally includes us (we're one of our gossip partner's own peers), so
+  `MeshTransport` refuses to add or confirm any peer address that matches
+  its own listening endpoint (`host:listen_port`, checked against this
+  host's local interface addresses). Without this, relay mode would bounce
+  our own forwarded packets back to ourselves - mostly harmless for AUDIO
+  (deduped above), but a looped-back `STOP` has no such dedup, so it would
+  otherwise be trusted at face value and silently overwrite a real peer's
+  address with our own, black-holing all further outbound traffic to them.
 - **PEX is deliberately NOT relayed.** Gossiped peer addresses learned on
   one side are usually unroutable from the other (different subnet/overlay),
   so blindly forwarding PEX across the bridge would teach nodes about
