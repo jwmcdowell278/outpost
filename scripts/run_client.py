@@ -74,7 +74,14 @@ async def main() -> None:
     ptt = build_ptt(args, client.set_ptt)
 
     await client.start()
-    ptt.start()
+    try:
+        ptt.start()
+    except Exception as exc:
+        # e.g. pynput's keyboard hook needs a display and fails on a
+        # headless box - don't take the whole client (and its web UI PTT
+        # button, which doesn't go through this PTTSource at all) down
+        # with it.
+        logging.warning("--ptt %s failed to start (%s); PTT only available via the web UI if enabled", args.ptt, exc)
     print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
           f"Hold the configured PTT to talk. Ctrl+C to quit.")
     if client.web_ui:
