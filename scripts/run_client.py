@@ -17,9 +17,29 @@ import os
 import signal
 import sys
 
+import ifaddr
+
 from outpost.config import load_config
 from outpost.client import OutpostClient
 from outpost.ptt import PTTSource
+
+
+def web_ui_urls(host: str, port: int) -> list[str]:
+    """Reachable URL(s) for the web UI. A wildcard bind address
+    (0.0.0.0/::) isn't itself a usable URL, so list every actual LAN
+    address instead - important on a headless box, where this printout may
+    be the only way to learn where to point a browser."""
+    if host not in ("0.0.0.0", "::"):
+        return [f"http://{host}:{port}"]
+    addrs = []
+    try:
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                if ip.is_IPv4 and ip.ip != "127.0.0.1":
+                    addrs.append(ip.ip)
+    except OSError:
+        pass
+    return [f"http://{addr}:{port}" for addr in addrs] or [f"http://<this-device-ip>:{port}"]
 
 
 def build_ptt(args, on_change) -> PTTSource:
@@ -85,7 +105,8 @@ async def main() -> None:
     print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
           f"Hold the configured PTT to talk. Ctrl+C to quit.")
     if client.web_ui:
-        print(f"Web UI: http://{config.web_ui_host}:{config.web_ui_port}")
+        for url in web_ui_urls(config.web_ui_host, config.web_ui_port):
+            print(f"Web UI: {url}")
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

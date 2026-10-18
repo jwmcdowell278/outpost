@@ -621,12 +621,22 @@ class WebUI:
             web.post("/api/restart", self._handle_restart),
         ])
 
+    # Static page shells carry no secrets and need to load without an
+    # Authorization header (a plain browser navigation can never send one) -
+    # every api/* route stays behind the token below, so viewing live status
+    # and every settings/channel/peer/PTT change still requires it.
+    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers"})
+
     def _make_auth_middleware(self):
         # A plain closure, not a bound method - aiohttp's `middleware`
         # decorator sets an attribute on the callable, which bound methods
         # don't support.
         async def auth_middleware(request, handler):
-            if self.token and request.headers.get("Authorization") != f"Bearer {self.token}":
+            if (
+                self.token
+                and not (request.method == "GET" and request.path in self._UNAUTHENTICATED_GET_PATHS)
+                and request.headers.get("Authorization") != f"Bearer {self.token}"
+            ):
                 raise web.HTTPUnauthorized(text="missing or invalid token")
             return await handler(request)
         return auth_middleware

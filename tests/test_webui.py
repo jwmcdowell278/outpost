@@ -115,6 +115,25 @@ async def _token_required_when_configured():
         assert authenticated.status == 200
 
 
+def test_pages_load_without_auth_but_api_still_requires_token():
+    asyncio.run(_pages_load_without_auth_but_api_still_requires_token())
+
+
+async def _pages_load_without_auth_but_api_still_requires_token():
+    # A plain browser navigation never sends a custom Authorization header,
+    # so the static page shells (which carry no secrets) must load even
+    # when a token is configured - only api/* needs it.
+    ui = WebUI(_make_client(), token="secret")
+    async with TestClient(TestServer(ui.app)) as tc:
+        for path in ("/", "/settings", "/channels", "/peers"):
+            resp = await tc.get(path)
+            assert resp.status == 200, path
+            assert "text/html" in resp.content_type
+
+        assert (await tc.get("/api/status")).status == 401
+        assert (await tc.post("/api/ptt", json={"pressed": True})).status == 401
+
+
 def test_generate_key_returns_fresh_base64_key():
     asyncio.run(_generate_key_returns_fresh_base64_key())
 

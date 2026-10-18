@@ -209,13 +209,57 @@ flowchart LR
   does **not** preserve comments/formatting from the original file.
   Requires the `web` extra (`pip install -e ".[web]"`) - importing
   `outpost.webui` never requires `aiohttp` unless the feature is actually
-  turned on. Binds to `127.0.0.1` by default; set `web_ui_token` (checked
-  as a bearer token on every request, including Channels/Peers/Settings/
-  restart) before pointing `web_ui_host` at anything reachable by others, since the
-  control endpoints are otherwise unauthenticated - the status/HTML/config
-  responses never include an existing channel's or mesh's key regardless
-  (only a freshly-created/rotated key is ever returned, and only once, to
-  the request that generated it).
+  turned on. Binds to `127.0.0.1` by default; set `web_ui_token` before
+  pointing `web_ui_host` at anything reachable by others. When a token is
+  set, every `/api/*` endpoint (status, PTT, Channels/Peers/Settings,
+  restart) requires it as a bearer token (`Authorization: Bearer <token>`)
+  - everything that reads live state or changes anything is gated. The four
+  page shells (`/`, `/settings`, `/channels`, `/peers`) load without it
+  regardless, since a plain browser navigation can never attach a custom
+  header and they carry no secrets themselves (the status/HTML/config
+  responses never include an existing channel's or mesh's key either way -
+  only a freshly-created/rotated key is ever returned, and only once, to
+  the request that generated it) - without the correct token entered in the
+  page's own Token field, the page loads but every status refresh/action
+  fails with 401.
+
+### Reaching the Web UI on a headless device (e.g. Raspberry Pi over WiFi)
+
+With no monitor attached, a user still reaches the web UI from their phone
+or laptop over WiFi, but two things need to be true first:
+
+1. **`web_ui_host` must not be left at its `127.0.0.1` default** - that only
+   accepts connections from the Pi itself. Set it to `0.0.0.0` (all
+   interfaces) in `outpost.yaml`, **and set `web_ui_token`** at the same
+   time - once it's reachable from the network, every `/api/*` call
+   (status, PTT, settings) is otherwise unauthenticated (see above).
+2. **They need an address to put in the browser.** `scripts/run_client.py`
+   prints one on startup (`web_ui_urls()` resolves `0.0.0.0` to the
+   machine's actual LAN addresses rather than the unusable literal
+   `0.0.0.0`), but on a headless box there's no screen to read that from
+   unless you're watching over SSH/serial/journal. Two practical options:
+   - If the Pi is itself the WiFi access point (e.g. a standard `hostapd`+
+     `dnsmasq` hotspot setup), it normally has a fixed, known gateway
+     address on that network (commonly `192.168.4.1`) - document that
+     address for your users, e.g. `http://192.168.4.1:8765`, so it never
+     depends on DHCP or name resolution.
+   - If the Pi instead joins an existing WiFi network, its address isn't
+     fixed/known in advance - Raspberry Pi OS ships `avahi-daemon` enabled
+     by default, which advertises the device as `<hostname>.local` (e.g.
+     `http://raspberrypi.local:8765`) with no Outpost-side configuration
+     needed. This works reliably from iOS/macOS (native Bonjour support);
+     Android's stock browser frequently can't resolve `.local` names, so
+     prefer the fixed-AP-IP approach above if Android clients are expected.
+
+**Letting anyone on the WiFi view status, but only trusted users change
+settings**: set `web_ui_token` and only hand the token out to the people who
+should be able to switch channels, hold web PTT, or edit Channels/Peers/
+Settings. Anyone connected to the WiFi can still load the page itself (the
+page shells carry no secrets), but without pasting the correct token into
+the page's own **Token** field, every status refresh and every action
+fails with `401 Unauthorized` - they see an empty/erroring UI, not live
+state or working controls. There's no concept of a read-only vs.
+full-control token today - knowing the token grants both.
 
 ## Improving audio in noisy environments
 
