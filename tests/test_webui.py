@@ -430,3 +430,35 @@ async def _channels_page_serves_html():
         assert resp.status == 200
         assert "text/html" in resp.content_type
 
+
+def test_restart_sets_the_clients_restart_event():
+    asyncio.run(_restart_sets_the_clients_restart_event())
+
+
+async def _restart_sets_the_clients_restart_event():
+    client = _make_client()
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        assert not client.restart_requested.is_set()
+        resp = await tc.post("/api/restart")
+        assert resp.status == 200
+        assert (await resp.json())["restarting"] is True
+    assert client.restart_requested.is_set()
+
+
+def test_restart_requires_auth_when_configured():
+    asyncio.run(_restart_requires_auth_when_configured())
+
+
+async def _restart_requires_auth_when_configured():
+    client = _make_client()
+    ui = WebUI(client, token="secret")
+    async with TestClient(TestServer(ui.app)) as tc:
+        unauthenticated = await tc.post("/api/restart")
+        assert unauthenticated.status == 401
+        assert not client.restart_requested.is_set()
+
+        authenticated = await tc.post("/api/restart", headers={"Authorization": "Bearer secret"})
+        assert authenticated.status == 200
+    assert client.restart_requested.is_set()
+

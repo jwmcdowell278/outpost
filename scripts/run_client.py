@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
+import sys
 
 from outpost.config import load_config
 from outpost.client import OutpostClient
@@ -84,10 +86,17 @@ async def main() -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     try:
-        await stop_event.wait()
+        await asyncio.wait(
+            [asyncio.create_task(stop_event.wait()), asyncio.create_task(client.restart_requested.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     finally:
         ptt.stop()
         await client.stop()
+
+    if client.restart_requested.is_set():
+        print("Restarting...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":

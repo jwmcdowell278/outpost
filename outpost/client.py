@@ -137,6 +137,13 @@ class OutpostClient:
         self._channel_announce_task: asyncio.Task | None = None
         self._last_seq_seen: dict[int, int] = {}
 
+        # Set by the web UI's Settings page "Restart" button - scripts/
+        # run_client.py's main loop waits on this alongside SIGINT/SIGTERM
+        # and, if it fires, cleanly stops and re-execs itself (same argv) so
+        # restart-required config changes take effect without the user
+        # needing shell access.
+        self.restart_requested = asyncio.Event()
+
         # channel_id -> {sender_id: (Peer, last_seen_monotonic)} - built from
         # authenticated channel-announce beacons, so AUDIO/STOP sends can
         # target only known members instead of every peer in the mesh.
@@ -205,6 +212,12 @@ class OutpostClient:
 
     def set_active_channel(self, name: str) -> None:
         self.active_channel = self.config.channel_by_name(name)
+
+    def request_restart(self) -> None:
+        """Signals scripts/run_client.py's main loop to cleanly stop and
+        re-exec the process - only the entry point has the original argv
+        needed to relaunch, so this just flips the flag it waits on."""
+        self.restart_requested.set()
 
     def add_channel(self, channel_id: int, name: str, key: bytes) -> Channel:
         """Wires a newly-created channel into the running process (web UI's

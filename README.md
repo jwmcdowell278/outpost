@@ -169,7 +169,15 @@ flowchart LR
   `scripts/run_client.py`'s normal usage), and `enable_agc`/`agc_target_rms`/
   `enable_relay` additionally apply immediately on the running client -
   every other field needs a client restart to take effect, which the UI
-  flags per-field. `sender_id`, `mesh_key`, `peers`, and the web UI's own
+  flags per-field. When a save needs a restart, a **Restart now** button
+  appears: it hits `/api/restart`, which flips `OutpostClient.
+  restart_requested` (an `asyncio.Event`); `scripts/run_client.py`'s main
+  loop waits on that event alongside SIGINT/SIGTERM and, when it fires,
+  cleanly stops the client and re-execs the exact same process (`os.execv`,
+  same argv) - no shell access or external process manager (systemd,
+  Docker's own restart policy) required, though either would also work
+  fine since re-exec preserves the PID and never actually exits.
+  `sender_id`, `mesh_key`, `peers`, and the web UI's own
   bind address/port/token are deliberately never editable from the web UI
   (identity/secrets need their own flow, and editing the web UI's own
   auth/bind settings through itself risks a self-lockout or accidental
@@ -178,8 +186,8 @@ flowchart LR
   Requires the `web` extra (`pip install -e ".[web]"`) - importing
   `outpost.webui` never requires `aiohttp` unless the feature is actually
   turned on. Binds to `127.0.0.1` by default; set `web_ui_token` (checked
-  as a bearer token on every request, including Channels/Settings) before
-  pointing `web_ui_host` at anything reachable by others, since the
+  as a bearer token on every request, including Channels/Settings/restart)
+  before pointing `web_ui_host` at anything reachable by others, since the
   control endpoints are otherwise unauthenticated - the status/HTML/config
   responses never include an existing channel's or mesh's key regardless
   (only a freshly-created/rotated key is ever returned, and only once, to

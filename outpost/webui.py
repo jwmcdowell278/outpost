@@ -239,6 +239,7 @@ _SETTINGS_HTML = f"""<!doctype html>
   <div id="settingsFields">loading...</div>
   <div class="row">
     <button id="saveSettings">Save</button>
+    <button id="restartBtn" type="button" style="display:none;">Restart now</button>
     <span id="saveMsg"></span>
   </div>
 </div>
@@ -305,10 +306,25 @@ document.getElementById('saveSettings').addEventListener('click', async () => {{
     msg.textContent = result.restart_required.length
       ? `saved - restart required for: ${{result.restart_required.join(', ')}}`
       : 'saved and applied';
+    document.getElementById('restartBtn').style.display = result.restart_required.length ? 'inline-block' : 'none';
   }} catch (e) {{
     msg.className = 'error';
     msg.textContent = e.message;
   }}
+}});
+
+document.getElementById('restartBtn').addEventListener('click', async () => {{
+  const msg = document.getElementById('saveMsg');
+  const btn = document.getElementById('restartBtn');
+  btn.disabled = true;
+  msg.className = ''; msg.textContent = 'restarting...';
+  try {{
+    await api('/api/restart', {{ method: 'POST' }});
+  }} catch (e) {{
+    // the process re-execs right after responding, so a dropped connection
+    // here is expected, not a real failure.
+  }}
+  setTimeout(() => location.reload(), 3000);
 }});
 
 document.getElementById('genkey').addEventListener('click', () => {{
@@ -490,6 +506,7 @@ class WebUI:
             web.post("/api/channels", self._handle_create_channel),
             web.post(r"/api/channels/{channel_id:\d+}/rename", self._handle_rename_channel),
             web.post(r"/api/channels/{channel_id:\d+}/rotate_key", self._handle_rotate_channel_key),
+            web.post("/api/restart", self._handle_restart),
         ])
 
     def _make_auth_middleware(self):
@@ -674,6 +691,14 @@ class WebUI:
             "applied_live": applied_live,
             "restart_required": restart_required,
         })
+
+    async def _handle_restart(self, request) -> web.Response:
+        # Responds before actually restarting - scripts/run_client.py's main
+        # loop is what performs the clean stop + re-exec, driven by this
+        # Event, and the HTTP response wouldn't be able to complete once
+        # that's underway anyway.
+        self.client.request_restart()
+        return web.json_response({"restarting": True})
 
     async def start(self) -> None:
         self._runner = web.AppRunner(self.app)
