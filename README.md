@@ -135,6 +135,16 @@ flowchart LR
   redundant data for the previous frame in each packet, so a single lost
   frame can usually be recovered from the next one received - important on
   lossy mesh radio links. Falls back to plain concealment for larger gaps.
+  Because the nonce-safety sequence counter is shared across every packet
+  type from a sender (AUDIO, START, STOP, CHANNEL_ANNOUNCE, PEX all draw
+  from one counter - see "Encryption" above), a sender that's idle between
+  transmissions still advances it via its own periodic control-plane
+  traffic - so the sequence gap seen on the very first AUDIO packet of a
+  new transmission reflects elapsed idle time, not necessarily lost audio.
+  Concealment is only synthesized for small gaps; a larger one is assumed
+  to be idle time and the real frame is just played as-is, so resuming
+  transmission after a pause doesn't flood playback with synthetic loss
+  concealment (`outpost/client.py`'s `_MAX_CONCEALED_FRAMES`).
 - **Push-to-talk** (`outpost/ptt/`): a small `PTTSource` abstraction with
   keyboard (dev/testing), USB HID, GPIO (Raspberry Pi/embedded), and
   serial/RS-232 (radio interface boxes) implementations. Releasing PTT sends

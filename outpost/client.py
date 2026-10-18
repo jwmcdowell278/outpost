@@ -459,6 +459,13 @@ class OutpostClient:
 
     _RELAY_SEEN_MAX = 4096
 
+    # Cap on how many synthetic loss-concealment frames a single seq gap can
+    # produce (see _on_packet's TYPE_AUDIO handling) - a real burst loss on a
+    # lossy link is at most a handful of frames; anything larger reflects
+    # non-audio traffic sharing the seq counter during an idle gap, not
+    # genuine loss, and must not flood playback with fake audio.
+    _MAX_CONCEALED_FRAMES = 10
+
     def _relay_packet(self, header, ciphertext: bytes, addr) -> None:
         """Blind flood-forward for AUDIO/STOP/CHANNEL_ANNOUNCE packets to
         every other known peer, keyed only on the cleartext header - no
@@ -547,7 +554,9 @@ class OutpostClient:
 
         last_seq = self._last_seq_seen.get(header.sender_id)
         if last_seq is not None and header.seq <= last_seq:
-            return  # stale/duplicate/out-of-order - drop rather than play audio backwards
+            log.debug("dropping stale/duplicate/out-of-order audio from sender %d (seq %d <= last %d)",
+                      header.sender_id, header.seq, last_seq)
+            return  # drop rather than play audio backwards
 
         try:
             opus_bytes = cipher.decrypt(header.sender_id, header.seq, ciphertext)
@@ -576,8 +585,23 @@ class OutpostClient:
             except Exception:
                 self._play_on_speaker(self.codec.decode_loss())
         elif last_seq is not None and header.seq > last_seq + 1:
-            for _ in range(header.seq - last_seq - 1):
-                self._play_on_speaker(self.codec.decode_loss())
+            missing = header.seq - last_seq - 1
+            # seq is one counter shared across every packet type from this
+            # sender (START/STOP/CHANNEL_ANNOUNCE/PEX too - see transport.py)
+            # so it never repeats a nonce, but it also means a gap here isn't
+            # purely lost AUDIO frames - a sender idle between transmissions
+            # still advances seq via its periodic channel-announce/PEX
+            # traffic, which would otherwise inflate `missing` with every
+            # minute of silence and flood playback with fake concealment
+            # right as real audio resumes. Only treat a small gap as genuine
+            # loss; a larger one almost certainly reflects elapsed idle time,
+            # not dropped frames, so just play the real frame as-is.
+            if missing <= self._MAX_CONCEALED_FRAMES:
+                for _ in range(missing):
+                    self._play_on_speaker(self.codec.decode_loss())
+            else:
+                log.debug("seq gap of %d from sender %d treated as idle time, not loss - skipping concealment",
+                          missing, header.sender_id)
 
         self._last_seq_seen[header.sender_id] = header.seq
         pcm = self.codec.decode(opus_bytes)
