@@ -83,6 +83,24 @@ def test_highpass_and_squelch_fields_are_loaded_from_yaml(tmp_path):
     assert config.squelch_hold_ms == 250
 
 
+def test_subnet_scan_fields_are_loaded_from_yaml(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(
+        config_path,
+        extra=(
+            "enable_subnet_scan: true\n"
+            "subnet_scan_interval_s: 45\n"
+            "subnet_scan_max_hosts: 256\n"
+        ),
+    )
+
+    config = load_config(str(config_path))
+
+    assert config.enable_subnet_scan is True
+    assert config.subnet_scan_interval_s == 45
+    assert config.subnet_scan_max_hosts == 256
+
+
 def test_editable_config_values_excludes_secrets_and_identity():
     cfg = OutpostConfig(sender_id=1, listen_port=5555, mesh_key=generate_channel_key())
     values = editable_config_values(cfg)

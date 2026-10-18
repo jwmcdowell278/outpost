@@ -12,6 +12,7 @@ responses never include channel or mesh keys.
 from __future__ import annotations
 import base64
 import logging
+from dataclasses import replace
 
 try:
     from aiohttp import web
@@ -657,6 +658,12 @@ class WebUI:
                 raise web.HTTPBadRequest(text=f"{name}: {exc}")
 
         save_config_fields(self.client.config_path, validated)
+        # OutpostConfig is frozen, and the fields below are kept live via
+        # separate mutable mirror attributes (self.client.agc_enabled etc.)
+        # rather than by mutating config in place - replace() keeps
+        # self.client.config itself (read by _handle_get_config) in sync so
+        # the Settings page doesn't show stale values on next load.
+        self.client.config = replace(self.client.config, **validated)
 
         applied_live = []
         restart_required = []

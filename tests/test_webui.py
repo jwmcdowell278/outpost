@@ -249,6 +249,27 @@ async def _set_config_persists_to_yaml_and_applies_live_fields(tmp_path):
     assert saved_raw["mesh_key"] == "x"  # pre-existing, untouched key preserved
 
 
+def test_get_config_reflects_values_saved_in_an_earlier_request(tmp_path):
+    asyncio.run(_get_config_reflects_values_saved_in_an_earlier_request(tmp_path))
+
+
+async def _get_config_reflects_values_saved_in_an_earlier_request(tmp_path):
+    """Regression test: OutpostConfig is frozen, so a save used to update
+    only client.agc_enabled (etc.) and the YAML file, never client.config
+    itself - leaving the Settings page's next GET /api/config showing the
+    pre-save value, which looked like the save hadn't taken effect."""
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\nbitrate: 16000\n")
+
+    client = _make_client(config_path=str(config_path))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        await tc.post("/api/config", json={"enable_agc": False, "bitrate": 8000})
+        body = await (await tc.get("/api/config")).json()
+        assert body["fields"]["enable_agc"]["value"] is False
+        assert body["fields"]["bitrate"]["value"] == 8000
+
+
 def _write_two_channel_config(config_path, ops_key, tac_key) -> None:
     import base64
     config_path.write_text(yaml.safe_dump({
