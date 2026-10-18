@@ -355,6 +355,7 @@ _CHANNELS_HTML = f"""<!doctype html>
   <div class="row">
     <input id="newName" type="text" size="16" placeholder="name">
     <input id="newKey" type="text" size="40" placeholder="key (base64, optional - leave blank to generate one)">
+    <button id="genNewKey" type="button">Generate key</button>
     <button id="createChannel">Create</button>
   </div>
   <div class="muted">Creating a channel takes effect immediately on this node - no restart needed. Copy the resulting key into every other peer's config that should be able to join it.</div>
@@ -427,6 +428,12 @@ document.getElementById('channelList').addEventListener('click', async (e) => {{
       msg.className = 'error'; msg.textContent = err.message;
     }}
   }}
+}});
+
+document.getElementById('genNewKey').addEventListener('click', () => {{
+  api('/api/generate_key', {{ method: 'POST' }})
+    .then(r => {{ document.getElementById('newKey').value = r.key; }})
+    .catch(e => {{ document.getElementById('channelsMsg').className = 'error'; document.getElementById('channelsMsg').textContent = e.message; }});
 }});
 
 document.getElementById('createChannel').addEventListener('click', async () => {{
