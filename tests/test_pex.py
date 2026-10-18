@@ -80,6 +80,18 @@ def test_announce_targets_everyone_when_fewer_peers_than_fanout():
     assert fake_transport.sent_targets == [few_peers]
 
 
+def test_probe_sends_directly_to_an_address_not_in_the_peer_table():
+    """probe() is how SubnetScanner reaches an address with no prior
+    relationship at all - unlike _announce, it must not depend on the
+    target already being a known peer."""
+    fake_transport = _FakeTransport([])
+    pex = PexGossip(1, generate_channel_key(), fake_transport)
+
+    pex.probe("10.0.0.99", 5555)
+
+    assert fake_transport.sent_targets == [[Peer(host="10.0.0.99", port=5555)]]
+
+
 def test_three_nodes_learn_full_mesh_via_gossip_without_mdns():
     """A bootstrap-only peer link (A<->B) plus gossip should let a
     late-arriving node C - introduced only to B - be learned by A too,

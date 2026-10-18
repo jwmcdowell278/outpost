@@ -53,6 +53,20 @@ pex_fanout: 8
 # devices so legitimate peers aren't silently dropped once the table fills.
 max_peers: 128
 
+# Auto-discovery for subnets mDNS can't reach (e.g. a WireGuard tunnel -
+# point-to-point VPN links don't carry multicast) without hand-maintaining
+# a peers: entry per device: periodically re-reads this node's own network
+# interfaces (so a VPN/mesh interface that comes up after startup is picked
+# up with no restart needed) and unicast-probes every other address on
+# each interface's subnet - any other Outpost node sharing mesh_key there
+# is added as a peer automatically. Off by default since it generates scan
+# traffic; requires enable_pex: true (it probes via PEX). Subnets larger
+# than subnet_scan_max_hosts are skipped entirely rather than partially
+# scanned.
+enable_subnet_scan: false
+subnet_scan_interval_s: 60
+subnet_scan_max_hosts: 512
+
 # How often each node floods a tiny presence beacon per channel it holds the
 # key for. Peers use this to confirm real channel membership and then target
 # AUDIO/STOP sends only at confirmed members instead of every known peer -

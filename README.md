@@ -79,6 +79,22 @@ flowchart LR
     or PEX) that decrypts successfully - only an authenticated sender can
     teach the transport its address, since raw UDP source addresses are
     trivially spoofable.
+  - **Subnet scan** (`outpost/subnet_scan.py`, opt-in via `enable_subnet_
+    scan`): for a link mDNS can't reach but whose address range is known
+    (typically a VPN tunnel like WireGuard, which doesn't carry multicast
+    but does give every peer an address in a small, predictable subnet),
+    this periodically re-reads the node's own network interfaces - so a
+    VPN/mesh interface that connects *after* startup is picked up without a
+    restart - and unicast-probes (via `PexGossip.probe()`) every other
+    address on each small-enough interface subnet. Any other Outpost node
+    sharing `mesh_key` there authenticates the probe, is added as a peer,
+    and is reached back by that peer's own next periodic PEX round - no
+    static `peers:` entry needed on either side, and new devices joining
+    the subnet later are found automatically. Requires `enable_pex: true`
+    (it probes through PEX). Subnets larger than `subnet_scan_max_hosts`
+    (default 512) are skipped entirely rather than partially scanned, so a
+    default-route or large-LAN interface isn't accidentally swept host by
+    host.
 - **Channels**: each channel is just a numeric ID plus its own pre-shared
   symmetric key. A client can only decrypt (and is only considered a member
   of) channels whose key it holds. Switching channels is just changing which
@@ -427,11 +443,14 @@ pytest tests/ -v
    thing that makes each node unique; set `sender_id` explicitly in the
    YAML instead if you need a reproducible value). Peers on the same LAN
    find each other automatically via mDNS; across a VPN or mesh radio link
-   (where mDNS/multicast usually can't reach), give each device at least
-   one `peers:` bootstrap entry pointing at any already-reachable device -
-   PEX gossip takes care of learning the rest of the mesh from there, so
-   only the new device's own config needs an entry; existing devices don't
-   need to be edited.
+   (where mDNS/multicast usually can't reach), either give each device at
+   least one `peers:` bootstrap entry pointing at any already-reachable
+   device - PEX gossip takes care of learning the rest of the mesh from
+   there, so only the new device's own config needs an entry and existing
+   devices don't need to be edited - or, if every device sits on a known,
+   reasonably small subnet (e.g. a WireGuard tunnel's `/24`), set
+   `enable_subnet_scan: true` instead so every device finds every other one
+   automatically with no `peers:` entries at all (see "Design" above).
 5. Run:
    ```bash
    python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt keyboard

@@ -60,6 +60,20 @@ class OutpostConfig:
     # devices so legitimate peers/channel members aren't silently dropped.
     max_peers: int = 128
 
+    # Auto-discovery for subnets mDNS can't reach (e.g. a WireGuard tunnel -
+    # point-to-point VPN links don't carry multicast) without hand-
+    # maintaining a peers: entry per device: periodically re-reads this
+    # node's own network interfaces (so a VPN/mesh interface that comes up
+    # after startup is picked up without a restart) and unicast-probes
+    # every other address on each interface's subnet via PEX - any other
+    # Outpost node sharing mesh_key there is added as a peer automatically.
+    # Off by default since it generates scan traffic; subnets larger than
+    # subnet_scan_max_hosts are skipped entirely rather than partially
+    # scanned (see outpost.subnet_scan).
+    enable_subnet_scan: bool = False
+    subnet_scan_interval_s: float = 60.0
+    subnet_scan_max_hosts: int = 512
+
     # How often to flood a small per-channel presence beacon so senders can
     # learn which known peers actually hold a given channel's key and target
     # AUDIO/STOP sends only at them instead of every known peer - this is
@@ -181,6 +195,9 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "pex_interval_s": (_validate_positive_float, False),
     "pex_fanout": (_validate_positive_int, False),
     "max_peers": (_validate_positive_int, False),
+    "enable_subnet_scan": (_validate_bool, False),
+    "subnet_scan_interval_s": (_validate_positive_float, False),
+    "subnet_scan_max_hosts": (_validate_positive_int, False),
     "channel_announce_interval_s": (_validate_positive_float, False),
     "enable_agc": (_validate_bool, True),
     "agc_target_rms": (_validate_positive_float, True),

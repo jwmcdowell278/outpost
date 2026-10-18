@@ -19,6 +19,7 @@ from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
 from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
+from .subnet_scan import SubnetScanner
 from .transport import MeshTransport
 from .config import OutpostConfig, Channel, Peer
 from .webui import WebUI
@@ -124,6 +125,14 @@ class OutpostClient:
             PexGossip(config.sender_id, config.mesh_key, self.transport,
                       interval_s=config.pex_interval_s, fanout=config.pex_fanout)
             if config.enable_pex
+            else None
+        )
+        if config.enable_subnet_scan and self.pex is None:
+            log.warning("enable_subnet_scan is on but enable_pex is off - subnet scan needs PEX to probe with, skipping")
+        self.subnet_scan = (
+            SubnetScanner(self.pex, config.listen_port,
+                          interval_s=config.subnet_scan_interval_s, max_hosts=config.subnet_scan_max_hosts)
+            if config.enable_subnet_scan and self.pex is not None
             else None
         )
         self.web_ui = (
@@ -273,6 +282,8 @@ class OutpostClient:
                 log.warning("mDNS discovery unavailable (%s); relying on PEX/static peers", exc)
         if self.pex:
             self.pex.start()
+        if self.subnet_scan:
+            self.subnet_scan.start()
         self.mic.start()
         self.speaker.start()
         self._tx_task = asyncio.create_task(self._tx_loop())
@@ -291,6 +302,8 @@ class OutpostClient:
             await self.web_ui.stop()
         if self.pex:
             self.pex.stop()
+        if self.subnet_scan:
+            self.subnet_scan.stop()
         if self.discovery:
             self.discovery.stop()
         self.mic.stop()

@@ -113,7 +113,22 @@ class PexGossip:
         # rounds via hop-by-hop propagation. The gossiped peer LIST itself
         # (the payload) is unaffected - only the number of recipients.
         targets = peers if len(peers) <= self._fanout else random.sample(peers, self._fanout)
-        plaintext = pack_peers(peers)
+        self._send_to(targets)
+
+    def probe(self, host: str, port: int) -> None:
+        """Sends our peer list directly to one address regardless of
+        whether it's already a known peer - used by SubnetScanner to find
+        peers on a subnet mDNS can't reach (e.g. a VPN tunnel/batman-adv
+        segment) without a static peers: entry. A real Outpost node
+        sharing mesh_key at that address will authenticate this and confirm
+        us as a peer, after which its own next periodic gossip round (see
+        _announce) reaches us back - the same confirmation path as any
+        other PEX-discovered peer, just seeded by a direct probe instead of
+        a chain of existing peers."""
+        self._send_to([Peer(host=host, port=port)])
+
+    def _send_to(self, targets: list[Peer]) -> None:
+        plaintext = pack_peers(self._transport.peers)
         seq = self._transport.next_seq()
         ciphertext = self._cipher.encrypt(self._sender_id, seq, plaintext)
         self._transport.send(channel_id=0, seq=seq, ciphertext=ciphertext, ptype=TYPE_PEX, targets=targets)
@@ -128,5 +143,5 @@ class PexGossip:
         # The sender itself is a confirmed, authenticated peer.
         self._transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
 
-        for peer in unpack_peers(plaintext):
-            self._transport.add_peer(f"gossip-{peer.host}:{peer.port}", peer)
+        for gossiped in unpack_peers(plaintext):
+            self._transport.add_peer(f"gossip-{gossiped.host}:{gossiped.port}", gossiped)

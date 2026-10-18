@@ -43,6 +43,23 @@ def test_web_ui_enabled_from_config():
     assert isinstance(client.web_ui, WebUI)
 
 
+def test_subnet_scan_disabled_by_default_from_config():
+    client = OutpostClient(_make_config(), "ops")
+    assert client.subnet_scan is None
+
+
+def test_subnet_scan_enabled_from_config():
+    from outpost.subnet_scan import SubnetScanner
+    client = OutpostClient(_make_config(enable_pex=True, enable_subnet_scan=True), "ops")
+    assert isinstance(client.subnet_scan, SubnetScanner)
+
+
+def test_subnet_scan_skipped_without_pex_since_it_has_nothing_to_probe_with(caplog):
+    client = OutpostClient(_make_config(enable_pex=False, enable_subnet_scan=True), "ops")
+    assert client.subnet_scan is None
+    assert "subnet scan" in caplog.text
+
+
 def test_injected_agc_overrides_config():
     spy = _SpyProcessor()
     client = OutpostClient(_make_config(), "ops", agc=spy)
