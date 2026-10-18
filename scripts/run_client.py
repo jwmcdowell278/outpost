@@ -1,10 +1,13 @@
 """CLI entry point for an Outpost voice client.
 
 Examples:
-    python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt keyboard
-    python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt gpio --gpio-pin 17
+    python scripts/run_client.py --config config/outpost.yaml --ptt keyboard
+    python scripts/run_client.py --config config/outpost.yaml --channel tac --ptt gpio --gpio-pin 17
     python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt hid --vendor-id 0x1234 --product-id 0x5678
     python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt serial --serial-port /dev/ttyUSB0
+
+--channel is optional - omit it to join whichever channel is configured
+with id 1.
 """
 from __future__ import annotations
 import argparse
@@ -42,7 +45,7 @@ def build_ptt(args, on_change) -> PTTSource:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an Outpost voice client.")
     parser.add_argument("--config", required=True, help="path to outpost.yaml")
-    parser.add_argument("--channel", required=True, help="name of the channel to join")
+    parser.add_argument("--channel", default=None, help="name of the channel to join (defaults to the channel configured with id 1)")
     parser.add_argument("--ptt", choices=["keyboard", "hid", "gpio", "serial"], default="keyboard")
     parser.add_argument("--vendor-id", type=lambda s: int(s, 0), default=None)
     parser.add_argument("--product-id", type=lambda s: int(s, 0), default=None)
@@ -57,12 +60,20 @@ async def main() -> None:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
     config = load_config(args.config)
-    client = OutpostClient(config, args.channel, config_path=args.config)
+    if args.channel is not None:
+        channel_name = args.channel
+    else:
+        default_channel = config.channels.get(1)
+        if default_channel is None:
+            raise SystemExit("--channel not given and no channel with id 1 is configured - specify --channel explicitly")
+        channel_name = default_channel.name
+
+    client = OutpostClient(config, channel_name, config_path=args.config)
     ptt = build_ptt(args, client.set_ptt)
 
     await client.start()
     ptt.start()
-    print(f"Outpost client running on channel {args.channel!r} (sender_id={config.sender_id}). "
+    print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
           f"Hold the configured PTT to talk. Ctrl+C to quit.")
     if client.web_ui:
         print(f"Web UI: http://{config.web_ui_host}:{config.web_ui_port}")

@@ -7,6 +7,7 @@ import yaml
 from outpost.config import (
     DEFAULT_LISTEN_PORT, EDITABLE_FIELDS, OutpostConfig, editable_config_values,
     load_config, save_config_fields,
+    add_channel_to_file, rename_channel_in_file, rotate_channel_key_in_file,
 )
 from outpost.crypto import generate_channel_key
 
@@ -132,3 +133,49 @@ def test_save_config_fields_updates_only_given_keys(tmp_path):
     assert raw["enable_agc"] is False
     assert raw["mesh_key"] == "abc"  # untouched
     assert raw["channels"] == []  # untouched
+
+
+def test_add_channel_to_file_appends_entry(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+    new_key = generate_channel_key()
+
+    add_channel_to_file(str(config_path), 2, "tac", new_key)
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["channels"][0]["name"] == "ops"  # untouched
+    assert raw["channels"][1] == {
+        "id": 2, "name": "tac", "key": base64.b64encode(new_key).decode(),
+    }
+
+
+def test_rename_channel_in_file_updates_only_matching_id(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+
+    rename_channel_in_file(str(config_path), 1, "renamed")
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["channels"][0]["name"] == "renamed"
+    assert raw["channels"][0]["key"] == _CHANNEL_KEY  # key untouched
+
+
+def test_rename_channel_in_file_raises_for_unknown_id(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+
+    with pytest.raises(KeyError):
+        rename_channel_in_file(str(config_path), 99, "nope")
+
+
+def test_rotate_channel_key_in_file_replaces_key_only(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+    new_key = generate_channel_key()
+
+    rotate_channel_key_in_file(str(config_path), 1, new_key)
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["channels"][0]["name"] == "ops"  # untouched
+    assert raw["channels"][0]["key"] == base64.b64encode(new_key).decode()
+

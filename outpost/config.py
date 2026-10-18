@@ -213,10 +213,51 @@ def save_config_fields(path: str, updates: dict) -> None:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
     raw.update(updates)
+    _atomic_write_yaml(path, raw)
+
+
+def _atomic_write_yaml(path: str, raw: dict) -> None:
     tmp_path = path + ".tmp"
     with open(tmp_path, "w") as f:
         yaml.safe_dump(raw, f, sort_keys=False)
     os.replace(tmp_path, path)
+
+
+def add_channel_to_file(path: str, channel_id: int, name: str, key: bytes) -> None:
+    """Appends a new channel entry to the YAML config file's `channels:`
+    list. Caller is responsible for picking a free `channel_id` and
+    checking `name` isn't already in use."""
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    raw.setdefault("channels", []).append({
+        "id": channel_id, "name": name, "key": base64.b64encode(key).decode(),
+    })
+    _atomic_write_yaml(path, raw)
+
+
+def rename_channel_in_file(path: str, channel_id: int, new_name: str) -> None:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    for entry in raw.get("channels", []):
+        if entry["id"] == channel_id:
+            entry["name"] = new_name
+            break
+    else:
+        raise KeyError(f"no channel with id {channel_id}")
+    _atomic_write_yaml(path, raw)
+
+
+def rotate_channel_key_in_file(path: str, channel_id: int, key: bytes) -> None:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    for entry in raw.get("channels", []):
+        if entry["id"] == channel_id:
+            entry["key"] = base64.b64encode(key).decode()
+            break
+    else:
+        raise KeyError(f"no channel with id {channel_id}")
+    _atomic_write_yaml(path, raw)
+
 
 
 def _resolve_sender_id(config_path: str, raw: dict) -> int:

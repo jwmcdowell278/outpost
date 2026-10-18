@@ -6,6 +6,7 @@ import logging
 import math
 import random
 import time
+from dataclasses import replace
 
 import numpy as np
 
@@ -19,7 +20,7 @@ from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
 from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
 from .transport import MeshTransport
-from .config import OutpostConfig, Peer
+from .config import OutpostConfig, Channel, Peer
 from .webui import WebUI
 from zeroconf._exceptions import EventLoopBlocked
 
@@ -204,6 +205,29 @@ class OutpostClient:
 
     def set_active_channel(self, name: str) -> None:
         self.active_channel = self.config.channel_by_name(name)
+
+    def add_channel(self, channel_id: int, name: str, key: bytes) -> Channel:
+        """Wires a newly-created channel into the running process (web UI's
+        Channels page) - no restart needed, since `_channel_announce_loop`
+        iterates `self.ciphers` fresh every cycle and `_on_packet`/
+        `set_active_channel` look channels up via `self.config.channels`."""
+        channel = Channel(id=channel_id, name=name, key=key)
+        self.config.channels[channel_id] = channel
+        self.ciphers[channel_id] = ChannelCipher(key)
+        return channel
+
+    def rename_channel(self, channel_id: int, new_name: str) -> None:
+        renamed = replace(self.config.channels[channel_id], name=new_name)
+        self.config.channels[channel_id] = renamed
+        if self.active_channel.id == channel_id:
+            self.active_channel = renamed
+
+    def rotate_channel_key(self, channel_id: int, key: bytes) -> None:
+        """Replaces a channel's key immediately - every other peer on that
+        channel must be given the same new key before they can decrypt this
+        node's traffic again (or decrypt each other's, once they rotate too)."""
+        self.config.channels[channel_id] = replace(self.config.channels[channel_id], key=key)
+        self.ciphers[channel_id] = ChannelCipher(key)
 
     def channel_member_details(self, channel_id: int | None = None) -> list[dict]:
         """Confirmed members (sender_id + address + seconds since last

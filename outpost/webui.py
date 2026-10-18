@@ -18,8 +18,15 @@ try:
 except ImportError:
     web = None
 
-from .crypto import generate_channel_key
-from .config import EDITABLE_FIELDS, editable_config_values, save_config_fields
+from .crypto import generate_channel_key, KEY_SIZE
+from .config import (
+    EDITABLE_FIELDS,
+    editable_config_values,
+    save_config_fields,
+    add_channel_to_file,
+    rename_channel_in_file,
+    rotate_channel_key_in_file,
+)
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +108,7 @@ def _nav(active: str) -> str:
         return ' class="active"' if name == active else ""
     return f"""<nav class="tabs">
   <a href="/"{cls('status')}>Status</a>
+  <a href="/channels"{cls('channels')}>Channels</a>
   <a href="/settings"{cls('settings')}>Settings</a>
 </nav>"""
 
@@ -319,6 +327,134 @@ loadSettings();
 </html>
 """
 
+_CHANNELS_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Channels</title>
+{_STYLE}
+</head>
+<body>
+<h1>Outpost</h1>
+{_nav('channels')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div class="card">
+  <h2>Channels</h2>
+  <div id="channelList">loading...</div>
+  <div class="muted" id="channelsMsg"></div>
+</div>
+
+<div class="card" id="newChannelCard">
+  <h2>New channel</h2>
+  <div class="row">
+    <input id="newName" type="text" size="16" placeholder="name">
+    <input id="newKey" type="text" size="40" placeholder="key (base64, optional - leave blank to generate one)">
+    <button id="createChannel">Create</button>
+  </div>
+  <div class="muted">Creating a channel takes effect immediately on this node - no restart needed. Copy the resulting key into every other peer's config that should be able to join it.</div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+function newKeyBanner(id, label, key) {{
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.innerHTML = `
+    <span class="pill live">${{label}}</span>
+    <input type="text" size="40" readonly value="${{key}}">
+    <button type="button" class="copyKeyBtn">Copy</button>
+  `;
+  div.querySelector('.copyKeyBtn').addEventListener('click', () => navigator.clipboard.writeText(key));
+  return div;
+}}
+
+async function loadChannels() {{
+  const list = document.getElementById('channelList');
+  const msg = document.getElementById('channelsMsg');
+  try {{
+    const data = await api('/api/channels');
+    list.textContent = '';
+    for (const ch of data.channels.sort((a, b) => a.id - b.id)) {{
+      const row = document.createElement('div');
+      row.className = 'row field-row';
+      row.innerHTML = `
+        <span class="name">#${{ch.id}}</span>
+        <input type="text" value="${{ch.name}}" data-id="${{ch.id}}" class="chName" size="16">
+        <button type="button" class="renameBtn" data-id="${{ch.id}}">Rename</button>
+        <button type="button" class="rotateBtn" data-id="${{ch.id}}">Rotate key</button>
+      `;
+      list.appendChild(row);
+    }}
+    document.getElementById('createChannel').disabled = !data.can_save;
+    if (!data.can_save) {{
+      msg.textContent = 'no config file path - channels are read-only here';
+    }}
+  }} catch (e) {{
+    list.textContent = 'error: ' + e.message;
+  }}
+}}
+
+document.getElementById('channelList').addEventListener('click', async (e) => {{
+  const id = e.target.dataset.id;
+  if (!id) return;
+  const msg = document.getElementById('channelsMsg');
+  if (e.target.classList.contains('renameBtn')) {{
+    const name = document.querySelector(`.chName[data-id="${{id}}"]`).value.trim();
+    if (!name) return;
+    try {{
+      await api(`/api/channels/${{id}}/rename`, {{
+        method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ name }}),
+      }});
+      msg.className = 'ok'; msg.textContent = `renamed #${{id}} to ${{name}}`;
+    }} catch (err) {{
+      msg.className = 'error'; msg.textContent = err.message;
+    }}
+  }} else if (e.target.classList.contains('rotateBtn')) {{
+    if (!confirm('Rotate this channel\\'s key? Every other peer on it needs the new key before they can hear/be heard again.')) return;
+    try {{
+      const result = await api(`/api/channels/${{id}}/rotate_key`, {{ method: 'POST' }});
+      msg.className = ''; msg.textContent = '';
+      document.getElementById('channelList').after(newKeyBanner(id, `#${{id}} new key`, result.key));
+    }} catch (err) {{
+      msg.className = 'error'; msg.textContent = err.message;
+    }}
+  }}
+}});
+
+document.getElementById('createChannel').addEventListener('click', async () => {{
+  const name = document.getElementById('newName').value.trim();
+  const key = document.getElementById('newKey').value.trim();
+  const msg = document.getElementById('channelsMsg');
+  if (!name) {{ msg.className = 'error'; msg.textContent = 'name is required'; return; }}
+  try {{
+    const result = await api('/api/channels', {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(key ? {{ name, key }} : {{ name }}),
+    }});
+    document.getElementById('newName').value = '';
+    document.getElementById('newKey').value = '';
+    msg.className = ''; msg.textContent = '';
+    document.getElementById('newChannelCard').after(newKeyBanner(result.id, `#${{result.id}} ${{result.name}} key`, result.key));
+    loadChannels();
+  }} catch (err) {{
+    msg.className = 'error'; msg.textContent = err.message;
+  }}
+}});
+
+loadChannels();
+</script>
+</body>
+</html>
+"""
+
 
 class WebUI:
     def __init__(self, client, host: str = "127.0.0.1", port: int = 8765, token: str | None = None):
@@ -336,12 +472,17 @@ class WebUI:
         self.app.add_routes([
             web.get("/", self._handle_index),
             web.get("/settings", self._handle_settings_page),
+            web.get("/channels", self._handle_channels_page),
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
             web.post("/api/generate_key", self._handle_generate_key),
             web.get("/api/config", self._handle_get_config),
             web.post("/api/config", self._handle_set_config),
+            web.get("/api/channels", self._handle_get_channels),
+            web.post("/api/channels", self._handle_create_channel),
+            web.post(r"/api/channels/{channel_id:\d+}/rename", self._handle_rename_channel),
+            web.post(r"/api/channels/{channel_id:\d+}/rotate_key", self._handle_rotate_channel_key),
         ])
 
     def _make_auth_middleware(self):
@@ -359,6 +500,9 @@ class WebUI:
 
     async def _handle_settings_page(self, request) -> web.Response:
         return web.Response(text=_SETTINGS_HTML, content_type="text/html")
+
+    async def _handle_channels_page(self, request) -> web.Response:
+        return web.Response(text=_CHANNELS_HTML, content_type="text/html")
 
     async def _handle_status(self, request) -> web.Response:
         c = self.client
@@ -402,6 +546,65 @@ class WebUI:
         # loaded from config at startup.
         key = base64.b64encode(generate_channel_key()).decode()
         return web.json_response({"key": key})
+
+    async def _handle_get_channels(self, request) -> web.Response:
+        channels = [{"id": ch.id, "name": ch.name} for ch in self.client.config.channels.values()]
+        return web.json_response({"channels": channels, "can_save": self.client.config_path is not None})
+
+    async def _handle_create_channel(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        data = await request.json()
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise web.HTTPBadRequest(text="missing 'name'")
+        if any(ch.name == name for ch in self.client.config.channels.values()):
+            raise web.HTTPBadRequest(text=f"a channel named {name!r} already exists")
+
+        raw_key = data.get("key")
+        if raw_key:
+            try:
+                key = base64.b64decode(raw_key)
+            except Exception:
+                raise web.HTTPBadRequest(text="'key' must be base64")
+            if len(key) != KEY_SIZE:
+                raise web.HTTPBadRequest(text=f"'key' must decode to {KEY_SIZE} bytes")
+        else:
+            key = generate_channel_key()
+
+        new_id = max((ch.id for ch in self.client.config.channels.values()), default=0) + 1
+        add_channel_to_file(self.client.config_path, new_id, name, key)
+        self.client.add_channel(new_id, name, key)
+        return web.json_response({"id": new_id, "name": name, "key": base64.b64encode(key).decode()})
+
+    async def _handle_rename_channel(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        channel_id = int(request.match_info["channel_id"])
+        if channel_id not in self.client.config.channels:
+            raise web.HTTPNotFound(text=f"no channel with id {channel_id}")
+        data = await request.json()
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise web.HTTPBadRequest(text="missing 'name'")
+        if any(ch.name == name and ch.id != channel_id for ch in self.client.config.channels.values()):
+            raise web.HTTPBadRequest(text=f"a channel named {name!r} already exists")
+
+        rename_channel_in_file(self.client.config_path, channel_id, name)
+        self.client.rename_channel(channel_id, name)
+        return web.json_response({"id": channel_id, "name": name})
+
+    async def _handle_rotate_channel_key(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        channel_id = int(request.match_info["channel_id"])
+        if channel_id not in self.client.config.channels:
+            raise web.HTTPNotFound(text=f"no channel with id {channel_id}")
+
+        key = generate_channel_key()
+        rotate_channel_key_in_file(self.client.config_path, channel_id, key)
+        self.client.rotate_channel_key(channel_id, key)
+        return web.json_response({"id": channel_id, "key": base64.b64encode(key).decode()})
 
     async def _handle_get_config(self, request) -> web.Response:
         values = editable_config_values(self.client.config)

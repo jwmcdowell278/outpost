@@ -247,3 +247,186 @@ async def _set_config_persists_to_yaml_and_applies_live_fields(tmp_path):
     saved_raw = yaml.safe_load(config_path.read_text())
     assert saved_raw["bitrate"] == 8000
     assert saved_raw["mesh_key"] == "x"  # pre-existing, untouched key preserved
+
+
+def _write_two_channel_config(config_path, ops_key, tac_key) -> None:
+    import base64
+    config_path.write_text(yaml.safe_dump({
+        "mesh_key": "x",
+        "channels": [
+            {"id": 1, "name": "ops", "key": base64.b64encode(ops_key).decode()},
+            {"id": 2, "name": "tac", "key": base64.b64encode(tac_key).decode()},
+        ],
+    }))
+
+
+def test_get_channels_lists_id_and_name_only():
+    asyncio.run(_get_channels_lists_id_and_name_only())
+
+
+async def _get_channels_lists_id_and_name_only():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        body = await (await tc.get("/api/channels")).json()
+        assert body["can_save"] is False
+        ids = {(c["id"], c["name"]) for c in body["channels"]}
+        assert ids == {(1, "ops"), (2, "tac")}
+        assert all("key" not in c for c in body["channels"])
+
+
+def test_create_channel_requires_a_config_path():
+    asyncio.run(_create_channel_requires_a_config_path())
+
+
+async def _create_channel_requires_a_config_path():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels", json={"name": "new"})
+        assert resp.status == 400
+
+
+def test_create_channel_persists_and_applies_live(tmp_path):
+    asyncio.run(_create_channel_persists_and_applies_live(tmp_path))
+
+
+async def _create_channel_persists_and_applies_live(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+
+    client = _make_client(config_path=str(config_path))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels", json={"name": "emergency"})
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["id"] == 3
+        assert body["name"] == "emergency"
+        assert "key" in body
+
+    # Applied live - no restart needed.
+    assert 3 in client.config.channels
+    assert client.config.channels[3].name == "emergency"
+    assert 3 in client.ciphers
+    client.set_active_channel("emergency")  # doesn't raise
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert [c["name"] for c in raw["channels"]] == ["ops", "tac", "emergency"]
+
+
+def test_create_channel_rejects_duplicate_name(tmp_path):
+    asyncio.run(_create_channel_rejects_duplicate_name(tmp_path))
+
+
+async def _create_channel_rejects_duplicate_name(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels", json={"name": "ops"})
+        assert resp.status == 400
+
+
+def test_create_channel_rejects_malformed_key(tmp_path):
+    asyncio.run(_create_channel_rejects_malformed_key(tmp_path))
+
+
+async def _create_channel_rejects_malformed_key(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels", json={"name": "short", "key": "dG9vc2hvcnQ="})
+        assert resp.status == 400
+
+
+def test_rename_channel_persists_and_applies_live(tmp_path):
+    asyncio.run(_rename_channel_persists_and_applies_live(tmp_path))
+
+
+async def _rename_channel_persists_and_applies_live(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+
+    client = _make_client(config_path=str(config_path))  # active channel is "ops" (id 1)
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels/1/rename", json={"name": "primary"})
+        assert resp.status == 200
+
+    assert client.config.channels[1].name == "primary"
+    assert client.active_channel.name == "primary"  # active channel reference updated too
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["channels"][0]["name"] == "primary"
+
+
+def test_rename_channel_rejects_unknown_id(tmp_path):
+    asyncio.run(_rename_channel_rejects_unknown_id(tmp_path))
+
+
+async def _rename_channel_rejects_unknown_id(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels/99/rename", json={"name": "nope"})
+        assert resp.status == 404
+
+
+def test_rename_channel_rejects_duplicate_name(tmp_path):
+    asyncio.run(_rename_channel_rejects_duplicate_name(tmp_path))
+
+
+async def _rename_channel_rejects_duplicate_name(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels/1/rename", json={"name": "tac"})
+        assert resp.status == 400
+
+
+def test_rotate_channel_key_persists_and_applies_live(tmp_path):
+    asyncio.run(_rotate_channel_key_persists_and_applies_live(tmp_path))
+
+
+async def _rotate_channel_key_persists_and_applies_live(tmp_path):
+    import base64
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+
+    client = _make_client(config_path=str(config_path))
+    old_cipher = client.ciphers[1]
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/channels/1/rotate_key")
+        assert resp.status == 200
+        body = await resp.json()
+        new_key = base64.b64decode(body["key"])
+        assert new_key != ops_key
+
+    assert client.config.channels[1].key == new_key
+    assert client.ciphers[1] is not old_cipher
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["channels"][0]["key"] == body["key"]
+
+
+def test_channels_page_serves_html():
+    asyncio.run(_channels_page_serves_html())
+
+
+async def _channels_page_serves_html():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.get("/channels")
+        assert resp.status == 200
+        assert "text/html" in resp.content_type
+
