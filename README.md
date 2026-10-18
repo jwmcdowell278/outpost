@@ -120,7 +120,13 @@ flowchart LR
   requires a nonce never repeat for a given key, which a strictly increasing
   per-sender counter guarantees. PTT-release STOP markers are encrypted (not
   just sent as a bare marker) so they can't be spoofed by an unauthenticated
-  third party.
+  third party. The sequence counter's high-water mark is persisted next to
+  the config file (a sibling `<config>.seq` file, same idea as the
+  `.identity` file below) and resumed with a large safety margin on
+  restart, so a process restart/crash never replays a `(sender_id, seq)`
+  pair already used under the same channel key - and so peers don't
+  mistake this node's post-restart packets for stale duplicates of its own
+  higher pre-restart sequence numbers (`outpost/transport.py`).
 - **Wire format** (`outpost/protocol.py`): 15-byte cleartext header
   (version, type, channel id, sender id, sequence number) + encrypted
   payload (+16-byte Poly1305 tag). Total overhead is small relative to a
@@ -251,12 +257,13 @@ flowchart LR
   once-per-release `TYPE_STOP` packet) carrying the alias as its encrypted
   payload, instead of being embedded in every `TYPE_AUDIO` frame - avoiding
   recurring per-frame bandwidth overhead on constrained mesh radio links
-  (see "Network profiles" above). The status page shows a "🔊 speaking:
-  <names>" line built from `/api/status`'s `speaking` list, which tracks
-  each currently-transmitting sender's alias (falling back to its numeric
-  `sender_id` if no alias was sent, e.g. a lost `START` packet or an older
-  client) and clears it on that sender's `STOP` (with a short staleness
-  fallback in case the `STOP` itself is lost). Like any other
+  (see "Network profiles" above). The status page always shows a speaking
+  indicator line ("🔊 speaking: <names>" or, when the channel is idle,
+  "🔇 no one speaking") built from `/api/status`'s `speaking` list, which
+  tracks each currently-transmitting sender's alias (falling back to its
+  numeric `sender_id` if no alias was sent, e.g. a lost `START` packet or
+  an older client) and clears it on that sender's `STOP` (with a short
+  staleness fallback in case the `STOP` itself is lost). Like any other
   channel-authenticated traffic, an alias is only as trustworthy as the
   channel key itself - anyone holding the key can claim any alias.
 

@@ -3,6 +3,7 @@ dispatches incoming packets to a callback. Peer-to-peer - no central server."""
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import threading
 import time
 
@@ -23,6 +24,20 @@ DEFAULT_MAX_PACKET_BYTES = 1200
 # mesh with thousands of nodes needs this raised well above the default to
 # avoid silently dropping legitimate peers/channel members.
 DEFAULT_MAX_PEERS = 128
+
+# How far past the last persisted seq high-water mark to resume counting
+# from on startup - must comfortably exceed how many packets could plausibly
+# have been sent between the last flush and an unclean shutdown (crash/power
+# loss), so a restart can never replay a seq (and thus a nonce) already used
+# under the current channel key. At the voice path's frame rate (e.g. 50
+# packets/sec for 20ms frames) this is ~1.5 hours of margin.
+_SEQ_PERSIST_MARGIN = 256_000
+
+# Flush the seq high-water mark to disk every this many next_seq() calls,
+# rather than on every single call - disk I/O on every 20ms audio frame
+# would be wasteful. A larger value only costs a larger (but still bounded
+# by the margin above) resume gap after an unclean shutdown.
+_SEQ_PERSIST_EVERY = 1000
 
 
 class _MeshProtocol(asyncio.DatagramProtocol):
@@ -49,13 +64,29 @@ class MeshTransport:
     """
 
     def __init__(self, sender_id: int, peers: list[Peer], on_packet, max_packet_bytes: int = DEFAULT_MAX_PACKET_BYTES,
-                 max_peers: int = DEFAULT_MAX_PEERS):
+                 max_peers: int = DEFAULT_MAX_PEERS, seq_persist_path: str | None = None):
         self.sender_id = sender_id
         self.max_packet_bytes = max_packet_bytes
         self.max_peers = max_peers
         self._on_packet = on_packet
         self._transport: asyncio.DatagramTransport | None = None
-        self._seq = 0
+        # The encryption nonce is derived from (sender_id, seq) - see
+        # crypto.py - which is only safe as long as seq never repeats for
+        # this sender under the same channel key. sender_id is persisted
+        # across restarts (see config._resolve_sender_id) specifically so it
+        # doesn't collide with another node, but a plain in-memory counter
+        # starting back at 0 on every restart would then reuse the exact
+        # nonces from the previous run with the same persistent channel
+        # key - a real nonce-reuse break, and separately it makes every
+        # peer's stale/duplicate check (client.py's `_last_seq_seen`) treat
+        # this node's post-restart packets as old duplicates of its own
+        # higher pre-restart seq, silently dropping its audio until the
+        # counter climbs back past that high-water mark (or a STOP happens
+        # to get through and clear it). Persisting a high-water mark and
+        # resuming well above it (see _SEQ_PERSIST_MARGIN) fixes both.
+        self._seq_persist_path = seq_persist_path
+        self._seq_calls_since_persist = 0
+        self._seq = self._load_seq_start(seq_persist_path)
         self._lock = threading.Lock()
         self._peers: dict[str, Peer] = {f"static-{i}": p for i, p in enumerate(peers)}
         # Static (config-file) peers are a deliberate, operator-chosen
@@ -68,6 +99,26 @@ class MeshTransport:
         # on both the local subnet and a VPN tunnel - see add_peer_group).
         # _peers[key] always holds whichever candidate is currently active.
         self._candidates: dict[str, list[Peer]] = {k: [p] for k, p in self._peers.items()}
+
+    def _load_seq_start(self, seq_persist_path: str | None) -> int:
+        if seq_persist_path is None:
+            return 0  # no durable identity (e.g. tests/embedding) - best effort only
+        try:
+            with open(seq_persist_path, "r") as f:
+                return int(f.read().strip()) + _SEQ_PERSIST_MARGIN
+        except (OSError, ValueError):
+            return 0  # first run, or no prior persisted value yet
+
+    def _persist_seq(self) -> None:
+        if self._seq_persist_path is None:
+            return
+        tmp_path = self._seq_persist_path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                f.write(str(self._seq))
+            os.replace(tmp_path, self._seq_persist_path)
+        except OSError as exc:
+            log.warning("failed to persist seq high-water mark to %s: %s", self._seq_persist_path, exc)
 
     @property
     def peers(self) -> list[Peer]:
@@ -217,10 +268,19 @@ class MeshTransport:
         if self._transport:
             self._transport.close()
             self._transport = None
+        # Flush on a clean shutdown (including the web UI's restart-now
+        # path, which awaits stop() before re-exec'ing) so the next process
+        # resumes from a tight high-water mark instead of the full
+        # _SEQ_PERSIST_MARGIN gap - see _load_seq_start.
+        self._persist_seq()
 
     def next_seq(self) -> int:
         seq = self._seq
         self._seq += 1
+        self._seq_calls_since_persist += 1
+        if self._seq_calls_since_persist >= _SEQ_PERSIST_EVERY:
+            self._seq_calls_since_persist = 0
+            self._persist_seq()
         return seq
 
     def send(self, channel_id: int, seq: int, ciphertext: bytes, ptype: int = TYPE_AUDIO,

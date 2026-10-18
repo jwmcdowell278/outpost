@@ -112,6 +112,14 @@ class OutpostClient:
         self.transport = MeshTransport(
             config.sender_id, config.peers, self._on_packet,
             max_packet_bytes=config.max_packet_bytes, max_peers=config.max_peers,
+            # Persist the seq high-water mark next to the config file (same
+            # convention as config._resolve_sender_id's ".identity" file) so
+            # a restart never reuses a (sender_id, seq) nonce pair or makes
+            # peers treat this node's fresh packets as stale duplicates of
+            # its pre-restart sequence numbers - see transport.py for
+            # details. None (no persistence) in tests/embedding scenarios
+            # that construct OutpostConfig directly without config_path.
+            seq_persist_path=(config_path + ".seq") if config_path else None,
         )
 
         # mDNS only helps on a plain multicast-reachable LAN; PEX gossip is

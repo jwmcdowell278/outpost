@@ -6,4 +6,5 @@ __pycache__/
 config/outpost.yaml
 config/outpost-node2.yaml
 *.identity
+*.seq
 

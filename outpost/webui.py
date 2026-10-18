@@ -142,7 +142,7 @@ _INDEX_HTML = f"""<!doctype html>
   <h2>Channel</h2>
   <div class="row" id="channels"></div>
   <button id="ptt">Hold to talk</button>
-  <div class="muted" id="speakingLine"></div>
+  <div class="muted" id="speakingLine">loading...</div>
 </div>
 
 <div class="card">
@@ -184,7 +184,7 @@ async function refresh() {{
     const speakingLine = document.getElementById('speakingLine');
     speakingLine.textContent = s.speaking.length
       ? '\U0001F50A speaking: ' + s.speaking.map(p => p.alias || ('sender ' + p.sender_id)).join(', ')
-      : '';
+      : '\U0001F507 no one speaking';
 
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
