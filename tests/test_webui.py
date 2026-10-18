@@ -483,3 +483,134 @@ async def _restart_requires_auth_when_configured():
         assert authenticated.status == 200
     assert client.restart_requested.is_set()
 
+
+def test_get_peers_lists_configured_static_peers():
+    asyncio.run(_get_peers_lists_configured_static_peers())
+
+
+async def _get_peers_lists_configured_static_peers():
+    from outpost.config import Peer
+    ui = WebUI(_make_client(peers=[Peer(host="10.0.0.5", port=5555)]))
+    async with TestClient(TestServer(ui.app)) as tc:
+        body = await (await tc.get("/api/peers")).json()
+        assert body["can_save"] is False
+        assert body["peers"] == [{"host": "10.0.0.5", "port": 5555}]
+
+
+def test_add_peer_requires_a_config_path():
+    asyncio.run(_add_peer_requires_a_config_path())
+
+
+async def _add_peer_requires_a_config_path():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers", json={"host": "10.0.0.5", "port": 5555})
+        assert resp.status == 400
+
+
+def test_add_peer_persists_and_applies_live(tmp_path):
+    asyncio.run(_add_peer_persists_and_applies_live(tmp_path))
+
+
+async def _add_peer_persists_and_applies_live(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+
+    client = _make_client(config_path=str(config_path))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers", json={"host": "10.0.0.5", "port": 5555})
+        assert resp.status == 200
+        assert await resp.json() == {"host": "10.0.0.5", "port": 5555}
+
+    # Applied live - no restart needed.
+    assert any(p.host == "10.0.0.5" and p.port == 5555 for p in client.config.peers)
+    assert any(d["host"] == "10.0.0.5" and d["port"] == 5555 and d["static"]
+               for d in client.transport.peer_details())
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["peers"] == [{"host": "10.0.0.5", "port": 5555}]
+
+
+def test_add_peer_rejects_duplicate(tmp_path):
+    asyncio.run(_add_peer_rejects_duplicate(tmp_path))
+
+
+async def _add_peer_rejects_duplicate(tmp_path):
+    from outpost.config import Peer
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    client = _make_client(config_path=str(config_path), peers=[Peer(host="10.0.0.5", port=5555)])
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers", json={"host": "10.0.0.5", "port": 5555})
+        assert resp.status == 400
+
+
+def test_add_peer_rejects_invalid_port(tmp_path):
+    asyncio.run(_add_peer_rejects_invalid_port(tmp_path))
+
+
+async def _add_peer_rejects_invalid_port(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers", json={"host": "10.0.0.5", "port": 99999})
+        assert resp.status == 400
+
+
+def test_remove_peer_persists_and_applies_live(tmp_path):
+    asyncio.run(_remove_peer_persists_and_applies_live(tmp_path))
+
+
+async def _remove_peer_persists_and_applies_live(tmp_path):
+    from outpost.config import Peer
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["peers"] = [{"host": "10.0.0.5", "port": 5555}]
+    config_path.write_text(yaml.safe_dump(raw))
+
+    client = _make_client(config_path=str(config_path), peers=[Peer(host="10.0.0.5", port=5555)])
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers/remove", json={"host": "10.0.0.5", "port": 5555})
+        assert resp.status == 200
+
+    assert client.config.peers == []
+    assert client.transport.peer_details() == []
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["peers"] == []
+
+
+def test_remove_peer_rejects_unknown_address(tmp_path):
+    asyncio.run(_remove_peer_rejects_unknown_address(tmp_path))
+
+
+async def _remove_peer_rejects_unknown_address(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    ops_key, tac_key = generate_channel_key(), generate_channel_key()
+    _write_two_channel_config(config_path, ops_key, tac_key)
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/peers/remove", json={"host": "10.0.0.5", "port": 5555})
+        assert resp.status == 404
+
+
+def test_peers_page_serves_html():
+    asyncio.run(_peers_page_serves_html())
+
+
+async def _peers_page_serves_html():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.get("/peers")
+        assert resp.status == 200
+        assert "text/html" in resp.content_type
+

@@ -161,9 +161,9 @@ flowchart LR
     mic/environment (too high clips quiet speech, too low doesn't gate
     anything).
 - **Web UI** (`outpost/webui.py`, `enable_web_ui`, off by default): a
-  lightweight local control panel - three static HTML pages (Status,
-  Channels, Settings, switchable via a tab bar at the top), no build step
-  or frontend framework, served by a small `aiohttp` app. The **Status**
+  lightweight local control panel - four static HTML pages (Status,
+  Channels, Peers, Settings, switchable via a tab bar at the top), no build
+  step or frontend framework, served by a small `aiohttp` app. The **Status**
   page views live status (active channel, PTT state, peer table with
   per-peer address/candidate-count/last-seen age, confirmed channel
   members, AGC/relay state) and controls the client (switch active
@@ -177,7 +177,14 @@ flowchart LR
   rotated key is shown once in the page so you can copy it into every
   other peer's config that should share that channel - rotating a key
   breaks that channel for anyone you haven't given the new key to yet.
-  The **Settings** page exposes a settings editor (`/api/config`) for the
+  The **Peers** page (`/api/peers`) lists the static bootstrap `peers:`
+  entries and lets you add or remove one by host/port - both apply
+  immediately on the running client (no restart needed - see
+  `OutpostClient.add_peer`/`remove_peer`) as well as being written back to
+  `outpost.yaml`. Use this for a link mDNS/subnet scan can't reach (e.g. a
+  WireGuard tunnel) instead of hand-editing the config file - add the
+  mirror entry on the other end too. The **Settings** page exposes a
+  settings editor (`/api/config`) for the
   non-secret fields of `OutpostConfig` (network profile, mDNS/PEX tuning,
   AGC, relay mode, etc. - see `outpost.config.EDITABLE_FIELDS`) plus a
   general-purpose key generator: saving writes the new values back into
@@ -193,17 +200,18 @@ flowchart LR
   same argv) - no shell access or external process manager (systemd,
   Docker's own restart policy) required, though either would also work
   fine since re-exec preserves the PID and never actually exits.
-  `sender_id`, `mesh_key`, `peers`, and the web UI's own
-  bind address/port/token are deliberately never editable from the web UI
-  (identity/secrets need their own flow, and editing the web UI's own
-  auth/bind settings through itself risks a self-lockout or accidental
-  exposure). Note: saving rewrites the whole YAML file via PyYAML, which
+  `sender_id`, `mesh_key`, and the web UI's own bind address/port/token are
+  deliberately never editable from the web UI (identity/secrets need their
+  own flow, and editing the web UI's own auth/bind settings through itself
+  risks a self-lockout or accidental exposure); `peers` has its own
+  dedicated add/remove flow on the Peers page instead of the generic
+  Settings editor. Note: saving rewrites the whole YAML file via PyYAML, which
   does **not** preserve comments/formatting from the original file.
   Requires the `web` extra (`pip install -e ".[web]"`) - importing
   `outpost.webui` never requires `aiohttp` unless the feature is actually
   turned on. Binds to `127.0.0.1` by default; set `web_ui_token` (checked
-  as a bearer token on every request, including Channels/Settings/restart)
-  before pointing `web_ui_host` at anything reachable by others, since the
+  as a bearer token on every request, including Channels/Peers/Settings/
+  restart) before pointing `web_ui_host` at anything reachable by others, since the
   control endpoints are otherwise unauthenticated - the status/HTML/config
   responses never include an existing channel's or mesh's key regardless
   (only a freshly-created/rotated key is ever returned, and only once, to

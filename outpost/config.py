@@ -276,6 +276,25 @@ def rotate_channel_key_in_file(path: str, channel_id: int, key: bytes) -> None:
     _atomic_write_yaml(path, raw)
 
 
+def add_peer_to_file(path: str, host: str, port: int) -> None:
+    """Appends a new entry to the YAML config file's `peers:` list."""
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    raw.setdefault("peers", []).append({"host": host, "port": port})
+    _atomic_write_yaml(path, raw)
+
+
+def remove_peer_from_file(path: str, host: str, port: int) -> None:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    peers = raw.get("peers", [])
+    remaining = [p for p in peers if not (p.get("host") == host and p.get("port") == port)]
+    if len(remaining) == len(peers):
+        raise KeyError(f"no peer {host}:{port}")
+    raw["peers"] = remaining
+    _atomic_write_yaml(path, raw)
+
+
 
 def _resolve_sender_id(config_path: str, raw: dict) -> int:
     """Returns the configured sender_id, or auto-generates and persists one.

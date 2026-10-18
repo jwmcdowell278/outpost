@@ -8,6 +8,7 @@ from outpost.config import (
     DEFAULT_LISTEN_PORT, EDITABLE_FIELDS, OutpostConfig, editable_config_values,
     load_config, save_config_fields,
     add_channel_to_file, rename_channel_in_file, rotate_channel_key_in_file,
+    add_peer_to_file, remove_peer_from_file,
 )
 from outpost.crypto import generate_channel_key
 
@@ -196,4 +197,38 @@ def test_rotate_channel_key_in_file_replaces_key_only(tmp_path):
     raw = yaml.safe_load(config_path.read_text())
     assert raw["channels"][0]["name"] == "ops"  # untouched
     assert raw["channels"][0]["key"] == base64.b64encode(new_key).decode()
+
+
+def test_add_peer_to_file_appends_entry(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path, extra="peers:\n  - host: 10.0.0.1\n    port: 5555\n")
+
+    add_peer_to_file(str(config_path), "10.0.0.2", 6000)
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["peers"] == [
+        {"host": "10.0.0.1", "port": 5555},
+        {"host": "10.0.0.2", "port": 6000},
+    ]
+
+
+def test_remove_peer_from_file_removes_matching_entry_only(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(
+        config_path,
+        extra="peers:\n  - host: 10.0.0.1\n    port: 5555\n  - host: 10.0.0.2\n    port: 6000\n",
+    )
+
+    remove_peer_from_file(str(config_path), "10.0.0.1", 5555)
+
+    raw = yaml.safe_load(config_path.read_text())
+    assert raw["peers"] == [{"host": "10.0.0.2", "port": 6000}]
+
+
+def test_remove_peer_from_file_raises_for_unknown_address(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path, extra="peers:\n  - host: 10.0.0.1\n    port: 5555\n")
+
+    with pytest.raises(KeyError):
+        remove_peer_from_file(str(config_path), "10.0.0.9", 5555)
 

@@ -27,6 +27,8 @@ from .config import (
     add_channel_to_file,
     rename_channel_in_file,
     rotate_channel_key_in_file,
+    add_peer_to_file,
+    remove_peer_from_file,
 )
 
 log = logging.getLogger(__name__)
@@ -110,6 +112,7 @@ def _nav(active: str) -> str:
     return f"""<nav class="tabs">
   <a href="/"{cls('status')}>Status</a>
   <a href="/channels"{cls('channels')}>Channels</a>
+  <a href="/peers"{cls('peers')}>Peers</a>
   <a href="/settings"{cls('settings')}>Settings</a>
 </nav>"""
 
@@ -479,6 +482,110 @@ loadChannels();
 </html>
 """
 
+_PEERS_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Peers</title>
+{_STYLE}
+</head>
+<body>
+<h1>Outpost</h1>
+{_nav('peers')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div class="card">
+  <h2>Static peers</h2>
+  <div id="peerList">loading...</div>
+  <div class="muted" id="peersMsg"></div>
+</div>
+
+<div class="card" id="newPeerCard">
+  <h2>Add peer</h2>
+  <div class="row">
+    <input id="newHost" type="text" size="20" placeholder="host (IP or hostname)">
+    <input id="newPort" type="number" size="6" placeholder="port" value="5555">
+    <button id="addPeer">Add</button>
+  </div>
+  <div class="muted">A static peer is kept forever even if quiet - use this for a link mDNS/subnet scan can't reach (e.g. a WireGuard tunnel). Takes effect immediately on this node - no restart needed. Add the mirror entry on the other end too.</div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+async function loadPeers() {{
+  const list = document.getElementById('peerList');
+  const msg = document.getElementById('peersMsg');
+  try {{
+    const data = await api('/api/peers');
+    list.textContent = '';
+    if (!data.peers.length) {{
+      list.textContent = 'no static peers configured';
+    }}
+    for (const p of data.peers) {{
+      const row = document.createElement('div');
+      row.className = 'row field-row';
+      row.innerHTML = `
+        <span class="name">${{p.host}}:${{p.port}}</span>
+        <button type="button" class="removeBtn" data-host="${{p.host}}" data-port="${{p.port}}">Remove</button>
+      `;
+      list.appendChild(row);
+    }}
+    document.getElementById('addPeer').disabled = !data.can_save;
+    if (!data.can_save) {{
+      msg.textContent = 'no config file path - peers are read-only here';
+    }}
+  }} catch (e) {{
+    list.textContent = 'error: ' + e.message;
+  }}
+}}
+
+document.getElementById('peerList').addEventListener('click', async (e) => {{
+  if (!e.target.classList.contains('removeBtn')) return;
+  const host = e.target.dataset.host;
+  const port = Number(e.target.dataset.port);
+  const msg = document.getElementById('peersMsg');
+  try {{
+    await api('/api/peers/remove', {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ host, port }}),
+    }});
+    msg.className = 'ok'; msg.textContent = `removed ${{host}}:${{port}}`;
+    loadPeers();
+  }} catch (err) {{
+    msg.className = 'error'; msg.textContent = err.message;
+  }}
+}});
+
+document.getElementById('addPeer').addEventListener('click', async () => {{
+  const host = document.getElementById('newHost').value.trim();
+  const port = Number(document.getElementById('newPort').value);
+  const msg = document.getElementById('peersMsg');
+  if (!host) {{ msg.className = 'error'; msg.textContent = 'host is required'; return; }}
+  try {{
+    await api('/api/peers', {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ host, port }}),
+    }});
+    document.getElementById('newHost').value = '';
+    msg.className = ''; msg.textContent = '';
+    loadPeers();
+  }} catch (err) {{
+    msg.className = 'error'; msg.textContent = err.message;
+  }}
+}});
+
+loadPeers();
+</script>
+</body>
+</html>
+"""
+
 
 class WebUI:
     def __init__(self, client, host: str = "127.0.0.1", port: int = 8765, token: str | None = None):
@@ -497,6 +604,7 @@ class WebUI:
             web.get("/", self._handle_index),
             web.get("/settings", self._handle_settings_page),
             web.get("/channels", self._handle_channels_page),
+            web.get("/peers", self._handle_peers_page),
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
@@ -507,6 +615,9 @@ class WebUI:
             web.post("/api/channels", self._handle_create_channel),
             web.post(r"/api/channels/{channel_id:\d+}/rename", self._handle_rename_channel),
             web.post(r"/api/channels/{channel_id:\d+}/rotate_key", self._handle_rotate_channel_key),
+            web.get("/api/peers", self._handle_get_peers),
+            web.post("/api/peers", self._handle_add_peer),
+            web.post("/api/peers/remove", self._handle_remove_peer),
             web.post("/api/restart", self._handle_restart),
         ])
 
@@ -528,6 +639,9 @@ class WebUI:
 
     async def _handle_channels_page(self, request) -> web.Response:
         return web.Response(text=_CHANNELS_HTML, content_type="text/html")
+
+    async def _handle_peers_page(self, request) -> web.Response:
+        return web.Response(text=_PEERS_HTML, content_type="text/html")
 
     async def _handle_status(self, request) -> web.Response:
         c = self.client
@@ -630,6 +744,47 @@ class WebUI:
         rotate_channel_key_in_file(self.client.config_path, channel_id, key)
         self.client.rotate_channel_key(channel_id, key)
         return web.json_response({"id": channel_id, "key": base64.b64encode(key).decode()})
+
+    async def _handle_get_peers(self, request) -> web.Response:
+        peers = [{"host": p.host, "port": p.port} for p in self.client.config.peers]
+        return web.json_response({"peers": peers, "can_save": self.client.config_path is not None})
+
+    async def _handle_add_peer(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        data = await request.json()
+        host = (data.get("host") or "").strip()
+        if not host:
+            raise web.HTTPBadRequest(text="missing 'host'")
+        try:
+            port = int(data.get("port"))
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="'port' must be an integer")
+        if not (1 <= port <= 65535):
+            raise web.HTTPBadRequest(text="'port' must be between 1 and 65535")
+        if any(p.host == host and p.port == port for p in self.client.config.peers):
+            raise web.HTTPBadRequest(text=f"{host}:{port} is already a peer")
+
+        add_peer_to_file(self.client.config_path, host, port)
+        self.client.add_peer(host, port)
+        return web.json_response({"host": host, "port": port})
+
+    async def _handle_remove_peer(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        data = await request.json()
+        host = (data.get("host") or "").strip()
+        try:
+            port = int(data.get("port"))
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="'port' must be an integer")
+
+        try:
+            remove_peer_from_file(self.client.config_path, host, port)
+        except KeyError:
+            raise web.HTTPNotFound(text=f"no peer {host}:{port} in config")
+        self.client.remove_peer(host, port)
+        return web.json_response({"host": host, "port": port})
 
     async def _handle_get_config(self, request) -> web.Response:
         values = editable_config_values(self.client.config)

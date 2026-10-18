@@ -251,6 +251,25 @@ class OutpostClient:
         self.config.channels[channel_id] = replace(self.config.channels[channel_id], key=key)
         self.ciphers[channel_id] = ChannelCipher(key)
 
+    def add_peer(self, host: str, port: int) -> Peer:
+        """Adds a static peer to the running process (web UI's Peers page) -
+        no restart needed. Keyed "static-" like config-loaded peers so it's
+        exempt from prune_stale (see MeshTransport)."""
+        peer = Peer(host=host, port=port)
+        self.config.peers.append(peer)
+        self.transport.add_peer(f"static-{host}:{port}", peer)
+        return peer
+
+    def remove_peer(self, host: str, port: int) -> None:
+        """Removes a static peer immediately. Also drops any live transport
+        entry at that address, even if it was since confirmed under a
+        sender_id-keyed identity (see MeshTransport.confirm_peer) rather
+        than still sitting under its original static- key."""
+        self.config.peers[:] = [p for p in self.config.peers if (p.host, p.port) != (host, port)]
+        for detail in self.transport.peer_details():
+            if (detail["host"], detail["port"]) == (host, port):
+                self.transport.remove_peer(detail["key"])
+
     def channel_member_details(self, channel_id: int | None = None) -> list[dict]:
         """Confirmed members (sender_id + address + seconds since last
         announce) of a channel - defaults to the active channel. For
