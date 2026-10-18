@@ -23,13 +23,9 @@ from .config import EDITABLE_FIELDS, editable_config_values, save_config_fields
 
 log = logging.getLogger(__name__)
 
-
-_INDEX_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Outpost</title>
+# Shared <head> styling for both pages - kept as one constant so the two
+# pages can't visually drift apart.
+_STYLE = """
 <style>
   :root {
     color-scheme: light dark;
@@ -46,6 +42,12 @@ _INDEX_HTML = """<!doctype html>
   }
   h1 { font-size: 1.35rem; margin: 1rem 0 0.5rem; }
   h2 { font-size: 0.95rem; margin: 0 0 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  nav.tabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0 0 0.2rem; }
+  nav.tabs a {
+    padding: 0.5rem 0.9rem; font-size: 0.9rem; font-weight: 600; text-decoration: none;
+    color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav.tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 0.6rem; padding: 1rem; margin: 0.9rem 0; }
   .row { margin: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
   button {
@@ -72,9 +74,48 @@ _INDEX_HTML = """<!doctype html>
   #saveMsg.error { color: var(--danger); }
   #saveMsg.ok { color: var(--accent); }
 </style>
+"""
+
+# Shared token-input + fetch helper script, included on both pages since
+# each is a separate full page load (no client-side router).
+_CONNECTION_SCRIPT = """
+const tokenInput = document.getElementById('token');
+tokenInput.value = localStorage.getItem('outpost_token') || '';
+tokenInput.addEventListener('change', () => localStorage.setItem('outpost_token', tokenInput.value));
+
+function authHeaders() {
+  const t = tokenInput.value;
+  return t ? { 'Authorization': 'Bearer ' + t } : {};
+}
+
+async function api(path, options) {
+  const resp = await fetch(path, { ...options, headers: { ...(options && options.headers), ...authHeaders() } });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+"""
+
+
+def _nav(active: str) -> str:
+    def cls(name: str) -> str:
+        return ' class="active"' if name == active else ""
+    return f"""<nav class="tabs">
+  <a href="/"{cls('status')}>Status</a>
+  <a href="/settings"{cls('settings')}>Settings</a>
+</nav>"""
+
+
+_INDEX_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost</title>
+{_STYLE}
 </head>
 <body>
 <h1>Outpost</h1>
+{_nav('status')}
 
 <div class="card">
   <h2>Connection</h2>
@@ -98,6 +139,93 @@ _INDEX_HTML = """<!doctype html>
   <table id="memberTable"><thead><tr><th>Sender</th><th>Address</th><th>Age</th></tr></thead><tbody></tbody></table>
 </div>
 
+<script>
+{_CONNECTION_SCRIPT}
+
+function fmtAge(s) {{
+  if (s < 60) return s.toFixed(0) + 's';
+  if (s < 3600) return (s / 60).toFixed(0) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}}
+
+function fillTable(bodyId, rows, renderRow) {{
+  const tbody = document.querySelector('#' + bodyId + ' tbody');
+  tbody.textContent = '';
+  for (const row of rows) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = renderRow(row);
+    tbody.appendChild(tr);
+  }}
+}}
+
+async function refresh() {{
+  try {{
+    const s = await api('/api/status');
+    document.getElementById('statusLine').textContent =
+      `sender_id ${{s.sender_id}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}` +
+      (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '');
+
+    const channelsDiv = document.getElementById('channels');
+    channelsDiv.textContent = '';
+    for (const name of s.channels) {{
+      const btn = document.createElement('button');
+      btn.textContent = name;
+      if (name === s.active_channel) btn.classList.add('active');
+      btn.onclick = () => api('/api/channel', {{
+        method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ name }}),
+      }}).then(refresh).catch(e => alert(e.message));
+      channelsDiv.appendChild(btn);
+    }}
+
+    document.getElementById('peerCount').textContent = s.peer_count;
+    fillTable('peerTable', s.peers, p =>
+      `<td>${{p.host}}:${{p.port}}${{p.static ? ' <span class="pill">static</span>' : ''}}</td><td>${{p.candidate_count}}</td><td>${{fmtAge(p.age_s)}}</td>`);
+    fillTable('memberTable', s.channel_members, m =>
+      `<td>${{m.sender_id}}</td><td>${{m.host}}:${{m.port}}</td><td>${{fmtAge(m.age_s)}}</td>`);
+  }} catch (e) {{
+    document.getElementById('statusLine').textContent = 'error: ' + e.message;
+  }}
+}}
+
+function setPtt(pressed) {{
+  api('/api/ptt', {{
+    method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ pressed }}),
+  }}).then(refresh).catch(e => alert(e.message));
+}}
+
+const pttBtn = document.getElementById('ptt');
+pttBtn.addEventListener('mousedown', () => {{ pttBtn.classList.add('pressed'); setPtt(true); }});
+pttBtn.addEventListener('touchstart', (e) => {{ e.preventDefault(); pttBtn.classList.add('pressed'); setPtt(true); }});
+for (const ev of ['mouseup', 'mouseleave', 'touchend', 'touchcancel']) {{
+  pttBtn.addEventListener(ev, () => {{ pttBtn.classList.remove('pressed'); setPtt(false); }});
+}}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+"""
+
+_SETTINGS_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Settings</title>
+{_STYLE}
+</head>
+<body>
+<h1>Outpost</h1>
+{_nav('settings')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
 <div class="card">
   <h2>Settings</h2>
   <div id="settingsFields">loading...</div>
@@ -118,150 +246,74 @@ _INDEX_HTML = """<!doctype html>
 </div>
 
 <script>
-const tokenInput = document.getElementById('token');
-tokenInput.value = localStorage.getItem('outpost_token') || '';
-tokenInput.addEventListener('change', () => localStorage.setItem('outpost_token', tokenInput.value));
+{_CONNECTION_SCRIPT}
 
-function authHeaders() {
-  const t = tokenInput.value;
-  return t ? { 'Authorization': 'Bearer ' + t } : {};
-}
-
-async function api(path, options) {
-  const resp = await fetch(path, { ...options, headers: { ...(options && options.headers), ...authHeaders() } });
-  if (!resp.ok) throw new Error(await resp.text());
-  return resp.json();
-}
-
-function fmtAge(s) {
-  if (s < 60) return s.toFixed(0) + 's';
-  if (s < 3600) return (s / 60).toFixed(0) + 'm';
-  return (s / 3600).toFixed(1) + 'h';
-}
-
-function fillTable(bodyId, rows, renderRow) {
-  const tbody = document.querySelector('#' + bodyId + ' tbody');
-  tbody.textContent = '';
-  for (const row of rows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = renderRow(row);
-    tbody.appendChild(tr);
-  }
-}
-
-async function refresh() {
-  try {
-    const s = await api('/api/status');
-    document.getElementById('statusLine').textContent =
-      `sender_id ${s.sender_id} · AGC ${s.agc_enabled ? 'on' : 'off'} · HPF ${s.highpass_enabled ? 'on' : 'off'} · squelch ${s.squelch_enabled ? 'on' : 'off'} · relay ${s.relay_enabled ? 'on' : 'off'}` +
-      (s.tx_lockout_enabled ? ` · lockout ${s.channel_busy ? 'BUSY' : 'on'}` : '');
-
-    const channelsDiv = document.getElementById('channels');
-    channelsDiv.textContent = '';
-    for (const name of s.channels) {
-      const btn = document.createElement('button');
-      btn.textContent = name;
-      if (name === s.active_channel) btn.classList.add('active');
-      btn.onclick = () => api('/api/channel', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      }).then(refresh).catch(e => alert(e.message));
-      channelsDiv.appendChild(btn);
-    }
-
-    document.getElementById('peerCount').textContent = s.peer_count;
-    fillTable('peerTable', s.peers, p =>
-      `<td>${p.host}:${p.port}${p.static ? ' <span class="pill">static</span>' : ''}</td><td>${p.candidate_count}</td><td>${fmtAge(p.age_s)}</td>`);
-    fillTable('memberTable', s.channel_members, m =>
-      `<td>${m.sender_id}</td><td>${m.host}:${m.port}</td><td>${fmtAge(m.age_s)}</td>`);
-  } catch (e) {
-    document.getElementById('statusLine').textContent = 'error: ' + e.message;
-  }
-}
-
-function setPtt(pressed) {
-  api('/api/ptt', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pressed }),
-  }).then(refresh).catch(e => alert(e.message));
-}
-
-const pttBtn = document.getElementById('ptt');
-pttBtn.addEventListener('mousedown', () => { pttBtn.classList.add('pressed'); setPtt(true); });
-pttBtn.addEventListener('touchstart', (e) => { e.preventDefault(); pttBtn.classList.add('pressed'); setPtt(true); });
-for (const ev of ['mouseup', 'mouseleave', 'touchend', 'touchcancel']) {
-  pttBtn.addEventListener(ev, () => { pttBtn.classList.remove('pressed'); setPtt(false); });
-}
-
-function settingsInput(name, field) {
+function settingsInput(name, field) {{
   const v = field.value;
-  if (typeof v === 'boolean') {
-    return `<input type="checkbox" data-field="${name}" ${v ? 'checked' : ''}>`;
-  }
-  if (typeof v === 'number') {
-    return `<input type="number" step="any" data-field="${name}" value="${v}" size="10">`;
-  }
-  return `<input type="text" data-field="${name}" value="${v ?? ''}" size="20">`;
-}
+  if (typeof v === 'boolean') {{
+    return `<input type="checkbox" data-field="${{name}}" ${{v ? 'checked' : ''}}>`;
+  }}
+  if (typeof v === 'number') {{
+    return `<input type="number" step="any" data-field="${{name}}" value="${{v}}" size="10">`;
+  }}
+  return `<input type="text" data-field="${{name}}" value="${{v ?? ''}}" size="20">`;
+}}
 
-async function loadSettings() {
+async function loadSettings() {{
   const container = document.getElementById('settingsFields');
-  try {
+  try {{
     const cfg = await api('/api/config');
     container.textContent = '';
-    for (const [name, field] of Object.entries(cfg.fields)) {
+    for (const [name, field] of Object.entries(cfg.fields)) {{
       const row = document.createElement('div');
       row.className = 'row field-row';
       const livePill = field.live ? '<span class="pill live">live</span>' : '<span class="pill">restart</span>';
-      row.innerHTML = `<span class="name">${name} ${livePill}</span>${settingsInput(name, field)}`;
+      row.innerHTML = `<span class="name">${{name}} ${{livePill}}</span>${{settingsInput(name, field)}}`;
       container.appendChild(row);
-    }
+    }}
     document.getElementById('saveSettings').disabled = !cfg.can_save;
-    if (!cfg.can_save) {
+    if (!cfg.can_save) {{
       document.getElementById('saveMsg').textContent = 'no config file path - settings are read-only here';
-    }
-  } catch (e) {
+    }}
+  }} catch (e) {{
     container.textContent = 'error: ' + e.message;
-  }
-}
+  }}
+}}
 
-document.getElementById('saveSettings').addEventListener('click', async () => {
+document.getElementById('saveSettings').addEventListener('click', async () => {{
   const msg = document.getElementById('saveMsg');
   msg.className = ''; msg.textContent = 'saving...';
-  const updates = {};
-  for (const el of document.querySelectorAll('#settingsFields [data-field]')) {
+  const updates = {{}};
+  for (const el of document.querySelectorAll('#settingsFields [data-field]')) {{
     const name = el.dataset.field;
     updates[name] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
-  }
-  try {
-    const result = await api('/api/config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+  }}
+  try {{
+    const result = await api('/api/config', {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify(updates),
-    });
+    }});
     msg.className = 'ok';
     msg.textContent = result.restart_required.length
-      ? `saved - restart required for: ${result.restart_required.join(', ')}`
+      ? `saved - restart required for: ${{result.restart_required.join(', ')}}`
       : 'saved and applied';
-    refresh();
-  } catch (e) {
+  }} catch (e) {{
     msg.className = 'error';
     msg.textContent = e.message;
-  }
-});
+  }}
+}});
 
-document.getElementById('genkey').addEventListener('click', () => {
-  api('/api/generate_key', { method: 'POST' })
-    .then(r => { document.getElementById('genkeyOut').value = r.key; })
+document.getElementById('genkey').addEventListener('click', () => {{
+  api('/api/generate_key', {{ method: 'POST' }})
+    .then(r => {{ document.getElementById('genkeyOut').value = r.key; }})
     .catch(e => alert(e.message));
-});
-document.getElementById('copykey').addEventListener('click', () => {
+}});
+document.getElementById('copykey').addEventListener('click', () => {{
   const out = document.getElementById('genkeyOut');
   if (out.value) navigator.clipboard.writeText(out.value);
-});
+}});
 
-refresh();
 loadSettings();
-setInterval(refresh, 2000);
 </script>
 </body>
 </html>
@@ -283,6 +335,7 @@ class WebUI:
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([
             web.get("/", self._handle_index),
+            web.get("/settings", self._handle_settings_page),
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
@@ -303,6 +356,9 @@ class WebUI:
 
     async def _handle_index(self, request) -> web.Response:
         return web.Response(text=_INDEX_HTML, content_type="text/html")
+
+    async def _handle_settings_page(self, request) -> web.Response:
+        return web.Response(text=_SETTINGS_HTML, content_type="text/html")
 
     async def _handle_status(self, request) -> web.Response:
         c = self.client
