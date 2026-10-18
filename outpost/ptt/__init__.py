@@ -25,3 +25,15 @@ class PTTSource(ABC):
     @abstractmethod
     def stop(self) -> None:
         """Stop listening and release any underlying resources."""
+
+
+class NullPTT(PTTSource):
+    """No-op fallback used when the configured hardware source can't be
+    built (e.g. no X11 display for keyboard PTT on a headless box) - PTT
+    stays available via the web UI, which calls set_ptt directly."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass

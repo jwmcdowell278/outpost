@@ -22,7 +22,7 @@ import ifaddr
 
 from outpost.config import load_config, OutpostConfig
 from outpost.client import OutpostClient
-from outpost.ptt import PTTSource
+from outpost.ptt import NullPTT, PTTSource
 
 
 def web_ui_urls(host: str, port: int) -> list[str]:
@@ -127,16 +127,20 @@ async def main() -> None:
         channel_name = default_channel.name
 
     client = OutpostClient(config, channel_name, config_path=args.config)
-    ptt = build_ptt(args, client.set_ptt)
+    try:
+        ptt = build_ptt(args, client.set_ptt)
+    except Exception as exc:
+        # e.g. pynput's keyboard backend probes for an X11 display at
+        # import time and fails outright on a headless box - don't take
+        # the whole client (and its web UI PTT button, which doesn't go
+        # through this PTTSource at all) down with it.
+        logging.warning("--ptt %s could not be built (%s); PTT only available via the web UI if enabled", args.ptt, exc)
+        ptt = NullPTT()
 
     await client.start()
     try:
         ptt.start()
     except Exception as exc:
-        # e.g. pynput's keyboard hook needs a display and fails on a
-        # headless box - don't take the whole client (and its web UI PTT
-        # button, which doesn't go through this PTTSource at all) down
-        # with it.
         logging.warning("--ptt %s failed to start (%s); PTT only available via the web UI if enabled", args.ptt, exc)
     print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
           f"Hold the configured PTT to talk. Ctrl+C to quit.")
