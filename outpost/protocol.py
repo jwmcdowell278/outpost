@@ -21,6 +21,12 @@ successful decryption to build a per-channel membership table and then
 target future AUDIO/STOP sends only at known members instead of flooding
 everyone - see client.py's `_channel_announce_loop`/`_channel_target_peers`.
 
+START packets are sent once per PTT press (symmetric with STOP, sent once
+per release), carrying the sender's optional alias (UTF-8, possibly empty)
+as the encrypted payload - this is how receivers learn who is currently
+transmitting without paying per-frame AUDIO overhead for it. See
+client.py's `set_ptt`/`_on_packet`/`speaking_details`.
+
 The header is sent in the clear (channel routing/sequencing must be readable
 without the key) but the audio payload itself is always encrypted - see
 crypto.py. The encryption nonce is derived from (sender_id, seq), so it never
@@ -36,6 +42,7 @@ TYPE_STOP = 2
 TYPE_PING = 3
 TYPE_PEX = 4
 TYPE_CHANNEL_ANNOUNCE = 5
+TYPE_START = 6
 
 _HEADER_FMT = "!BBBIQ"
 HEADER_SIZE = struct.calcsize(_HEADER_FMT)  # 15 bytes

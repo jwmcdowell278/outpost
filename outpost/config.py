@@ -32,6 +32,14 @@ class OutpostConfig:
     channels: dict[int, Channel] = field(default_factory=dict)
     peers: list[Peer] = field(default_factory=list)
 
+    # Optional human-readable name for this node, sent once per PTT press
+    # (see protocol.TYPE_START) so other users see who's talking instead of
+    # just a numeric sender_id. None/empty means no alias is sent. Not a
+    # secret and not authenticated beyond the channel key itself (anyone
+    # holding a channel's key could claim any alias on it) - purely a
+    # display convenience, not an identity guarantee.
+    sender_alias: str | None = None
+
     # Network-profile knobs - tune down for constrained links (mesh radio),
     # leave at defaults for LAN/VPN. See config/outpost.example.yaml.
     bitrate: int = 16000
@@ -135,6 +143,19 @@ class OutpostConfig:
     enable_tx_lockout: bool = False
     tx_lockout_timeout_ms: float = 500.0
 
+    # Echo guard: while enabled, mutes captured mic audio (sends silence
+    # rather than dropping the packet) for echo_guard_hold_ms after this
+    # device's own speaker last played anything. Targets acoustic feedback
+    # from two devices placed too close together - without this, one
+    # device's speaker output can bleed into a nearby device's own mic and
+    # get re-transmitted, which (unlike a one-off echo) can build into a
+    # howling feedback loop if that re-transmission is in turn picked up
+    # again. Off by default, since - like tx_lockout - it changes behavior
+    # (a held PTT press can go out as silence); see README's "Preventing
+    # acoustic feedback between nearby devices" section.
+    enable_echo_guard: bool = False
+    echo_guard_hold_ms: float = 500.0
+
     def channel_by_name(self, name: str) -> Channel:
         for ch in self.channels.values():
             if ch.name == name:
@@ -176,6 +197,20 @@ def _validate_nonnegative_float(v):
     return v
 
 
+_MAX_ALIAS_LEN = 32
+
+
+def _validate_alias(v):
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError("must be a string")
+    v = v.strip()
+    if len(v) > _MAX_ALIAS_LEN:
+        raise ValueError(f"must be at most {_MAX_ALIAS_LEN} characters")
+    return v or None
+
+
 # Fields the web UI's settings editor is allowed to change, each mapped to
 # (validator, applies_live). applies_live=True means OutpostClient can adopt
 # the new value on the running process immediately; everything else only
@@ -186,6 +221,7 @@ def _validate_nonnegative_float(v):
 # the web UI itself risks a self-lockout or accidental exposure).
 EDITABLE_FIELDS: dict[str, tuple] = {
     "listen_port": (_validate_port, False),
+    "sender_alias": (_validate_alias, True),
     "bitrate": (_validate_positive_int, False),
     "frame_ms": (_validate_positive_int, False),
     "max_packet_bytes": (_validate_positive_int, False),
@@ -209,6 +245,8 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "squelch_hold_ms": (_validate_nonnegative_float, True),
     "enable_tx_lockout": (_validate_bool, True),
     "tx_lockout_timeout_ms": (_validate_positive_float, True),
+    "enable_echo_guard": (_validate_bool, True),
+    "echo_guard_hold_ms": (_validate_positive_float, True),
 }
 
 
@@ -295,6 +333,69 @@ def remove_peer_from_file(path: str, host: str, port: int) -> None:
     _atomic_write_yaml(path, raw)
 
 
+def export_config_text(path: str) -> str:
+    """Returns the config file's raw contents verbatim (comments/formatting
+    included) - for the web UI's "export config" download, and for handing
+    a ready-to-use file to a new node (minus its own sender_id, which is
+    per-node and auto-generated on first run - see _resolve_sender_id)."""
+    with open(path, "r") as f:
+        return f.read()
+
+
+def validate_config_yaml(text: str) -> None:
+    """Structural validation of an uploaded config file before it's allowed
+    to overwrite the running client's config file - raises ValueError with
+    a human-readable reason on any problem. Deliberately does not resolve
+    sender_id or construct an OutpostConfig (load_config does that, with
+    its own defaulting, the next time the client actually starts on this
+    file) - this only guards against writing an obviously broken/malicious
+    file over a working config."""
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"not valid YAML: {exc}")
+    if not isinstance(raw, dict):
+        raise ValueError("must be a YAML mapping (object) at the top level")
+
+    if "mesh_key" not in raw:
+        raise ValueError("missing required field 'mesh_key'")
+    try:
+        mesh_key = base64.b64decode(raw["mesh_key"], validate=True)
+    except Exception:
+        raise ValueError("mesh_key is not valid base64")
+    if len(mesh_key) != KEY_SIZE:
+        raise ValueError(f"mesh_key must decode to {KEY_SIZE} bytes")
+
+    channels = raw.get("channels")
+    if not isinstance(channels, list) or not channels:
+        raise ValueError("missing or empty required field 'channels' (list)")
+    for entry in channels:
+        if not isinstance(entry, dict) or not {"id", "name", "key"} <= entry.keys():
+            raise ValueError("each channels entry needs id, name, and key")
+        try:
+            key = base64.b64decode(entry["key"], validate=True)
+        except Exception:
+            raise ValueError(f"channel {entry.get('name')!r} key is not valid base64")
+        if len(key) != KEY_SIZE:
+            raise ValueError(f"channel {entry.get('name')!r} key must decode to {KEY_SIZE} bytes")
+
+    for entry in raw.get("peers", []) or []:
+        if not isinstance(entry, dict) or not {"host", "port"} <= entry.keys():
+            raise ValueError("each peers entry needs host and port")
+
+
+def write_config_text(path: str, text: str) -> None:
+    """Atomically overwrites the config file at `path` with raw `text`
+    verbatim - unlike save_config_fields/_atomic_write_yaml, this does not
+    re-serialize via yaml.safe_dump, so an imported file's own formatting/
+    comments are preserved. Caller must validate with validate_config_yaml
+    first."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(text)
+    os.replace(tmp_path, path)
+
+
 
 def _resolve_sender_id(config_path: str, raw: dict) -> int:
     """Returns the configured sender_id, or auto-generates and persists one.
@@ -343,6 +444,7 @@ def load_config(path: str) -> OutpostConfig:
         mesh_key=mesh_key,
         channels=channels,
         peers=peers,
+        sender_alias=raw.get("sender_alias"),
         bitrate=raw.get("bitrate", 16000),
         frame_ms=raw.get("frame_ms", 20),
         max_packet_bytes=raw.get("max_packet_bytes", 1200),
@@ -366,6 +468,8 @@ def load_config(path: str) -> OutpostConfig:
         enable_relay=raw.get("enable_relay", False),
         enable_tx_lockout=raw.get("enable_tx_lockout", False),
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
+        enable_echo_guard=raw.get("enable_echo_guard", False),
+        echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
         web_ui_port=raw.get("web_ui_port", 8765),

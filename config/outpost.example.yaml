@@ -7,6 +7,14 @@
 # sender_id: 1
 listen_port: 5555
 
+# Optional human-readable name for this node, broadcast once per PTT press
+# (a TYPE_START packet, symmetric with the existing once-per-release STOP
+# packet) so other users see who's talking instead of just a numeric
+# sender_id. Leave unset/blank for no alias. Purely a display convenience,
+# not an identity guarantee - anyone holding a channel's key could claim any
+# alias on it, the same as any other channel-authenticated traffic.
+# sender_alias: "Basecamp"
+
 # Shared control-plane secret used to authenticate peer-exchange (PEX) gossip
 # messages (not used for audio - each channel has its own key for that).
 # Every node in the mesh must share this same key. Generate with:
@@ -110,6 +118,17 @@ squelch_hold_ms: 300         # how long the gate stays open after signal drops, 
 # each other" section.
 enable_tx_lockout: false
 tx_lockout_timeout_ms: 500
+
+# Echo guard: while enabled, mutes captured mic audio (sends silence instead
+# of dropping the packet) for echo_guard_hold_ms after this device's own
+# speaker last played anything. Targets acoustic feedback between two
+# devices placed too close together - one device's speaker bleeding into a
+# nearby device's own mic can otherwise get re-transmitted and build into a
+# howling feedback loop. Off by default since it changes behavior (a held
+# PTT press can go out as silence) - see README's "Preventing acoustic
+# feedback between nearby devices" section.
+enable_echo_guard: false
+echo_guard_hold_ms: 500
 
 # Lightweight local web UI (view status, switch channels, web-based PTT) -
 # off by default. Requires the 'web' extra: pip install -e ".[web]".

@@ -24,6 +24,9 @@ from .config import (
     EDITABLE_FIELDS,
     editable_config_values,
     save_config_fields,
+    export_config_text,
+    validate_config_yaml,
+    write_config_text,
     add_channel_to_file,
     rename_channel_in_file,
     rotate_channel_key_in_file,
@@ -139,6 +142,7 @@ _INDEX_HTML = f"""<!doctype html>
   <h2>Channel</h2>
   <div class="row" id="channels"></div>
   <button id="ptt">Hold to talk</button>
+  <div class="muted" id="speakingLine"></div>
 </div>
 
 <div class="card">
@@ -174,8 +178,13 @@ async function refresh() {{
   try {{
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${{s.sender_id}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}` +
+      `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}` +
       (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '');
+
+    const speakingLine = document.getElementById('speakingLine');
+    speakingLine.textContent = s.speaking.length
+      ? '\U0001F50A speaking: ' + s.speaking.map(p => p.alias || ('sender ' + p.sender_id)).join(', ')
+      : '';
 
     const channelsDiv = document.getElementById('channels');
     channelsDiv.textContent = '';
@@ -256,6 +265,23 @@ _SETTINGS_HTML = f"""<!doctype html>
     <button id="copykey" type="button">Copy</button>
   </div>
   <div class="muted">Paste into a channel's or mesh_key's "key:" field in your config file - not saved automatically.</div>
+</div>
+
+<div class="card">
+  <h2>Import / export config</h2>
+  <div class="row">
+    <button id="exportConfig" type="button">Export config</button>
+    <span class="muted">Downloads the full outpost.yaml, including channel/mesh keys - handle the file like a password.</span>
+  </div>
+  <div class="row">
+    <input id="importFile" type="file" accept=".yaml,.yml,text/yaml">
+    <button id="importConfig" type="button">Import</button>
+  </div>
+  <div class="muted">Importing replaces the <strong>entire</strong> config file (keys, channels, peers, network
+    profile, web UI settings) and requires a restart to take effect - it does not apply anything live. A bad
+    import (e.g. a different <code>web_ui_token</code> or <code>web_ui_host</code>) can lock you out of this
+    page after the restart, so only import a file you trust.</div>
+  <div id="importMsg"></div>
 </div>
 
 <script>
@@ -339,6 +365,40 @@ document.getElementById('genkey').addEventListener('click', () => {{
 document.getElementById('copykey').addEventListener('click', () => {{
   const out = document.getElementById('genkeyOut');
   if (out.value) navigator.clipboard.writeText(out.value);
+}});
+
+document.getElementById('exportConfig').addEventListener('click', async () => {{
+  try {{
+    const resp = await fetch('/api/config/export', {{ headers: authHeaders() }});
+    if (!resp.ok) throw new Error(await resp.text());
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'outpost.yaml';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }} catch (e) {{
+    alert(e.message);
+  }}
+}});
+
+document.getElementById('importConfig').addEventListener('click', async () => {{
+  const msg = document.getElementById('importMsg');
+  const fileInput = document.getElementById('importFile');
+  const file = fileInput.files[0];
+  if (!file) {{ msg.className = 'error'; msg.textContent = 'choose a file first'; return; }}
+  if (!confirm('Replace the entire config file with this one? This requires a restart and can lock you out of this page if it changes the web UI host/token.')) return;
+  try {{
+    const text = await file.text();
+    const result = await api('/api/config/import', {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/x-yaml' }}, body: text,
+    }});
+    msg.className = 'ok';
+    msg.textContent = result.restart_required ? 'imported - restart required to take effect' : 'imported';
+    document.getElementById('restartBtn').style.display = result.restart_required ? 'inline-block' : 'none';
+  }} catch (e) {{
+    msg.className = 'error'; msg.textContent = e.message;
+  }}
 }});
 
 loadSettings();
@@ -611,6 +671,8 @@ class WebUI:
             web.post("/api/generate_key", self._handle_generate_key),
             web.get("/api/config", self._handle_get_config),
             web.post("/api/config", self._handle_set_config),
+            web.get("/api/config/export", self._handle_export_config),
+            web.post("/api/config/import", self._handle_import_config),
             web.get("/api/channels", self._handle_get_channels),
             web.post("/api/channels", self._handle_create_channel),
             web.post(r"/api/channels/{channel_id:\d+}/rename", self._handle_rename_channel),
@@ -657,6 +719,7 @@ class WebUI:
         c = self.client
         return web.json_response({
             "sender_id": c.config.sender_id,
+            "sender_alias": c.sender_alias,
             "active_channel": c.active_channel.name,
             "channels": [ch.name for ch in c.config.channels.values()],
             "ptt_active": c._ptt_active,
@@ -667,10 +730,12 @@ class WebUI:
             "squelch_enabled": c.squelch_enabled,
             "squelch_threshold_rms": c.squelch.threshold_rms,
             "tx_lockout_enabled": c.enable_tx_lockout,
+            "echo_guard_enabled": c.enable_echo_guard,
             "channel_busy": c.channel_busy(),
             "peer_count": len(c.transport.peers),
             "peers": c.transport.peer_details(),
             "channel_members": c.channel_member_details(),
+            "speaking": c.speaking_details(),
         })
 
     async def _handle_set_channel(self, request) -> web.Response:
@@ -857,12 +922,45 @@ class WebUI:
             self.client.enable_tx_lockout = validated["enable_tx_lockout"]
         if "tx_lockout_timeout_ms" in validated:
             self.client.tx_lockout_timeout_s = validated["tx_lockout_timeout_ms"] / 1000.0
+        if "enable_echo_guard" in validated:
+            self.client.enable_echo_guard = validated["enable_echo_guard"]
+        if "echo_guard_hold_ms" in validated:
+            self.client.echo_guard_hold_s = validated["echo_guard_hold_ms"] / 1000.0
+        if "sender_alias" in validated:
+            self.client.sender_alias = validated["sender_alias"]
 
         return web.json_response({
             "saved": sorted(validated),
             "applied_live": applied_live,
             "restart_required": restart_required,
         })
+
+    async def _handle_export_config(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to export")
+        text = export_config_text(self.client.config_path)
+        return web.Response(
+            text=text, content_type="application/x-yaml",
+            headers={"Content-Disposition": 'attachment; filename="outpost.yaml"'},
+        )
+
+    async def _handle_import_config(self, request) -> web.Response:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to import into")
+        data = await request.read()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise web.HTTPBadRequest(text="uploaded file is not valid UTF-8 text")
+        try:
+            validate_config_yaml(text)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=f"invalid config: {exc}")
+        # Whole-file import can change sender_id/mesh_key/channels/web_ui_*
+        # - never applied live, same as those fields' individual edits would
+        # need to be; only takes effect after a restart (see /api/restart).
+        write_config_text(self.client.config_path, text)
+        return web.json_response({"imported": True, "restart_required": True})
 
     async def _handle_restart(self, request) -> web.Response:
         # Responds before actually restarting - scripts/run_client.py's main

@@ -18,7 +18,7 @@ from .discovery import PeerDiscovery
 from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
-from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
+from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
 from .subnet_scan import SubnetScanner
 from .transport import MeshTransport
 from .config import OutpostConfig, Channel, Peer
@@ -32,6 +32,11 @@ log = logging.getLogger(__name__)
 _LOCKOUT_TONE_HZ = 480.0
 _LOCKOUT_TONE_MS = 150.0
 _LOCKOUT_TONE_AMPLITUDE = 8000
+
+# How long a received sender stays listed as "speaking" (speaking_details)
+# after its last AUDIO/START frame with no STOP seen - a fallback for a lost
+# STOP packet, well above normal frame/announce cadence.
+_SPEAKING_STALE_S = 2.0
 
 
 def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duration_ms: float, amplitude: int) -> list[bytes]:
@@ -177,12 +182,30 @@ class OutpostClient:
         # channel_id -> monotonic time of the last AUDIO frame received from
         # another peer on that channel - drives channel_busy() below.
         self._channel_last_audio: dict[int, float] = {}
+
+        # Echo guard (see OutpostConfig.enable_echo_guard) - same always-
+        # construct/mutable-flag pattern as AGC/relay/tx_lockout above.
+        self.enable_echo_guard = config.enable_echo_guard
+        self.echo_guard_hold_s = config.echo_guard_hold_ms / 1000.0
+        # monotonic time this device's own speaker last played anything -
+        # updated by _play_on_speaker(), the single path everything that
+        # plays audio locally goes through.
+        self._last_own_speaker_activity = 0.0
         # Precomputed once - sample rate/frame size are fixed for the life
         # of the client.
         self._lockout_tone_frames = _make_tone_frames(
             self.codec.frame_size, self.codec.sample_rate,
             _LOCKOUT_TONE_HZ, _LOCKOUT_TONE_MS, _LOCKOUT_TONE_AMPLITUDE,
         )
+
+        # Optional human-readable name sent once per PTT press (see
+        # OutpostConfig.sender_alias) - mutable mirror so the web UI can
+        # change it live, same pattern as agc_enabled etc. above.
+        self.sender_alias = config.sender_alias
+        # channel_id -> {sender_id: (alias | None, last_seen_monotonic)} -
+        # who's currently transmitting on each channel, for the web UI's
+        # "who is speaking" display (see speaking_details below).
+        self._channel_speaking: dict[int, dict[int, tuple[str | None, float]]] = {}
 
     # --- PTT control --------------------------------------------------
 
@@ -203,7 +226,22 @@ class OutpostClient:
         currently playing, so it may briefly interrupt/overlay whoever is
         already talking rather than play on a separate line."""
         for frame in self._lockout_tone_frames:
-            self.speaker.play_frame(frame)
+            self._play_on_speaker(frame)
+
+    def _play_on_speaker(self, frame: bytes) -> None:
+        """Every path that plays audio through this device's own speaker
+        goes through here, so echo_guard (see _tx_loop) knows when this
+        device was last actually making sound."""
+        self._last_own_speaker_activity = time.monotonic()
+        self.speaker.play_frame(frame)
+
+    def _own_speaker_active(self) -> bool:
+        """True if this device's own speaker played something within the
+        last echo_guard_hold_s - used to mute the mic so audio bleeding from
+        this device's own speaker (e.g. two devices placed too close
+        together) isn't picked back up and re-transmitted into a feedback
+        loop."""
+        return (time.monotonic() - self._last_own_speaker_activity) < self.echo_guard_hold_s
 
     def set_ptt(self, pressed: bool) -> None:
         """Call from a PTTSource callback (may run on any thread)."""
@@ -212,12 +250,27 @@ class OutpostClient:
             self._play_lockout_tone()
             return
         self._ptt_active = pressed
-        if not pressed:
-            cipher = self.ciphers[self.active_channel.id]
-            seq = self.transport.next_seq()
-            ciphertext = cipher.encrypt(self.config.sender_id, seq, b"")
-            targets = self._channel_target_peers(self.active_channel.id)
-            self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_STOP, targets=targets)
+        cipher = self.ciphers[self.active_channel.id]
+        targets = self._channel_target_peers(self.active_channel.id)
+        try:
+            if pressed:
+                # Sent once per transmission (not per AUDIO frame) so other
+                # users learn who's speaking without paying per-frame
+                # overhead for it - see protocol.TYPE_START.
+                seq = self.transport.next_seq()
+                alias_bytes = self.sender_alias.encode("utf-8") if self.sender_alias else b""
+                ciphertext = cipher.encrypt(self.config.sender_id, seq, alias_bytes)
+                self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_START, targets=targets)
+            else:
+                seq = self.transport.next_seq()
+                ciphertext = cipher.encrypt(self.config.sender_id, seq, b"")
+                self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_STOP, targets=targets)
+        except RuntimeError:
+            # Transport not started yet (e.g. PTT pressed during startup) -
+            # local PTT state still toggles above; the peer just won't get a
+            # START/STOP for this edge. Must not raise into a PTTSource
+            # callback, which may run on an arbitrary driver/audio thread.
+            log.debug("PTT edge not sent - transport not started")
 
     def set_active_channel(self, name: str) -> None:
         self.active_channel = self.config.channel_by_name(name)
@@ -282,6 +335,21 @@ class OutpostClient:
             for sender_id, (peer, last_seen) in self._channel_members.get(channel_id, {}).items()
         ]
 
+    def speaking_details(self, channel_id: int | None = None) -> list[dict]:
+        """Senders currently transmitting on `channel_id` (default: active
+        channel) - sender_id, alias (if one was sent/known), and seconds
+        since their last AUDIO/START frame. Best-effort: normally cleared by
+        a received STOP, with a short staleness fallback (_SPEAKING_STALE_S)
+        in case that STOP is lost."""
+        if channel_id is None:
+            channel_id = self.active_channel.id
+        now = time.monotonic()
+        return [
+            {"sender_id": sender_id, "alias": alias, "age_s": round(now - last_seen, 1)}
+            for sender_id, (alias, last_seen) in self._channel_speaking.get(channel_id, {}).items()
+            if now - last_seen < _SPEAKING_STALE_S
+        ]
+
     # --- lifecycle ------------------------------------------------------
 
     async def start(self) -> None:
@@ -337,13 +405,16 @@ class OutpostClient:
             frame = await loop.run_in_executor(None, self.mic.read_frame)
             if not self._ptt_active:
                 continue
-            if self.highpass_enabled:
-                frame = self.highpass.process(frame)
-            if self.squelch_enabled:
-                frame = self.squelch.process(frame)
-            if self.agc_enabled:
-                frame = self.agc.process(frame)
-            frame = self.noise_suppressor.process(frame)
+            if self.enable_echo_guard and self._own_speaker_active():
+                frame = b"\x00" * len(frame)
+            else:
+                if self.highpass_enabled:
+                    frame = self.highpass.process(frame)
+                if self.squelch_enabled:
+                    frame = self.squelch.process(frame)
+                if self.agc_enabled:
+                    frame = self.agc.process(frame)
+                frame = self.noise_suppressor.process(frame)
             opus_bytes = self.codec.encode(frame)
             cipher = self.ciphers[self.active_channel.id]
             seq = self.transport.next_seq()
@@ -412,7 +483,7 @@ class OutpostClient:
             # sounds like a (delayed) audio echo whenever relay mode is on.
             return
 
-        if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
+        if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_START, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
             self._relay_packet(header, ciphertext, addr)
 
         if header.ptype == TYPE_PEX:
@@ -441,6 +512,17 @@ class OutpostClient:
         if cipher is None:
             return  # we don't hold this channel's key - can't be a member
 
+        if header.ptype == TYPE_START:
+            try:
+                alias_bytes = cipher.decrypt(header.sender_id, header.seq, ciphertext)
+            except ValueError:
+                log.debug("dropping unauthenticated start from %s", addr)
+                return
+            alias = alias_bytes.decode("utf-8", errors="replace") or None
+            self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+            self._channel_last_audio[header.channel_id] = time.monotonic()
+            self._channel_speaking.setdefault(header.channel_id, {})[header.sender_id] = (alias, time.monotonic())
+            return
         if header.ptype == TYPE_STOP:
             try:
                 cipher.decrypt(header.sender_id, header.seq, ciphertext)
@@ -450,6 +532,7 @@ class OutpostClient:
             self._last_seq_seen.pop(header.sender_id, None)
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio.pop(header.channel_id, None)
+            self._channel_speaking.get(header.channel_id, {}).pop(header.sender_id, None)
             return
         if header.ptype != TYPE_AUDIO:
             return
@@ -468,6 +551,12 @@ class OutpostClient:
         # source addresses are trivially spoofable and must not be trusted.
         self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
         self._channel_last_audio[header.channel_id] = time.monotonic()
+        # Keep "who's speaking" fresh even if this sender's TYPE_START was
+        # lost - preserve whatever alias we already know (if any) rather
+        # than dropping it back to unknown.
+        speaking = self._channel_speaking.setdefault(header.channel_id, {})
+        prev_alias = speaking.get(header.sender_id, (None, 0.0))[0]
+        speaking[header.sender_id] = (prev_alias, time.monotonic())
 
         if last_seq is not None and header.seq == last_seq + 2:
             # Exactly one frame missing - try Opus in-band FEC to recover it
@@ -475,13 +564,13 @@ class OutpostClient:
             # to plain concealment.
             try:
                 recovered = self.codec.decode_fec(opus_bytes)
-                self.speaker.play_frame(recovered)
+                self._play_on_speaker(recovered)
             except Exception:
-                self.speaker.play_frame(self.codec.decode_loss())
+                self._play_on_speaker(self.codec.decode_loss())
         elif last_seq is not None and header.seq > last_seq + 1:
             for _ in range(header.seq - last_seq - 1):
-                self.speaker.play_frame(self.codec.decode_loss())
+                self._play_on_speaker(self.codec.decode_loss())
 
         self._last_seq_seen[header.sender_id] = header.seq
         pcm = self.codec.decode(opus_bytes)
-        self.speaker.play_frame(pcm)
+        self._play_on_speaker(pcm)

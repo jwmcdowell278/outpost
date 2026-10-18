@@ -9,6 +9,7 @@ from outpost.config import (
     load_config, save_config_fields,
     add_channel_to_file, rename_channel_in_file, rotate_channel_key_in_file,
     add_peer_to_file, remove_peer_from_file,
+    export_config_text, validate_config_yaml, write_config_text,
 )
 from outpost.crypto import generate_channel_key
 
@@ -102,6 +103,35 @@ def test_subnet_scan_fields_are_loaded_from_yaml(tmp_path):
     assert config.subnet_scan_max_hosts == 256
 
 
+def test_sender_alias_defaults_to_none_when_omitted(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+
+    config = load_config(str(config_path))
+
+    assert config.sender_alias is None
+
+
+def test_sender_alias_is_loaded_from_yaml(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path, extra='sender_alias: "Basecamp"\n')
+
+    config = load_config(str(config_path))
+
+    assert config.sender_alias == "Basecamp"
+
+
+def test_validate_alias_strips_whitespace_and_rejects_too_long():
+    validator, _live = EDITABLE_FIELDS["sender_alias"]
+    assert validator(None) is None
+    assert validator("  Basecamp  ") == "Basecamp"
+    assert validator("   ") is None  # blank clears to None
+    with pytest.raises(ValueError):
+        validator("x" * 33)
+    with pytest.raises(ValueError):
+        validator(123)
+
+
 def test_editable_config_values_excludes_secrets_and_identity():
     cfg = OutpostConfig(sender_id=1, listen_port=5555, mesh_key=generate_channel_key())
     values = editable_config_values(cfg)
@@ -116,6 +146,7 @@ def test_editable_config_values_excludes_secrets_and_identity():
     assert "enable_squelch" in values
     assert "squelch_threshold_rms" in values
     assert "squelch_hold_ms" in values
+    assert "sender_alias" in values
 
 
 @pytest.mark.parametrize("field,bad_value", [
@@ -231,4 +262,69 @@ def test_remove_peer_from_file_raises_for_unknown_address(tmp_path):
 
     with pytest.raises(KeyError):
         remove_peer_from_file(str(config_path), "10.0.0.9", 5555)
+
+
+def test_export_config_text_returns_file_verbatim(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path, extra="# a comment\nbitrate: 8000\n")
+
+    assert export_config_text(str(config_path)) == config_path.read_text()
+
+
+def test_validate_config_yaml_accepts_a_well_formed_config(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+    validate_config_yaml(config_path.read_text())  # must not raise
+
+
+def test_validate_config_yaml_rejects_non_yaml():
+    with pytest.raises(ValueError, match="not valid YAML"):
+        validate_config_yaml("not: valid: yaml: at: all: [")
+
+
+def test_validate_config_yaml_rejects_non_mapping_top_level():
+    with pytest.raises(ValueError, match="mapping"):
+        validate_config_yaml("- just\n- a\n- list\n")
+
+
+def test_validate_config_yaml_rejects_missing_mesh_key():
+    with pytest.raises(ValueError, match="mesh_key"):
+        validate_config_yaml("channels:\n  - id: 1\n    name: ops\n    key: " + _CHANNEL_KEY + "\n")
+
+
+def test_validate_config_yaml_rejects_malformed_mesh_key():
+    with pytest.raises(ValueError, match="mesh_key"):
+        validate_config_yaml(
+            "mesh_key: not-valid-base64!!!\nchannels:\n  - id: 1\n    name: ops\n    key: "
+            + _CHANNEL_KEY + "\n"
+        )
+
+
+def test_validate_config_yaml_rejects_missing_channels():
+    with pytest.raises(ValueError, match="channels"):
+        validate_config_yaml(f'mesh_key: "{_MESH_KEY}"\n')
+
+
+def test_validate_config_yaml_rejects_malformed_channel_entry():
+    with pytest.raises(ValueError, match="channels entry"):
+        validate_config_yaml(f'mesh_key: "{_MESH_KEY}"\nchannels:\n  - id: 1\n    name: ops\n')
+
+
+def test_validate_config_yaml_rejects_malformed_peer_entry():
+    with pytest.raises(ValueError, match="peers entry"):
+        validate_config_yaml(
+            f'mesh_key: "{_MESH_KEY}"\nchannels:\n  - id: 1\n    name: ops\n    key: "{_CHANNEL_KEY}"\n'
+            'peers:\n  - host: 10.0.0.1\n'
+        )
+
+
+def test_write_config_text_overwrites_file_verbatim(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_minimal_config(config_path)
+
+    new_text = f'mesh_key: "{_MESH_KEY}"\nchannels:\n  - id: 1\n    name: renamed\n    key: "{_CHANNEL_KEY}"\n'
+    write_config_text(str(config_path), new_text)
+
+    assert config_path.read_text() == new_text
+    assert not (tmp_path / "outpost.yaml.tmp").exists()
 

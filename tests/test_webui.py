@@ -8,6 +8,7 @@ is driven via asyncio.run() from a plain sync test function (see
 tests/test_channel_scoping.py for the same pattern)."""
 from __future__ import annotations
 import asyncio
+import base64
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
@@ -46,6 +47,8 @@ async def _status_reports_active_channel_and_channel_list():
         assert body["active_channel"] == "ops"
         assert set(body["channels"]) == {"ops", "tac"}
         assert body["ptt_active"] is False
+        assert body["sender_alias"] is None
+        assert body["speaking"] == []
 
 
 def test_set_channel_switches_active_channel():
@@ -189,6 +192,25 @@ async def _status_includes_peer_and_channel_member_detail():
         assert body["channel_members"] == []
         assert body["agc_enabled"] is True
         assert body["relay_enabled"] is False
+
+
+def test_set_config_applies_sender_alias_live(tmp_path):
+    asyncio.run(_set_config_applies_sender_alias_live(tmp_path))
+
+
+async def _set_config_applies_sender_alias_live(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\n")
+
+    client = _make_client(config_path=str(config_path))
+    ui = WebUI(client)
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config", json={"sender_alias": "Basecamp"})
+        assert resp.status == 200
+        assert client.sender_alias == "Basecamp"
+
+        status = await (await tc.get("/api/status")).json()
+        assert status["sender_alias"] == "Basecamp"
 
 
 def test_get_config_lists_editable_fields_with_live_flag_and_save_capability():
@@ -632,4 +654,82 @@ async def _peers_page_serves_html():
         resp = await tc.get("/peers")
         assert resp.status == 200
         assert "text/html" in resp.content_type
+
+
+def test_export_config_requires_a_config_path():
+    asyncio.run(_export_config_requires_a_config_path())
+
+
+async def _export_config_requires_a_config_path():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.get("/api/config/export")
+        assert resp.status == 400
+
+
+def test_export_config_returns_file_contents_verbatim(tmp_path):
+    asyncio.run(_export_config_returns_file_contents_verbatim(tmp_path))
+
+
+async def _export_config_returns_file_contents_verbatim(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\n# a comment\nbitrate: 8000\n")
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.get("/api/config/export")
+        assert resp.status == 200
+        assert await resp.text() == config_path.read_text()
+        assert "attachment" in resp.headers["Content-Disposition"]
+
+
+def test_import_config_requires_a_config_path():
+    asyncio.run(_import_config_requires_a_config_path())
+
+
+async def _import_config_requires_a_config_path():
+    ui = WebUI(_make_client())
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config/import", data="mesh_key: x\nchannels: []\n")
+        assert resp.status == 400
+
+
+def test_import_config_rejects_invalid_yaml(tmp_path):
+    asyncio.run(_import_config_rejects_invalid_yaml(tmp_path))
+
+
+async def _import_config_rejects_invalid_yaml(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\nchannels: []\n")
+    original = config_path.read_text()
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config/import", data="not a valid config at all\n")
+        assert resp.status == 400
+    assert config_path.read_text() == original  # rejected, file untouched
+
+
+def test_import_config_overwrites_file_and_requires_restart(tmp_path):
+    asyncio.run(_import_config_overwrites_file_and_requires_restart(tmp_path))
+
+
+async def _import_config_overwrites_file_and_requires_restart(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    config_path.write_text("mesh_key: x\nchannels: []\n")
+
+    new_mesh_key = base64.b64encode(generate_channel_key()).decode()
+    new_channel_key = base64.b64encode(generate_channel_key()).decode()
+    new_text = (
+        f'mesh_key: "{new_mesh_key}"\n'
+        "channels:\n"
+        f'  - id: 1\n    name: imported\n    key: "{new_channel_key}"\n'
+    )
+
+    ui = WebUI(_make_client(config_path=str(config_path)))
+    async with TestClient(TestServer(ui.app)) as tc:
+        resp = await tc.post("/api/config/import", data=new_text)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body == {"imported": True, "restart_required": True}
+
+    assert config_path.read_text() == new_text
 

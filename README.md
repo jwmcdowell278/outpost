@@ -138,6 +138,12 @@ flowchart LR
   "Preventing people from talking over each other" below): ignores a local
   PTT press while another peer's audio on the active channel was received
   within the last `tx_lockout_timeout_ms`.
+- **Echo guard** (`enable_echo_guard`, off by default - see "Preventing
+  acoustic feedback between nearby devices" below): mutes captured mic
+  audio (sends silence rather than dropping the packet) for
+  `echo_guard_hold_ms` after this device's own speaker last played
+  anything, so acoustic bleed from a nearby device's speaker can't be
+  picked up and re-transmitted into a feedback loop.
 - **Automatic gain control** (`outpost/agc.py`, `enable_agc`, on by default):
   pure DSP (no model, no extra dependency) that normalizes captured mic
   volume toward a target RMS level, with gradual/bounded gain changes (no
@@ -222,6 +228,37 @@ flowchart LR
   the request that generated it) - without the correct token entered in the
   page's own Token field, the page loads but every status refresh/action
   fails with 401.
+- **Config import/export** (Settings page): **Export** downloads the
+  running client's exact `outpost.yaml` (via `/api/config/export`) -
+  including channel keys and `mesh_key` - so handle the downloaded file
+  like a password/credential, not a harmless settings dump. **Import**
+  uploads a replacement file (`/api/config/import`) that structurally
+  validates (well-formed YAML, a decodable `mesh_key`, at least one
+  well-formed channel entry) before atomically overwriting the client's
+  config file - it does **not** apply anything live, since a whole-file
+  swap can change `sender_id`/`mesh_key`/channels/web UI bind settings all
+  at once, and needs the same restart (`/api/restart`) as any other
+  restart-required field. Useful for cloning one node's config to a new
+  device, or for backing up/restoring a device's full setup. **Importing a
+  file with a different `web_ui_token` or `web_ui_host` can lock you out of
+  the web UI after the restart** - only import a file you trust, and keep
+  a copy of the current export before importing an unfamiliar one.
+  Requires `config_path` (started via `--config`), same as every other
+  save/persist action on this page.
+- **Sender alias**: `sender_alias` (Settings page, editable live) is an
+  optional, human-readable name for this node. When set, it's sent once per
+  PTT press as a `TYPE_START` packet (symmetric with the existing
+  once-per-release `TYPE_STOP` packet) carrying the alias as its encrypted
+  payload, instead of being embedded in every `TYPE_AUDIO` frame - avoiding
+  recurring per-frame bandwidth overhead on constrained mesh radio links
+  (see "Network profiles" above). The status page shows a "🔊 speaking:
+  <names>" line built from `/api/status`'s `speaking` list, which tracks
+  each currently-transmitting sender's alias (falling back to its numeric
+  `sender_id` if no alias was sent, e.g. a lost `START` packet or an older
+  client) and clears it on that sender's `STOP` (with a short staleness
+  fallback in case the `STOP` itself is lost). Like any other
+  channel-authenticated traffic, an alias is only as trustworthy as the
+  channel key itself - anyone holding the key can claim any alias.
 
 ### Reaching the Web UI on a headless device (e.g. Raspberry Pi over WiFi)
 
@@ -314,6 +351,42 @@ only. Because there's a single shared speaker output queue (see Design
 above), the tone is queued alongside whatever audio is currently playing, so
 it may briefly interrupt/overlay the other peer's ongoing transmission
 rather than play on a separate line like a phone's busy signal would.
+
+## Preventing acoustic feedback between nearby devices
+
+Two Outpost devices placed physically close together (e.g. sitting on the
+same table) can create a classic "two radios next to each other" feedback
+loop: one device's speaker output is picked up by a nearby device's own
+microphone, re-transmitted, played out of *that* device's speaker, picked
+up again, and so on - each pass can amplify rather than decay, producing an
+audible howl.
+
+Two settings help, and are complementary rather than redundant:
+
+- `enable_tx_lockout` (see above) blocks a **new PTT press** while the
+  active channel's audio was recently *received* - this helps avoid two
+  nearby devices both keying up into each other's mics in the first place,
+  but only at press-time, and only for the currently active channel.
+- `enable_echo_guard` (off by default, since like `tx_lockout` it changes
+  transmit behavior - a held PTT press can go out as silence) mutes
+  captured mic audio for `echo_guard_hold_ms` (default 500ms) after *this
+  device's own speaker* last played anything, regardless of which channel
+  or who's currently keyed up. This is the more direct fix for the
+  close-together-devices scenario, since the acoustic coupling path is a
+  device picking up its **own** speaker output, not just another peer's
+  channel audio. Calibrate `echo_guard_hold_ms` upward (e.g. 700-1000ms) if
+  devices are very close together and room/case acoustics let sound decay
+  audibly after playback stops; too high a value will eat the start of
+  real replies spoken immediately after the other party stops talking.
+  Live-toggleable from the web UI's settings editor without a restart.
+
+**This is not acoustic echo cancellation (AEC)** - there's no signal
+subtraction/adaptive filtering here, just a mute gate, so it can clip
+legitimate speech if someone starts talking right as the hold window is
+still active. For reliable results, also use the usual physical/procedural
+mitigations: prefer an earpiece/headphones over the speaker when devices
+will be close together, lower speaker volume, and keep reasonable physical
+separation between devices on the same channel.
 
 ## Network profiles: LAN / VPN vs. constrained mesh radio
 
