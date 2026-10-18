@@ -134,9 +134,23 @@ class MeshTransport:
         interface - is adopted under this sender_id's identity key and the
         old, identity-less key is retired. This is how a peer first seen via
         mDNS/gossip gets permanently tied to its real sender_id once any one
-        of its addresses is cryptographically confirmed."""
-        key = f"peer-{sender_id}"
+        of its addresses is cryptographically confirmed.
+
+        If the donor was a static (config-file) entry, the new identity key
+        is kept "static-" prefixed too, so confirming a static peer doesn't
+        silently strip its exemption from prune_stale() - without this, the
+        first authenticated packet from a static peer would demote it to a
+        normal prunable entry, defeating the point of configuring it as a
+        permanent rendezvous address."""
+        peer_key = f"peer-{sender_id}"
+        static_key = f"static-{sender_id}"
         with self._lock:
+            # Check which key (if either) this sender_id is already settled
+            # under *before* scanning for a donor, so a repeat confirmation
+            # (this runs on every authenticated packet, e.g. every audio
+            # frame) correctly recognizes and skips its own existing entry
+            # instead of re-merging it as its own "donor" every single time.
+            key = static_key if static_key in self._peers else peer_key
             donor_key = None
             candidates = [peer]
             for k, group in self._candidates.items():
@@ -146,6 +160,8 @@ class MeshTransport:
                     donor_key = k
                     candidates = [peer] + [c for c in group if (c.host, c.port) != (peer.host, peer.port)]
                     break
+            if donor_key is not None and donor_key.startswith("static-"):
+                key = static_key
             if donor_key is not None:
                 self._peers.pop(donor_key, None)
                 self._last_seen.pop(donor_key, None)
