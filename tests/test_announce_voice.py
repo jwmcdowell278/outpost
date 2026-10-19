@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from outpost.announce import _find_voice_id
+from outpost.announce import _find_voice_id, _resolve_say_voice
 
 
 @dataclass
@@ -44,3 +44,22 @@ def test_matches_by_language_code():
 def test_no_match_returns_none():
     engine = _FakeEngine(_VOICES)
     assert _find_voice_id(engine, "nonexistent-voice") is None
+
+
+_SAY_LINES = [
+    "Albert              en_US    # Hello! My name is Albert.",
+    "Moira               en_IE    # Top o' the morning to you!",
+    "Daniel              en_GB    # Hello! My name is Daniel.",
+]
+
+
+def test_say_matches_by_name_case_insensitively():
+    assert _resolve_say_voice(_SAY_LINES, "moira") == "Moira"
+
+
+def test_say_matches_by_language_code():
+    assert _resolve_say_voice(_SAY_LINES, "en_GB") == "Daniel"
+
+
+def test_say_no_match_returns_none():
+    assert _resolve_say_voice(_SAY_LINES, "nonexistent-voice") is None
