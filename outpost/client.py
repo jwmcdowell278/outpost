@@ -11,6 +11,7 @@ from dataclasses import replace
 import numpy as np
 
 from .agc import AutomaticGainControl
+from .announce import ChannelAnnouncer
 from .audio import MicCapture, SpeakerPlayback
 from .codec import OpusCodec
 from .crypto import ChannelCipher
@@ -70,6 +71,7 @@ class OutpostClient:
         agc: AutomaticGainControl | None = None,
         highpass: HighPassFilter | None = None,
         squelch: Squelch | None = None,
+        channel_announcer: ChannelAnnouncer | None = None,
         config_path: str | None = None,
     ):
         self.config = config
@@ -104,6 +106,16 @@ class OutpostClient:
             hold_frames=max(1, round(config.squelch_hold_ms / config.frame_ms)),
         )
         self.squelch_enabled = config.enable_squelch
+
+        # Unlike agc/highpass/squelch above, this is an optional external
+        # dependency (pyttsx3) and spawns a background thread, so - like
+        # web_ui/subnet_scan below - it's only constructed when enabled,
+        # not always-constructed-with-a-flag; toggling it live from the web
+        # UI isn't supported, see EDITABLE_FIELDS.
+        self.channel_announcer = (
+            channel_announcer if channel_announcer is not None
+            else (ChannelAnnouncer() if config.enable_channel_announce else None)
+        )
 
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
@@ -282,6 +294,8 @@ class OutpostClient:
 
     def set_active_channel(self, name: str) -> None:
         self.active_channel = self.config.channel_by_name(name)
+        if self.channel_announcer is not None:
+            self.channel_announcer.announce(f"Channel {name}")
 
     def request_restart(self) -> None:
         """Signals scripts/run_client.py's main loop to cleanly stop and

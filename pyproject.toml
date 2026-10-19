@@ -16,6 +16,7 @@ dependencies = [
     "pynput>=1.7.6",
     "zeroconf>=0.132.0",
     "ifaddr>=0.2.0",
+    "pyttsx3>=2.90",
 ]
 
 [project.optional-dependencies]

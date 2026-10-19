@@ -160,6 +160,14 @@ flowchart LR
   `echo_guard_hold_ms` after this device's own speaker last played
   anything, so acoustic bleed from a nearby device's speaker can't be
   picked up and re-transmitted into a feedback loop.
+- **Channel announce** (`outpost/announce.py`, `enable_channel_announce`,
+  off by default): speaks the active channel's name out loud (local
+  text-to-speech via `pyttsx3`, installed by default - espeak on Linux,
+  NSSpeechSynthesizer on macOS, no cloud service involved) each time it
+  changes, so an operator who can't glance at a screen still knows which
+  channel they're on. On Linux, also install the system `espeak` package
+  (`apt install espeak`); silently does nothing if that's missing. Requires
+  a restart to take effect, not live-toggleable from the web UI.
 - **Automatic gain control** (`outpost/agc.py`, `enable_agc`, on by default):
   pure DSP (no model, no extra dependency) that normalizes captured mic
   volume toward a target RMS level, with gradual/bounded gain changes (no

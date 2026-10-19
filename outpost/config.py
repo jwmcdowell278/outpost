@@ -156,6 +156,14 @@ class OutpostConfig:
     enable_echo_guard: bool = False
     echo_guard_hold_ms: float = 500.0
 
+    # Speaks the active channel's name out loud (local text-to-speech) each
+    # time it changes - a hands-free convenience for operators who can't
+    # glance at a screen. Uses pyttsx3 (installed by default); on Linux
+    # also needs the system 'espeak' package. Off by default since most
+    # nodes don't need it; applying a change to this flag requires a
+    # restart (see outpost/announce.py).
+    enable_channel_announce: bool = False
+
     # Rotating file logging, in addition to scripts/run_client.py's console
     # output - off by default (None). Set log_file to also archive logs to
     # disk for diagnosing intermittent issues after the fact (console
@@ -262,6 +270,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "tx_lockout_timeout_ms": (_validate_positive_float, True),
     "enable_echo_guard": (_validate_bool, True),
     "echo_guard_hold_ms": (_validate_positive_float, True),
+    "enable_channel_announce": (_validate_bool, False),
 }
 
 
@@ -485,6 +494,7 @@ def load_config(path: str) -> OutpostConfig:
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_echo_guard=raw.get("enable_echo_guard", False),
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
+        enable_channel_announce=raw.get("enable_channel_announce", False),
         log_file=raw.get("log_file"),
         log_max_bytes=raw.get("log_max_bytes", 10_000_000),
         log_backup_count=raw.get("log_backup_count", 5),
