@@ -15,14 +15,28 @@ log = logging.getLogger(__name__)
 
 
 class ChannelAnnouncer:
-    """Owns a single background thread and TTS engine for its lifetime -
-    pyttsx3 engines aren't safe to drive from more than one thread, so every
-    announcement is queued to this one thread rather than spawning a fresh
-    thread/engine per call."""
+    """Owns a single background thread for its lifetime, so at most one
+    announcement is ever being spoken at a time - but deliberately creates a
+    brand-new pyttsx3 engine for *every* announcement rather than reusing
+    one: on macOS (nsss driver), re-running say()/runAndWait() on the same
+    engine instance becomes unreliable after the first call and degrades
+    further with each subsequent one (seen live as the 1st/2nd channel
+    switch sometimes staying silent and later ones never working at all) -
+    a fresh engine per call is the documented workaround."""
 
     def __init__(self) -> None:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._unavailable = False
+        try:
+            import pyttsx3  # noqa: F401 - import-only probe, see announce()
+        except Exception:
+            log.warning(
+                "enable_channel_announce is on but text-to-speech isn't available "
+                "(is 'espeak' installed? pip show pyttsx3) - channel announcements disabled",
+                exc_info=True,
+            )
+            self._unavailable = True
+            return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -33,21 +47,13 @@ class ChannelAnnouncer:
             self._queue.put(text)
 
     def _run(self) -> None:
-        try:
-            import pyttsx3
-            engine = pyttsx3.init()
-        except Exception:
-            log.warning(
-                "enable_channel_announce is on but text-to-speech isn't available "
-                "(is 'espeak' installed? pip show pyttsx3) - channel announcements disabled",
-                exc_info=True,
-            )
-            self._unavailable = True
-            return
+        import pyttsx3
         while True:
             text = self._queue.get()
             try:
+                engine = pyttsx3.init()
                 engine.say(text)
                 engine.runAndWait()
+                engine.stop()
             except Exception:
                 log.warning("channel announce (text-to-speech) failed", exc_info=True)
