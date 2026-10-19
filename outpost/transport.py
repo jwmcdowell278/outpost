@@ -126,6 +126,12 @@ class MeshTransport:
         # on both the local subnet and a VPN tunnel - see add_peer_group).
         # _peers[key] always holds whichever candidate is currently active.
         self._candidates: dict[str, list[Peer]] = {k: [p] for k, p in self._peers.items()}
+        # Keys that have gone through a successful confirm_peer() at least
+        # once - lets confirm_peer tell a cryptographically-confirmed
+        # identity's address apart from a raw, not-yet-confirmed candidate
+        # (static bootstrap/gossip/mDNS), see confirm_peer's address-conflict
+        # guard below.
+        self._confirmed_keys: set[str] = set()
 
     def _load_seq_start(self, seq_persist_path: str | None) -> int:
         if seq_persist_path is None:
@@ -201,7 +207,7 @@ class MeshTransport:
         if is_new:
             log.info("peer added: %s -> %s:%d (%d candidate address(es))", key, primary.host, primary.port, len(candidates))
 
-    def confirm_peer(self, sender_id: int, peer: Peer) -> None:
+    def confirm_peer(self, sender_id: int, peer: Peer) -> bool:
         """Record `peer` as belonging to `sender_id`. Only call this for an
         address an authenticated packet actually arrived from - sender_id
         and raw UDP source addresses are otherwise trivially spoofable, so
@@ -222,16 +228,31 @@ class MeshTransport:
         would otherwise be trusted at face value and silently redirect that
         real peer's outbound traffic to ourselves).
 
+        Also refuses to attribute this address to `sender_id` if it's
+        already confirmed as a DIFFERENT sender_id's address - with relay
+        mode on, a relay's own address is the immediate UDP source for
+        every packet it forwards, so without this guard every sender_id
+        relayed through it would get attributed the relay's address
+        instead of its own (visible e.g. as two different channel members
+        both showing the relay's IP). The first sender_id to claim an
+        address keeps it; this can't distinguish the relay's own true
+        identity from one of the senders passing through it without a
+        protocol-level hop marker, but it does guarantee one address is
+        never attributed to more than one identity at a time.
+
         If the donor was a static (config-file) entry, the new identity key
         is kept "static-" prefixed too, so confirming a static peer doesn't
         silently strip its exemption from prune_stale() - without this, the
         first authenticated packet from a static peer would demote it to a
         normal prunable entry, defeating the point of configuring it as a
-        permanent rendezvous address."""
+        permanent rendezvous address.
+
+        Returns whether `peer` was actually attributed to `sender_id` -
+        False if it was rejected per either guard above."""
         if self._is_own_address(peer.host, peer.port):
             log.debug("ignoring confirm_peer for sender %d at %s:%d: that's our own listening address",
                       sender_id, peer.host, peer.port)
-            return
+            return False
         peer_key = f"peer-{sender_id}"
         static_key = f"static-{sender_id}"
         with self._lock:
@@ -241,6 +262,16 @@ class MeshTransport:
             # frame) correctly recognizes and skips its own existing entry
             # instead of re-merging it as its own "donor" every single time.
             key = static_key if static_key in self._peers else peer_key
+            conflicting_key = next(
+                (k for k in self._confirmed_keys
+                 if k != key and k in self._peers
+                 and self._peers[k].host == peer.host and self._peers[k].port == peer.port),
+                None,
+            )
+            if conflicting_key is not None:
+                log.debug("ignoring confirm_peer for sender %d at %s:%d: already confirmed as %s (likely relayed through that address, not %d's own)",
+                          sender_id, peer.host, peer.port, conflicting_key, sender_id)
+                return False
             donor_key = None
             candidates = [peer]
             for k, group in self._candidates.items():
@@ -256,17 +287,20 @@ class MeshTransport:
                 self._peers.pop(donor_key, None)
                 self._last_seen.pop(donor_key, None)
                 self._candidates.pop(donor_key, None)
+                self._confirmed_keys.discard(donor_key)
             is_new = key not in self._peers
             if is_new and len(self._peers) >= self.max_peers:
                 log.warning("peer table full (%d), ignoring confirmed peer %s", self.max_peers, key)
-                return
+                return False
             self._peers[key] = peer
             self._candidates[key] = candidates
             self._last_seen[key] = time.monotonic()
+            self._confirmed_keys.add(key)
         if donor_key is not None:
             log.info("peer %s: tied to confirmed sender_id (merged %d address(es) from %s)", key, len(candidates), donor_key)
         elif is_new:
             log.info("peer confirmed: %s -> %s:%d", key, peer.host, peer.port)
+        return True
 
     def prune_stale(self, max_age_s: float) -> None:
         """Drop non-static peer entries not refreshed within max_age_s.
@@ -285,6 +319,7 @@ class MeshTransport:
                 self._peers.pop(key, None)
                 self._last_seen.pop(key, None)
                 self._candidates.pop(key, None)
+                self._confirmed_keys.discard(key)
         for key in stale:
             log.info("peer expired (stale): %s", key)
 
@@ -293,6 +328,7 @@ class MeshTransport:
             removed = self._peers.pop(key, None)
             self._last_seen.pop(key, None)
             self._candidates.pop(key, None)
+            self._confirmed_keys.discard(key)
         if removed:
             log.info("peer removed: %s", key)
 

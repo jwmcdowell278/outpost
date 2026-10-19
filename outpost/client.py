@@ -516,8 +516,18 @@ class OutpostClient:
                 log.debug("dropping unauthenticated channel announce from %s", addr)
                 return
             peer = Peer(host=addr[0], port=addr[1])
-            self.transport.confirm_peer(header.sender_id, peer)
-            self._channel_members.setdefault(header.channel_id, {})[header.sender_id] = (peer, time.monotonic())
+            members = self._channel_members.setdefault(header.channel_id, {})
+            if self.transport.confirm_peer(header.sender_id, peer):
+                members[header.sender_id] = (peer, time.monotonic())
+            else:
+                # Address rejected (e.g. relayed through another node's
+                # address, not this sender's own) - keep whatever address we
+                # already trusted for this sender, if any, just refresh
+                # liveness so a relayed-only member doesn't go stale/get
+                # dropped from _channel_target_peers.
+                existing = members.get(header.sender_id)
+                if existing is not None:
+                    members[header.sender_id] = (existing[0], time.monotonic())
             return
 
         if header.channel_id != self.active_channel.id:
