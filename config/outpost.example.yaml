@@ -139,6 +139,12 @@ echo_guard_hold_ms: 500
 # restart (not live-editable from the web UI).
 enable_channel_announce: false
 
+# Picks a specific installed voice - case-insensitive substring matched
+# against id/name/language. Run `python -m outpost.announce` to list what's
+# available on this machine (e.g. macOS ships "Moira", a female Irish
+# English voice, built in). Leave unset to use the system default voice.
+channel_announce_voice:
+
 # Rotating file logging, in addition to scripts/run_client.py's console
 # output - off by default (unset). Set log_file to also archive logs to
 # disk for diagnosing intermittent issues after the fact (easy to lose

@@ -164,6 +164,15 @@ class OutpostConfig:
     # restart (see outpost/announce.py).
     enable_channel_announce: bool = False
 
+    # Case-insensitive substring matched against this machine's installed
+    # TTS voices' id/name/language (run `python -m outpost.announce` to
+    # list them) - e.g. "Moira" selects macOS's built-in female Irish
+    # English voice. None (default) uses the system default voice. If no
+    # installed voice matches, falls back to the default voice (logged as
+    # a warning) rather than failing announcements outright. Only read
+    # once at startup, same as enable_channel_announce.
+    channel_announce_voice: str | None = None
+
     # Rotating file logging, in addition to scripts/run_client.py's console
     # output - off by default (None). Set log_file to also archive logs to
     # disk for diagnosing intermittent issues after the fact (console
@@ -234,6 +243,20 @@ def _validate_alias(v):
     return v or None
 
 
+_MAX_VOICE_LEN = 128
+
+
+def _validate_voice(v):
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError("must be a string")
+    v = v.strip()
+    if len(v) > _MAX_VOICE_LEN:
+        raise ValueError(f"must be at most {_MAX_VOICE_LEN} characters")
+    return v or None
+
+
 # Fields the web UI's settings editor is allowed to change, each mapped to
 # (validator, applies_live). applies_live=True means OutpostClient can adopt
 # the new value on the running process immediately; everything else only
@@ -271,6 +294,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "enable_echo_guard": (_validate_bool, True),
     "echo_guard_hold_ms": (_validate_positive_float, True),
     "enable_channel_announce": (_validate_bool, False),
+    "channel_announce_voice": (_validate_voice, False),
 }
 
 
@@ -495,6 +519,7 @@ def load_config(path: str) -> OutpostConfig:
         enable_echo_guard=raw.get("enable_echo_guard", False),
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_channel_announce=raw.get("enable_channel_announce", False),
+        channel_announce_voice=raw.get("channel_announce_voice"),
         log_file=raw.get("log_file"),
         log_max_bytes=raw.get("log_max_bytes", 10_000_000),
         log_backup_count=raw.get("log_backup_count", 5),

@@ -114,7 +114,7 @@ class OutpostClient:
         # UI isn't supported, see EDITABLE_FIELDS.
         self.channel_announcer = (
             channel_announcer if channel_announcer is not None
-            else (ChannelAnnouncer() if config.enable_channel_announce else None)
+            else (ChannelAnnouncer(voice=config.channel_announce_voice) if config.enable_channel_announce else None)
         )
 
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}

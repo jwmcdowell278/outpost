@@ -5,13 +5,26 @@ authenticated signal of anything. Uses pyttsx3; on Linux this also needs
 the system 'espeak' package installed (apt install espeak), since pyttsx3
 itself has no bundled voice. Degrades to a silent no-op if either isn't
 available, so nodes that leave enable_channel_announce off are entirely
-unaffected."""
+unaffected. Run `python -m outpost.announce` to list installed voices for
+config's channel_announce_voice."""
 from __future__ import annotations
 import logging
 import queue
 import threading
 
 log = logging.getLogger(__name__)
+
+
+def _find_voice_id(engine, match: str) -> str | None:
+    """id of the first installed voice whose id/name/language contains
+    `match` (case-insensitive substring), or None if nothing matches - see
+    README for how to list voices available on a given machine."""
+    needle = match.lower()
+    for voice in engine.getProperty("voices"):
+        languages = " ".join(getattr(voice, "languages", None) or [])
+        if needle in f"{voice.id} {voice.name} {languages}".lower():
+            return voice.id
+    return None
 
 
 class ChannelAnnouncer:
@@ -24,11 +37,20 @@ class ChannelAnnouncer:
     switch sometimes staying silent and later ones never working at all) -
     a fresh engine per call is the documented workaround."""
 
-    def __init__(self) -> None:
+    def __init__(self, voice: str | None = None) -> None:
         self._queue: "queue.Queue[str]" = queue.Queue()
         self._unavailable = False
+        self._voice_id: str | None = None
         try:
-            import pyttsx3  # noqa: F401 - import-only probe, see announce()
+            import pyttsx3
+            if voice:
+                # Resolved once up front (not per-announcement) since the
+                # installed voice list doesn't change at runtime.
+                probe = pyttsx3.init()
+                self._voice_id = _find_voice_id(probe, voice)
+                probe.stop()
+                if self._voice_id is None:
+                    log.warning("channel_announce_voice %r matched no installed TTS voice - using the system default", voice)
         except Exception:
             log.warning(
                 "enable_channel_announce is on but text-to-speech isn't available "
@@ -52,8 +74,24 @@ class ChannelAnnouncer:
             text = self._queue.get()
             try:
                 engine = pyttsx3.init()
+                if self._voice_id is not None:
+                    engine.setProperty("voice", self._voice_id)
                 engine.say(text)
                 engine.runAndWait()
                 engine.stop()
             except Exception:
                 log.warning("channel announce (text-to-speech) failed", exc_info=True)
+
+
+def _list_voices() -> None:
+    import pyttsx3
+    engine = pyttsx3.init()
+    for voice in engine.getProperty("voices"):
+        print(f"{voice.id}  |  {voice.name}  |  {getattr(voice, 'languages', None)}")
+    engine.stop()
+
+
+if __name__ == "__main__":
+    # python -m outpost.announce - lists installed TTS voices (id/name/
+    # language) so you can pick a value for config's channel_announce_voice.
+    _list_voices()

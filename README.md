@@ -168,6 +168,11 @@ flowchart LR
   channel they're on. On Linux, also install the system `espeak` package
   (`apt install espeak`); silently does nothing if that's missing. Requires
   a restart to take effect, not live-toggleable from the web UI.
+  `channel_announce_voice` picks a specific installed voice by a
+  case-insensitive substring match against its id/name/language - run
+  `python -m outpost.announce` to list what's available (e.g. macOS ships
+  "Moira", a female Irish English voice, built in). Falls back to the
+  system default voice (with a warning logged) if nothing matches.
 - **Automatic gain control** (`outpost/agc.py`, `enable_agc`, on by default):
   pure DSP (no model, no extra dependency) that normalizes captured mic
   volume toward a target RMS level, with gradual/bounded gain changes (no
