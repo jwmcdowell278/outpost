@@ -9,3 +9,4 @@ config/outpost-node2.yaml
 *.seq
 *.log
 
+*.log.*
