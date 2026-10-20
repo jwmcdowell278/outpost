@@ -13,6 +13,7 @@ class _FakeVoice:
     id: str
     name: str
     languages: list[str] = field(default_factory=list)
+    gender: str | None = None
 
 
 class _FakeEngine:
@@ -25,9 +26,9 @@ class _FakeEngine:
 
 
 _VOICES = [
-    _FakeVoice(id="com.apple.speech.synthesis.voice.Albert", name="Albert", languages=["en_US"]),
-    _FakeVoice(id="com.apple.voice.compact.en-IE.Moira", name="Moira", languages=["en_IE"]),
-    _FakeVoice(id="com.apple.voice.compact.en-GB.Daniel", name="Daniel", languages=["en_GB"]),
+    _FakeVoice(id="com.apple.speech.synthesis.voice.Albert", name="Albert", languages=["en_US"], gender="Male"),
+    _FakeVoice(id="com.apple.voice.compact.en-IE.Moira", name="Moira", languages=["en_IE"], gender="Female"),
+    _FakeVoice(id="com.apple.voice.compact.en-GB.Daniel", name="Daniel", languages=["en_GB"], gender="Male"),
 ]
 
 
@@ -39,6 +40,11 @@ def test_matches_by_name_case_insensitively():
 def test_matches_by_language_code():
     engine = _FakeEngine(_VOICES)
     assert _find_voice_id(engine, "en_GB") == "com.apple.voice.compact.en-GB.Daniel"
+
+
+def test_matches_by_gender():
+    engine = _FakeEngine(_VOICES)
+    assert _find_voice_id(engine, "female") == "com.apple.voice.compact.en-IE.Moira"
 
 
 def test_no_match_returns_none():

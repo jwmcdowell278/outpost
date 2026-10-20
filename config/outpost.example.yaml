@@ -140,9 +140,12 @@ echo_guard_hold_ms: 500
 enable_channel_announce: false
 
 # Picks a specific installed voice - case-insensitive substring matched
-# against id/name/language. Run `python -m outpost.announce` to list what's
-# available on this machine (e.g. macOS ships "Moira", a female Irish
-# English voice, built in). Leave unset to use the system default voice.
+# against id/name/language/gender. Run `python -m outpost.announce` to list
+# what's available on this machine (e.g. macOS ships "Moira", a female
+# Irish English voice, built in). Named voices aren't portable across
+# platforms - espeak's Linux voices aren't individually named, so use the
+# portable "female"/"male" there instead. Leave unset to use the system
+# default voice.
 channel_announce_voice:
 
 # Rotating file logging, in addition to scripts/run_client.py's console

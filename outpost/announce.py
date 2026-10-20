@@ -26,14 +26,17 @@ _HAS_SAY = sys.platform == "darwin" and shutil.which("say") is not None
 
 
 def _find_voice_id(engine, match: str) -> str | None:
-    """id of the first installed pyttsx3 voice whose id/name/language
-    contains `match` (case-insensitive substring), or None if nothing
-    matches - see README for how to list voices available on a given
-    machine."""
+    """id of the first installed pyttsx3 voice whose id/name/language/
+    gender contains `match` (case-insensitive substring), or None if
+    nothing matches - see README for how to list voices available on a
+    given machine. Named voices like "Moira" are platform-specific (macOS
+    only); on Linux/espeak, where voices aren't individually named, use
+    the portable "female"/"male" instead."""
     needle = match.lower()
     for voice in engine.getProperty("voices"):
         languages = " ".join(getattr(voice, "languages", None) or [])
-        if needle in f"{voice.id} {voice.name} {languages}".lower():
+        gender = getattr(voice, "gender", None) or ""
+        if needle in f"{voice.id} {voice.name} {languages} {gender}".lower():
             return voice.id
     return None
 
@@ -149,7 +152,9 @@ def _list_voices() -> None:
     import pyttsx3
     engine = pyttsx3.init()
     for voice in engine.getProperty("voices"):
-        print(f"{voice.id}  |  {voice.name}  |  {getattr(voice, 'languages', None)}")
+        languages = getattr(voice, "languages", None)
+        gender = getattr(voice, "gender", None)
+        print(f"{voice.id}  |  {voice.name}  |  {languages}  |  {gender}")
     engine.stop()
 
 

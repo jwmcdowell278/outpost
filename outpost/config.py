@@ -165,12 +165,15 @@ class OutpostConfig:
     enable_channel_announce: bool = False
 
     # Case-insensitive substring matched against this machine's installed
-    # TTS voices' id/name/language (run `python -m outpost.announce` to
-    # list them) - e.g. "Moira" selects macOS's built-in female Irish
-    # English voice. None (default) uses the system default voice. If no
-    # installed voice matches, falls back to the default voice (logged as
-    # a warning) rather than failing announcements outright. Only read
-    # once at startup, same as enable_channel_announce.
+    # TTS voices' id/name/language/gender (run `python -m outpost.announce`
+    # to list them) - e.g. "Moira" selects macOS's built-in female Irish
+    # English voice. Named voices aren't portable across platforms -
+    # espeak's Linux voices aren't individually named, so use the portable
+    # "female"/"male" there instead. None (default) uses the system
+    # default voice. If no installed voice matches, falls back to the
+    # default voice (logged as a warning) rather than failing
+    # announcements outright. Only read once at startup, same as
+    # enable_channel_announce.
     channel_announce_voice: str | None = None
 
     # Rotating file logging, in addition to scripts/run_client.py's console
