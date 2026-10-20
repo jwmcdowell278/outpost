@@ -148,6 +148,17 @@ enable_channel_announce: false
 # default voice.
 channel_announce_voice:
 
+# Which microphone / speaker to use when this node has more than one (e.g. a
+# USB headset plus a built-in mic). Run `python -m outpost.audio` to list
+# this machine's devices. Use part of the device name (case-insensitive,
+# e.g. "USB") rather than its [index] where possible - indices can change
+# when USB devices are replugged or the machine reboots. Leave unset to use
+# the system default. If nothing matches, a warning is logged and the system
+# default is used. Can also be picked from the web UI's Settings page.
+# Changes take effect after a restart.
+# input_device: "USB Audio"
+# output_device: "USB Audio"
+
 # Rotating file logging, in addition to scripts/run_client.py's console
 # output - off by default (unset). Set log_file to also archive logs to
 # disk for diagnosing intermittent issues after the fact (easy to lose

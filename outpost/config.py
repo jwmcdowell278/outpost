@@ -176,6 +176,16 @@ class OutpostConfig:
     # enable_channel_announce.
     channel_announce_voice: str | None = None
 
+    # Which microphone / speaker to use when a node has more than one (e.g.
+    # a USB headset plus a built-in mic). Either a case-insensitive
+    # substring of the device name (preferred - indices can change when USB
+    # devices are replugged) or a device index. None uses the system
+    # default. Run `python -m outpost.audio` to list devices. A value that
+    # matches nothing logs a warning and falls back to the default. Changes
+    # take effect after a restart.
+    input_device: str | int | None = None
+    output_device: str | int | None = None
+
     # Rotating file logging, in addition to scripts/run_client.py's console
     # output - off by default (None). Set log_file to also archive logs to
     # disk for diagnosing intermittent issues after the fact (console
@@ -260,6 +270,31 @@ def _validate_voice(v):
     return v or None
 
 
+_MAX_DEVICE_LEN = 128
+
+
+def _validate_audio_device(v):
+    """None/blank = system default, a non-negative int (or all-digit
+    string, as the web UI's text inputs send) = device index, any other
+    string = device name substring."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        raise ValueError("must be a device name or index")
+    if isinstance(v, int):
+        if v < 0:
+            raise ValueError("device index must not be negative")
+        return v
+    if not isinstance(v, str):
+        raise ValueError("must be a device name or index")
+    v = v.strip()
+    if len(v) > _MAX_DEVICE_LEN:
+        raise ValueError(f"must be at most {_MAX_DEVICE_LEN} characters")
+    if v.isdigit():
+        return int(v)
+    return v or None
+
+
 # Fields the web UI's settings editor is allowed to change, each mapped to
 # (validator, applies_live). applies_live=True means OutpostClient can adopt
 # the new value on the running process immediately; everything else only
@@ -298,6 +333,8 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "echo_guard_hold_ms": (_validate_positive_float, True),
     "enable_channel_announce": (_validate_bool, False),
     "channel_announce_voice": (_validate_voice, False),
+    "input_device": (_validate_audio_device, False),
+    "output_device": (_validate_audio_device, False),
 }
 
 
@@ -523,6 +560,8 @@ def load_config(path: str) -> OutpostConfig:
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_channel_announce=raw.get("enable_channel_announce", False),
         channel_announce_voice=raw.get("channel_announce_voice"),
+        input_device=_validate_audio_device(raw.get("input_device")),
+        output_device=_validate_audio_device(raw.get("output_device")),
         log_file=raw.get("log_file"),
         log_max_bytes=raw.get("log_max_bytes", 10_000_000),
         log_backup_count=raw.get("log_backup_count", 5),

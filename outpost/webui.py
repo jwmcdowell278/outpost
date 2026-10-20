@@ -305,8 +305,39 @@ _SETTINGS_HTML = f"""<!doctype html>
 <script>
 {_CONNECTION_SCRIPT}
 
+// Audio device pickers: name -> list of devices, filled by loadSettings.
+const AUDIO_DEVICE_FIELDS = {{ input_device: 'input', output_device: 'output' }};
+let audioDevices = {{ input: [], output: [] }};
+
+function escapeHtml(s) {{
+  return String(s).replace(/[&<>"']/g, c => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }})[c]);
+}}
+
+function deviceSelect(name, kind, v) {{
+  const devices = audioDevices[kind] || [];
+  // Saved value may be a device index (from a hand-edited config) or a name.
+  const current = typeof v === 'number' ? devices.find(d => d.index === v) : null;
+  const selected = current ? current.name : (v ?? '');
+  let opts = `<option value="">(system default)</option>`;
+  let found = selected === '';
+  for (const d of devices) {{
+    const isSel = d.name === selected;
+    found = found || isSel;
+    const label = d.name + (d.default ? ' (current default)' : '');
+    opts += `<option value="${{escapeHtml(d.name)}}" ${{isSel ? 'selected' : ''}}>${{escapeHtml(label)}}</option>`;
+  }}
+  if (!found) {{
+    // Configured value doesn't exactly name a device (substring/index, or unplugged) - keep it selectable.
+    opts += `<option value="${{escapeHtml(selected)}}" selected>${{escapeHtml(selected)}} (as configured)</option>`;
+  }}
+  return `<select data-field="${{name}}">${{opts}}</select>`;
+}}
+
 function settingsInput(name, field) {{
   const v = field.value;
+  if (name in AUDIO_DEVICE_FIELDS) {{
+    return deviceSelect(name, AUDIO_DEVICE_FIELDS[name], v);
+  }}
   if (typeof v === 'boolean') {{
     return `<input type="checkbox" data-field="${{name}}" ${{v ? 'checked' : ''}}>`;
   }}
@@ -320,6 +351,11 @@ async function loadSettings() {{
   const container = document.getElementById('settingsFields');
   try {{
     const cfg = await api('/api/config');
+    try {{
+      audioDevices = await api('/api/audio_devices');
+    }} catch (e) {{
+      audioDevices = {{ input: [], output: [] }};
+    }}
     container.textContent = '';
     for (const [name, field] of Object.entries(cfg.fields)) {{
       const row = document.createElement('div');
@@ -702,6 +738,7 @@ class WebUI:
             web.post("/api/peers", self._handle_add_peer),
             web.post("/api/peers/remove", self._handle_remove_peer),
             web.post("/api/restart", self._handle_restart),
+            web.get("/api/audio_devices", self._handle_audio_devices),
         ])
 
     # Static page shells carry no secrets and need to load without an
@@ -892,6 +929,16 @@ class WebUI:
             for name, (_validator, live) in EDITABLE_FIELDS.items()
         }
         return web.json_response({"fields": fields, "can_save": self.client.config_path is not None})
+
+    async def _handle_audio_devices(self, request) -> web.Response:
+        """Mic/speaker devices on this machine, for the Settings page's
+        input_device/output_device pickers."""
+        from .audio import list_devices
+        try:
+            return web.json_response({"input": list_devices("input"), "output": list_devices("output")})
+        except Exception as exc:  # PortAudio errors shouldn't break the settings page
+            log.warning("could not list audio devices: %s", exc)
+            return web.json_response({"input": [], "output": [], "error": str(exc)})
 
     async def _handle_set_config(self, request) -> web.Response:
         if self.client.config_path is None:

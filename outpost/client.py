@@ -119,8 +119,8 @@ class OutpostClient:
 
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
-        self.mic = MicCapture(self.codec.sample_rate, self.codec.frame_size)
-        self.speaker = SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size)
+        self.mic = MicCapture(self.codec.sample_rate, self.codec.frame_size, device=config.input_device)
+        self.speaker = SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size, device=config.output_device)
         self.transport = MeshTransport(
             config.sender_id, config.peers, self._on_packet,
             max_packet_bytes=config.max_packet_bytes, max_peers=config.max_peers,

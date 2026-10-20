@@ -633,6 +633,30 @@ pytest tests/ -v
    Settings panel can also persist non-secret config changes straight back
    into that same `outpost.yaml`.
 
+## Choosing the microphone and speaker
+
+If a node has more than one audio device (e.g. a USB headset plus a
+built-in mic), pick which ones Outpost uses with `input_device` (mic) and
+`output_device` (speaker) in the config. List what's available with:
+
+```bash
+python -m outpost.audio
+```
+
+Then set either part of the device's name (case-insensitive) or its
+`[index]` from that list. Names are recommended, since indices can change
+when USB devices are replugged or the machine reboots:
+
+```yaml
+input_device: "USB Audio"
+output_device: "USB Audio"
+```
+
+Leave them unset to use the system default. If a configured name matches
+nothing (e.g. the headset is unplugged), Outpost logs a warning and uses the
+system default instead of refusing to start. The web UI's Settings page also
+offers both as dropdowns. Either way, changes take effect after a restart.
+
 ## Logging
 
 By default, `scripts/run_client.py` only logs to the console: `INFO` level
