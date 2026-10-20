@@ -933,9 +933,9 @@ class WebUI:
     async def _handle_audio_devices(self, request) -> web.Response:
         """Mic/speaker devices on this machine, for the Settings page's
         input_device/output_device pickers."""
-        from .audio import list_devices
+        from .audio import list_devices_fresh
         try:
-            return web.json_response({"input": list_devices("input"), "output": list_devices("output")})
+            return web.json_response(await list_devices_fresh())
         except Exception as exc:  # PortAudio errors shouldn't break the settings page
             log.warning("could not list audio devices: %s", exc)
             return web.json_response({"input": [], "output": [], "error": str(exc)})

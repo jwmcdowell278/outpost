@@ -127,13 +127,32 @@ def _make_client(config_path=None) -> OutpostClient:
     return OutpostClient(config, "ops", config_path=config_path)
 
 
-def test_webui_lists_audio_devices():
+def test_webui_lists_audio_devices(monkeypatch):
+    # The real list_devices_fresh asks a child process (which wouldn't see
+    # the fake sounddevice above), so stand it in with the in-process list.
+    async def fake_fresh():
+        return {"input": audio.list_devices("input"), "output": audio.list_devices("output")}
+    monkeypatch.setattr(audio, "list_devices_fresh", fake_fresh)
+
     async def run():
         async with TestClient(TestServer(WebUI(_make_client()).app)) as tc:
             body = await (await tc.get("/api/audio_devices")).json()
             assert [d["name"] for d in body["input"]] == [
                 "MacBook Air Microphone", "USB Audio Device", "USB Audio Device #2"]
             assert [d["index"] for d in body["output"]] == [1, 2, 3]
+    asyncio.run(run())
+
+
+def test_webui_device_list_error_returns_empty_lists(monkeypatch):
+    async def broken():
+        raise RuntimeError("PortAudio not available")
+    monkeypatch.setattr(audio, "list_devices_fresh", broken)
+
+    async def run():
+        async with TestClient(TestServer(WebUI(_make_client()).app)) as tc:
+            body = await (await tc.get("/api/audio_devices")).json()
+            assert body["input"] == [] and body["output"] == []
+            assert "PortAudio" in body["error"]
     asyncio.run(run())
 
 

@@ -4,8 +4,12 @@ Both classes move fixed-size int16 PCM frames (matching the Opus codec's
 frame_size) through a queue so the audio callback thread never blocks.
 """
 from __future__ import annotations
+import asyncio
+import json
 import logging
+import os
 import queue
+import sys
 import numpy as np
 import sounddevice as sd
 
@@ -164,7 +168,38 @@ def _print_devices() -> None:
         print()
 
 
+async def list_devices_fresh(timeout: float = 10.0) -> dict:
+    """{"input": [...], "output": [...]} as list_devices returns, but
+    including devices connected after this process started (e.g. Bluetooth
+    earbuds paired later).
+
+    PortAudio only scans devices once, at initialization, and rescanning
+    in-process (sd._terminate/_initialize) would close the client's open
+    mic/speaker streams - so this asks a short-lived child process instead,
+    which always gets a fresh scan."""
+    pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = pkg_parent + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "outpost.audio", "--json",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("timed out listing audio devices")
+    if proc.returncode != 0:
+        raise RuntimeError(f"listing audio devices failed: {stderr.decode(errors='replace').strip()}")
+    return json.loads(stdout)
+
+
 if __name__ == "__main__":
     # python -m outpost.audio - lists audio devices so you can pick values
-    # for config's input_device/output_device.
-    _print_devices()
+    # for config's input_device/output_device. --json is for
+    # list_devices_fresh.
+    if "--json" in sys.argv[1:]:
+        print(json.dumps({"input": list_devices("input"), "output": list_devices("output")}))
+    else:
+        _print_devices()
