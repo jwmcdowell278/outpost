@@ -12,7 +12,7 @@ import numpy as np
 
 from .agc import AutomaticGainControl
 from .announce import ChannelAnnouncer
-from .audio import MicCapture, SpeakerPlayback
+from .audio import MicCapture, SpeakerPlayback, device_available, list_devices_fresh, restart_streams
 from .codec import OpusCodec
 from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
@@ -27,6 +27,13 @@ from .webui import WebUI
 from zeroconf._exceptions import EventLoopBlocked
 
 log = logging.getLogger(__name__)
+
+# Audio watchdog (see OutpostClient._audio_watchdog_loop): how often to check
+# that the mic/speaker are still delivering audio, and - while a configured
+# device is missing and the system default is standing in - how often to
+# look for it coming back.
+_AUDIO_WATCHDOG_INTERVAL_S = 1.0
+_AUDIO_DEVICE_RECHECK_S = 15.0
 
 # Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
 # not to be mistaken for an incoming transmission.
@@ -169,6 +176,7 @@ class OutpostClient:
         self._ptt_active = False
         self._tx_task: asyncio.Task | None = None
         self._channel_announce_task: asyncio.Task | None = None
+        self._audio_watchdog_task: asyncio.Task | None = None
         self._last_seq_seen: dict[int, int] = {}
 
         # Set by the web UI's Settings page "Restart" button - scripts/
@@ -397,6 +405,7 @@ class OutpostClient:
         self.speaker.start()
         self._tx_task = asyncio.create_task(self._tx_loop())
         self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
+        self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
         if self.web_ui:
             await self.web_ui.start()
 
@@ -407,6 +416,9 @@ class OutpostClient:
         if self._channel_announce_task:
             self._channel_announce_task.cancel()
             self._channel_announce_task = None
+        if self._audio_watchdog_task:
+            self._audio_watchdog_task.cancel()
+            self._audio_watchdog_task = None
         if self.web_ui:
             await self.web_ui.stop()
         if self.pex:
@@ -418,6 +430,53 @@ class OutpostClient:
         self.mic.stop()
         self.speaker.stop()
         self.transport.stop()
+
+    # --- audio device recovery -------------------------------------------
+
+    async def _audio_watchdog_loop(self) -> None:
+        """Reopens the mic/speaker when they stop delivering audio - e.g.
+        Bluetooth earbuds disconnecting, or a stream stalling across laptop
+        sleep. Without this a dead mic fails silently: PTT still sends
+        TYPE_START (so peers see who's "speaking") but _tx_loop never gets a
+        frame, so no audio goes out. While a configured device is missing
+        the system default stands in, and the configured one is switched
+        back to once it reappears."""
+        loop = asyncio.get_running_loop()
+        streams = (self.mic, self.speaker)
+        last_device_check = time.monotonic()
+        failing = False
+        while True:
+            await asyncio.sleep(_AUDIO_WATCHDOG_INTERVAL_S)
+            reason = None
+            stalled = [s.kind for s in streams if s.stalled()]
+            if stalled:
+                reason = f"{' and '.join(stalled)} stopped delivering audio"
+            elif (any(s.on_fallback for s in streams)
+                  and time.monotonic() - last_device_check >= _AUDIO_DEVICE_RECHECK_S):
+                last_device_check = time.monotonic()
+                try:
+                    devices = await list_devices_fresh()
+                except Exception as exc:
+                    log.debug("audio device recheck failed: %s", exc)
+                    continue
+                back = [s.kind for s in streams if s.on_fallback and device_available(s.device, devices[s.kind])]
+                if back:
+                    reason = f"configured {' and '.join(back)} device is available again"
+            if reason is None:
+                continue
+
+            if not failing:
+                log.warning("audio: %s - reopening audio devices", reason)
+            try:
+                await loop.run_in_executor(None, restart_streams, *streams)
+            except Exception as exc:
+                if not failing:
+                    log.error("could not reopen audio devices (%s) - will keep retrying", exc)
+                failing = True
+            else:
+                if failing:
+                    log.info("audio devices reopened")
+                failing = False
 
     # --- transmit path ----------------------------------------------------
 

@@ -657,6 +657,12 @@ nothing (e.g. the headset is unplugged), Outpost logs a warning and uses the
 system default instead of refusing to start. The web UI's Settings page also
 offers both as dropdowns. Either way, changes take effect after a restart.
 
+If a device stops working while Outpost is running (Bluetooth earbuds
+disconnecting, or audio stalling after a laptop sleeps), Outpost notices
+within a few seconds, logs a warning, and reopens its audio on the system
+default. Once the configured device is available again, it switches back
+automatically (checked every 15 seconds).
+
 ## Logging
 
 By default, `scripts/run_client.py` only logs to the console: `INFO` level

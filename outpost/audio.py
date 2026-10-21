@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import sys
+import time
 import numpy as np
 import sounddevice as sd
 
@@ -40,6 +41,22 @@ def list_devices(kind: str) -> list[dict]:
     return result
 
 
+def _match_device(spec: str | int, devices: list[dict]) -> list[dict]:
+    """Devices (from list_devices) that a configured value refers to, best
+    match first: an index matches exactly; a name matches as a
+    case-insensitive substring, with exact name matches ranked first."""
+    if isinstance(spec, int):
+        return [d for d in devices if d["index"] == spec]
+    needle = spec.lower()
+    exact = [d for d in devices if d["name"].lower() == needle]
+    partial = [d for d in devices if needle in d["name"].lower()]
+    return exact or partial
+
+
+def device_available(spec: str | int, devices: list[dict]) -> bool:
+    return bool(_match_device(spec, devices))
+
+
 def resolve_device(spec: str | int | None, kind: str) -> int | None:
     """Turns a configured input_device/output_device value into a PortAudio
     device index, or None for the system default.
@@ -54,18 +71,9 @@ def resolve_device(spec: str | int | None, kind: str) -> int | None:
     if spec is None or spec == "":
         return None
     devices = list_devices(kind)
-    if isinstance(spec, int):
-        if any(d["index"] == spec for d in devices):
-            return spec
-        log.warning("%s_device %d not found or not an %s device - using system default", kind, spec, kind)
-        return None
-
-    needle = spec.lower()
-    exact = [d for d in devices if d["name"].lower() == needle]
-    partial = [d for d in devices if needle in d["name"].lower()]
-    matches = exact or partial
+    matches = _match_device(spec, devices)
     if not matches:
-        log.warning("no %s device matches %r - using system default (available: %s)",
+        log.warning("%s_device %r not found - using system default (available: %s)",
                     kind, spec, ", ".join(d["name"] for d in devices) or "none")
         return None
     if len(matches) > 1:
@@ -75,26 +83,115 @@ def resolve_device(spec: str | int | None, kind: str) -> int | None:
     return matches[0]["index"]
 
 
-class MicCapture:
-    """Captures mono int16 PCM frames of a fixed size from the configured
-    input device (see resolve_device), or the system default."""
+def rescan_devices() -> None:
+    """Makes PortAudio pick up devices added/removed since it started (it
+    only scans once, at initialization). Closes every open stream, so only
+    call this between stopping and restarting all of them - see
+    restart_streams."""
+    sd._terminate()
+    sd._initialize()
+
+
+def restart_streams(*streams: "_AudioStream") -> None:
+    """Closes `streams`, rescans devices, and reopens them - re-resolving
+    each configured device, so a device that vanished falls back to the
+    system default and one that came back is picked up again. Raises if a
+    stream can't be reopened (e.g. no audio device at all); the caller is
+    expected to retry."""
+    for stream in streams:
+        stream.close()
+    rescan_devices()
+    for stream in streams:
+        stream.open()
+
+
+# How long a running stream can go without its audio callback firing before
+# it's considered dead. Both streams fire every frame (20ms by default) even
+# when nobody's talking - input keeps capturing, output keeps playing
+# silence - so seconds of quiet means the device is gone (e.g. Bluetooth
+# earbuds disconnected) or the stream stalled (e.g. across laptop sleep).
+STALL_TIMEOUT_S = 3.0
+
+
+class _AudioStream:
+    """Shared open/close/stall-tracking for MicCapture and SpeakerPlayback."""
+
+    kind = ""  # "input" or "output"
 
     def __init__(self, sample_rate: int, frame_size: int, device: str | int | None = None):
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.device = device
         self._queue: "queue.Queue[bytes]" = queue.Queue()
-        self._stream: sd.RawInputStream | None = None
+        self._stream = None
+        self._wanted = False  # between start() and stop()
+        self.last_callback = 0.0
+        self.device_name: str | None = None
+        # True when a specific device is configured but wasn't found, so
+        # the system default is being used instead.
+        self.on_fallback = False
+
+    def _make_stream(self, device: int | None):
+        raise NotImplementedError
+
+    def open(self) -> None:
+        index = resolve_device(self.device, self.kind)
+        self.on_fallback = self.device not in (None, "") and index is None
+        self.device_name = sd.query_devices(index, self.kind)["name"]
+        log.info("%s device: %s", self.kind, self.device_name)
+        self.last_callback = time.monotonic()
+        stream = self._make_stream(index)
+        stream.start()
+        self._stream = stream
+
+    def close(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        # A stream whose device has disappeared can error on the way down -
+        # it's being discarded either way.
+        try:
+            stream.stop()
+        except Exception as exc:
+            log.debug("error stopping %s stream: %s", self.kind, exc)
+        try:
+            stream.close()
+        except Exception as exc:
+            log.debug("error closing %s stream: %s", self.kind, exc)
+
+    def start(self) -> None:
+        self._wanted = True
+        self.open()
+
+    def stop(self) -> None:
+        self._wanted = False
+        self.close()
+
+    def stalled(self, now: float | None = None) -> bool:
+        """True if this stream should be running but isn't delivering audio
+        (dead device, stalled stream, or a failed reopen)."""
+        if not self._wanted:
+            return False
+        if self._stream is None:
+            return True
+        now = time.monotonic() if now is None else now
+        return now - self.last_callback > STALL_TIMEOUT_S
+
+
+class MicCapture(_AudioStream):
+    """Captures mono int16 PCM frames of a fixed size from the configured
+    input device (see resolve_device), or the system default."""
+
+    kind = "input"
 
     def _callback(self, indata, frames, time_info, status) -> None:
+        self.last_callback = time.monotonic()
         # Overflows are acceptable to drop here - the receive side's PLC
         # handles the resulting gap in sequence numbers.
         self._queue.put(bytes(indata))
 
-    def start(self) -> None:
-        device = resolve_device(self.device, "input")
-        log.info("%s device: %s", "input", sd.query_devices(device, "input")["name"])
-        self._stream = sd.RawInputStream(
+    def _make_stream(self, device):
+        return sd.RawInputStream(
             device=device,
             samplerate=self.sample_rate,
             blocksize=self.frame_size,
@@ -102,41 +199,33 @@ class MicCapture:
             dtype="int16",
             callback=self._callback,
         )
-        self._stream.start()
-
-    def stop(self) -> None:
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
 
     def read_frame(self, timeout: float | None = None) -> bytes:
+        # Keeps blocking across a restart_streams() - the reopened stream
+        # feeds the same queue.
         return self._queue.get(timeout=timeout)
 
 
-class SpeakerPlayback:
+class SpeakerPlayback(_AudioStream):
     """Plays mono int16 PCM frames through the configured output device
     (see resolve_device), or the system default."""
 
+    kind = "output"
+
     def __init__(self, sample_rate: int, frame_size: int, device: str | int | None = None):
-        self.sample_rate = sample_rate
-        self.frame_size = frame_size
-        self.device = device
-        self._queue: "queue.Queue[bytes]" = queue.Queue()
-        self._stream: sd.RawOutputStream | None = None
+        super().__init__(sample_rate, frame_size, device)
         self._silence = np.zeros(frame_size, dtype=np.int16).tobytes()
 
     def _callback(self, outdata, frames, time_info, status) -> None:
+        self.last_callback = time.monotonic()
         try:
             frame = self._queue.get_nowait()
         except queue.Empty:
             frame = self._silence
         outdata[:] = frame
 
-    def start(self) -> None:
-        device = resolve_device(self.device, "output")
-        log.info("%s device: %s", "output", sd.query_devices(device, "output")["name"])
-        self._stream = sd.RawOutputStream(
+    def _make_stream(self, device):
+        return sd.RawOutputStream(
             device=device,
             samplerate=self.sample_rate,
             blocksize=self.frame_size,
@@ -144,13 +233,6 @@ class SpeakerPlayback:
             dtype="int16",
             callback=self._callback,
         )
-        self._stream.start()
-
-    def stop(self) -> None:
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
 
     def play_frame(self, frame: bytes) -> None:
         self._queue.put(frame)
