@@ -47,6 +47,14 @@ _SEQ_PERSIST_EVERY = 1000
 # would mean re-enumerating adapters ~50 times/sec during active audio.
 _OWN_ADDRESS_CACHE_TTL_S = 30.0
 
+# After a second-hand-learned peer (gossip/mDNS) expires without us hearing
+# from it directly, ignore further second-hand mentions of its address for
+# this long - doubling each time it expires again, up to the max - so a dead
+# address that other nodes still mention isn't re-added (and sent to) every
+# gossip round. Hearing from it directly (confirm_peer) clears this at once.
+_UNHEARD_BACKOFF_START_S = 300.0
+_UNHEARD_BACKOFF_MAX_S = 3600.0
+
 
 def _local_addresses() -> set[str]:
     """Every IP address (any family) currently assigned to a local
@@ -132,8 +140,10 @@ class MeshTransport:
         self._peers: dict[str, Peer] = {f"static-{i}": p for i, p in enumerate(peers)}
         # Static (config-file) peers are a deliberate, operator-chosen
         # bootstrap list and are kept forever even if quiet; every other key
-        # ("peer-*", "gossip-*", mDNS) is refreshed on each sighting and can
-        # go stale - see prune_stale().
+        # ("peer-*", "gossip-*", mDNS) can go stale - see prune_stale(). Only
+        # direct, authenticated traffic from a peer (confirm_peer) refreshes
+        # it; being mentioned again by gossip/mDNS doesn't, or nodes would
+        # keep a dead peer alive forever by re-gossiping it to each other.
         self._last_seen: dict[str, float] = {k: time.monotonic() for k in self._peers}
         # key -> every known candidate address for that one logical peer,
         # preferred/shortest-path first (e.g. a dual-homed device reachable
@@ -146,6 +156,9 @@ class MeshTransport:
         # (static bootstrap/gossip/mDNS), see confirm_peer's address-conflict
         # guard below.
         self._confirmed_keys: set[str] = set()
+        # (host, port) -> (ignore second-hand mentions until, backoff_s) -
+        # see _UNHEARD_BACKOFF_START_S.
+        self._backoff: dict[tuple[str, int], tuple[float, float]] = {}
 
     def _load_seq_start(self, seq_persist_path: str | None) -> int:
         if seq_persist_path is None:
@@ -174,6 +187,22 @@ class MeshTransport:
         and fans out as a single peer, not one per address."""
         with self._lock:
             return list(self._peers.values())
+
+    @property
+    def live_peers(self) -> list[Peer]:
+        """Peers we've actually heard from (authenticated traffic) and that
+        haven't gone stale - what's worth gossiping to others, unlike
+        `peers`, which also holds unverified second-hand addresses."""
+        with self._lock:
+            return [p for k, p in self._peers.items() if k in self._confirmed_keys]
+
+    def is_confirmed_sender(self, sender_id: int) -> bool:
+        with self._lock:
+            return f"peer-{sender_id}" in self._confirmed_keys or f"static-{sender_id}" in self._confirmed_keys
+
+    def is_known_address(self, host: str, port: int) -> bool:
+        with self._lock:
+            return any(p.host == host and p.port == port for p in self._peers.values())
 
     def peer_details(self) -> list[dict]:
         """One dict per logical peer - key, active address, how many
@@ -212,12 +241,19 @@ class MeshTransport:
             if key not in self._peers and any(p.host == primary.host and p.port == primary.port for p in self._peers.values()):
                 return  # already tracked under a different key - avoid duplicate fan-out
             is_new = key not in self._peers
+            now = time.monotonic()
+            if is_new and not key.startswith("static-"):
+                backoff = self._backoff.get((primary.host, primary.port))
+                if backoff is not None and now < backoff[0]:
+                    return  # recently expired without ever answering - see _backoff
             if is_new and len(self._peers) >= self.max_peers:
                 log.warning("peer table full (%d), ignoring new peer %s", self.max_peers, key)
                 return
             self._peers[key] = primary
             self._candidates[key] = list(candidates)
-            self._last_seen[key] = time.monotonic()
+            if is_new:
+                # Grace period to hear from it - re-mentions don't extend it.
+                self._last_seen[key] = now
         if is_new:
             log.info("peer added: %s -> %s:%d (%d candidate address(es))", key, primary.host, primary.port, len(candidates))
 
@@ -310,6 +346,8 @@ class MeshTransport:
             self._candidates[key] = candidates
             self._last_seen[key] = time.monotonic()
             self._confirmed_keys.add(key)
+            for c in candidates:
+                self._backoff.pop((c.host, c.port), None)
         if donor_key is not None:
             log.info("peer %s: tied to confirmed sender_id (merged %d address(es) from %s)", key, len(candidates), donor_key)
         elif is_new:
@@ -325,11 +363,17 @@ class MeshTransport:
         it - this inflates the peer count and wastes send fan-out on a dead
         address. Static config entries are exempt since those are a
         deliberate bootstrap list that should persist even if quiet."""
-        cutoff = time.monotonic() - max_age_s
+        now = time.monotonic()
+        cutoff = now - max_age_s
         with self._lock:
             stale = [k for k, last_seen in self._last_seen.items()
                      if not k.startswith("static-") and last_seen < cutoff]
             for key in stale:
+                for c in self._candidates.get(key, []):
+                    prev = self._backoff.get((c.host, c.port))
+                    delay = (_UNHEARD_BACKOFF_START_S if prev is None
+                             else min(prev[1] * 2, _UNHEARD_BACKOFF_MAX_S))
+                    self._backoff[(c.host, c.port)] = (now + delay, delay)
                 self._peers.pop(key, None)
                 self._last_seen.pop(key, None)
                 self._candidates.pop(key, None)
@@ -353,6 +397,9 @@ class MeshTransport:
             lambda: _MeshProtocol(self._on_packet),
             local_addr=("0.0.0.0", listen_port),
         )
+        # The port actually bound - differs from listen_port when that's 0
+        # ("any free port"), and _is_own_address needs the real one.
+        self.listen_port = self._transport.get_extra_info("sockname")[1]
 
     def _is_own_address(self, host: str, port: int) -> bool:
         """True if host:port is this node's own listening endpoint.

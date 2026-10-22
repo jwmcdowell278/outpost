@@ -128,7 +128,9 @@ class PexGossip:
         self._send_to([Peer(host=host, port=port)])
 
     def _send_to(self, targets: list[Peer]) -> None:
-        plaintext = pack_peers(self._transport.peers)
+        # Only gossip peers we've heard from ourselves - passing on
+        # second-hand addresses is how dead peers used to circulate forever.
+        plaintext = pack_peers(self._transport.live_peers)
         self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, plaintext, targets=targets)
 
     def handle_incoming(self, header, ciphertext: bytes, addr) -> None:
@@ -139,7 +141,16 @@ class PexGossip:
             return
 
         # The sender itself is a confirmed, authenticated peer.
-        self._transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+        sender = Peer(host=addr[0], port=addr[1])
+        was_known = self._transport.is_confirmed_sender(header.sender_id)
+        confirmed = self._transport.confirm_peer(header.sender_id, sender)
+        if confirmed and not was_known:
+            # First contact (e.g. a subnet-scan probe, or a node that just
+            # learned of us): answer straight away so it confirms us too,
+            # instead of waiting up to a full gossip interval - which could
+            # outlast the grace period a new, not-yet-heard peer gets before
+            # expiring. Only on first contact, so two nodes can't ping-pong.
+            self._send_to([sender])
 
         for gossiped in unpack_peers(plaintext):
             self._transport.add_peer(f"gossip-{gossiped.host}:{gossiped.port}", gossiped)

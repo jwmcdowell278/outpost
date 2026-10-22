@@ -44,6 +44,10 @@ class _FakeTransport:
     def peers(self):
         return self._peers
 
+    @property
+    def live_peers(self):
+        return self._peers
+
     def next_seq(self):
         seq = self._seq
         self._seq += 1

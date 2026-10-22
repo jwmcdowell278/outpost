@@ -214,6 +214,10 @@ class OutpostClient:
         # sender_id here is an unauthenticated cleartext field an attacker
         # could vary freely to grow this table.
         self._relay_seen: dict[tuple[int, int], int] = {}
+        # Relay next-hop table: channel_id -> {(host, port): last seen} of
+        # neighbours that CHANNEL_ANNOUNCEs for that channel have arrived
+        # from - see _relay_targets.
+        self._relay_routes: dict[int, dict[tuple[str, int], float]] = {}
 
         # Mutable so the web UI can toggle relay mode live - see __init__'s
         # agc_enabled for the same pattern/rationale.
@@ -560,6 +564,12 @@ class OutpostClient:
         the other, so each side should discover its own peers independently
         and only use this relay node itself as a bootstrap `peers:` entry.
         """
+        source = (addr[0], addr[1])
+        if header.ptype == TYPE_CHANNEL_ANNOUNCE and self.transport.is_known_address(*source):
+            # Recorded before the dedup check below: the same announce
+            # arriving via a second neighbour is a second route.
+            self._relay_routes.setdefault(header.channel_id, {})[source] = time.monotonic()
+
         dedup_key = (header.sender_id, header.ptype)
         last_fwd = self._relay_seen.get(dedup_key)
         if last_fwd is not None and header.seq <= last_fwd:
@@ -568,7 +578,12 @@ class OutpostClient:
             self._relay_seen.clear()  # safety valve - sender_id is spoofable, don't grow unbounded
         self._relay_seen[dedup_key] = header.seq
 
-        targets = [p for p in self.transport.peers if (p.host, p.port) != (addr[0], addr[1])]
+        if header.ptype == TYPE_CHANNEL_ANNOUNCE:
+            # Announces still go everywhere - they're how routes and
+            # channel membership are learned in the first place.
+            targets = [p for p in self.transport.peers if (p.host, p.port) != source]
+        else:
+            targets = self._relay_targets(header.channel_id, source)
         if targets:
             self.transport.forward(encode_packet(header, ciphertext), targets)
 
@@ -618,6 +633,27 @@ class OutpostClient:
             "remove it to auto-generate); otherwise delete the copied %s.identity file on one of them "
             "and restart it.", addr[0], addr[1], self.config.sender_id,
             self.config_path or "<config>")
+
+    def _relay_targets(self, channel_id: int, source: tuple[str, int]) -> list[Peer]:
+        """Where a relay forwards AUDIO/START/STOP for `channel_id`: only
+        neighbours that channel's announces have recently arrived from,
+        i.e. those that lead to at least one member - possibly via further
+        relays. A relay can't decrypt channels it holds no key for, so this
+        is learned from cleartext announce headers rather than
+        authenticated membership; restricting it to already-known peer
+        addresses (see _relay_packet) stops spoofed announces from turning
+        the relay into a flood amplifier aimed at arbitrary addresses.
+        Falls back to every known peer until a route is known, same as
+        _channel_target_peers' bootstrap flood."""
+        routes = self._relay_routes.get(channel_id, {})
+        cutoff = time.monotonic() - self._membership_ttl_s
+        for address in [a for a, seen in routes.items() if seen < cutoff]:
+            del routes[address]
+        known = {(p.host, p.port): p for p in self.transport.peers}
+        targets = [known[a] for a in routes if a != source and a in known]
+        if routes:
+            return targets  # may be empty: the only route leads back to the sender
+        return [p for a, p in known.items() if a != source]
 
     def _on_packet(self, header, ciphertext: bytes, addr) -> None:
         if header.sender_id == self.config.sender_id:

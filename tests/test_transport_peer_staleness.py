@@ -41,15 +41,29 @@ def test_prune_stale_never_removes_static_peers():
     assert len(transport.peers) == 1
 
 
-def test_add_peer_refreshes_last_seen_on_repeat_sighting():
-    transport = _make_transport()
-    transport.add_peer("peer-7", Peer(host="10.0.0.6", port=9001))
-    transport._last_seen["peer-7"] = time.monotonic() - 1000
+def test_repeat_second_hand_sighting_does_not_keep_a_dead_peer_alive():
+    # Gossip/mDNS mentioning a peer again must not count as hearing from
+    # it - otherwise nodes keep a dead peer alive forever by re-gossiping
+    # it to each other.
+    transport = MeshTransport(sender_id=1, peers=[], on_packet=lambda *a: None)
+    transport.add_peer("gossip-10.0.0.6:9001", Peer(host="10.0.0.6", port=9001))
+    transport._last_seen["gossip-10.0.0.6:9001"] = time.monotonic() - 1000
 
-    transport.add_peer("peer-7", Peer(host="10.0.0.6", port=9001))  # re-sighted
+    transport.add_peer("gossip-10.0.0.6:9001", Peer(host="10.0.0.6", port=9001))  # re-gossiped
     transport.prune_stale(max_age_s=1.0)
 
-    assert len(transport.peers) == 1
+    assert transport.peers == []
+
+
+def test_direct_authenticated_traffic_keeps_a_peer_alive():
+    transport = MeshTransport(sender_id=1, peers=[], on_packet=lambda *a: None)
+    transport.add_peer("gossip-10.0.0.6:9001", Peer(host="10.0.0.6", port=9001))
+    transport._last_seen["gossip-10.0.0.6:9001"] = time.monotonic() - 1000
+
+    transport.confirm_peer(7, Peer(host="10.0.0.6", port=9001))  # heard from it
+    transport.prune_stale(max_age_s=1.0)
+
+    assert transport.peers == [Peer(host="10.0.0.6", port=9001)]
 
 
 def test_confirming_a_static_peer_keeps_its_prune_exemption():

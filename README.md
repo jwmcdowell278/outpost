@@ -75,6 +75,14 @@ flowchart LR
     fanout bound keeps each node's gossip send cost constant rather than
     growing with total mesh size - see Scaling below. `max_peers` caps how
     many peer addresses a node will track in total (raise for large meshes).
+    A node only gossips peers it has heard from directly, and only direct,
+    authenticated traffic keeps a peer from expiring - being mentioned
+    again by gossip or mDNS doesn't. So a peer that goes away drops out of
+    every table within a couple of minutes instead of circulating forever.
+    An address that expires without ever answering is ignored in further
+    gossip for 5 minutes, doubling each time up to an hour, unless it
+    contacts us directly. A node also answers a new peer's first gossip
+    message straight away, so two nodes confirm each other within seconds.
   - Peers are also learned opportunistically from any packet (audio, stop,
     or PEX) that decrypts successfully - only an authenticated sender can
     teach the transport its address, since raw UDP source addresses are
@@ -484,10 +492,12 @@ significantly higher than LAN/VPN.
 ## Relay / bridge mode
 
 By default every node only reaches peers it can address directly over IP.
-`enable_relay: true` turns a node into a **blind flood-forwarder**: on
-receipt of any `AUDIO`/`STOP`/`CHANNEL_ANNOUNCE` packet, it re-sends the
-packet (byte-for-byte, original sender/sequence header untouched) to every
-*other* peer it knows about. This works purely off the packet's cleartext
+`enable_relay: true` turns a node into a **blind forwarder**: on receipt of
+any `AUDIO`/`START`/`STOP`/`CHANNEL_ANNOUNCE` packet, it re-sends the packet
+(byte-for-byte, original sender/sequence header untouched) onward to other
+peers - announces to every other peer it knows, and voice traffic only
+toward neighbours that lead to members of that channel (see
+"Channel-aware forwarding" below). This works purely off the packet's cleartext
 header (`outpost/protocol.py`'s 15-byte header carries `channel_id`,
 `sender_id`, `seq` in the clear) - **a relay never needs any channel key or
 the mesh key to do its job**, so a relay/bridge device can be deployed and
@@ -521,14 +531,20 @@ Design notes/trade-offs:
   addresses they can't reach. Each side should discover its own peers
   independently via its own PEX/mDNS, using the relay purely as a bootstrap
   `peers:` entry - not as a source of cross-segment address gossip.
-- **Not channel-aware**: a relay floods every `AUDIO`/`STOP`/
-  `CHANNEL_ANNOUNCE` packet to every known peer regardless of channel
-  membership (the same "flood to everyone known" fallback the rest of the
-  mesh already uses before channel-scoped targeting kicks in - see Design
-  above), since determining real membership would require holding every
-  channel's key. Fine for small/medium deployments (tens of nodes); a large
-  deployment relying heavily on relaying may want multiple channel-scoped
-  relays instead of one that bridges everything.
+- **Channel-aware forwarding, without keys**: a relay can't verify channel
+  membership (that needs the channel key), so it learns *routes* instead:
+  when a `CHANNEL_ANNOUNCE` for a channel arrives from a neighbour, that
+  neighbour leads to at least one member - directly, or via further relays.
+  `AUDIO`/`START`/`STOP` for that channel are then forwarded only to such
+  neighbours (never back to the sender), and not at all if the only route
+  leads back where the packet came from. Until any route is known for a
+  channel it falls back to forwarding to every known peer. Routes expire on
+  the same schedule as channel membership, and are only recorded for
+  addresses that are already known peers, so spoofed announces can't make
+  a relay send traffic to arbitrary addresses. A relay still can't tell
+  that a neighbour already got a packet directly, so only enable relay on
+  nodes that actually bridge separate networks - on a single LAN it just
+  creates duplicates.
 - **Unauthenticated by design**: since a relay works off the cleartext
   header only, `sender_id`/`seq` here are not authenticated at the relay -
   this is fine for its purpose (worst case is a wasted forward; the
@@ -587,8 +603,7 @@ remaining hard limits worth knowing about:
 - **A single channel with very many simultaneous members is still
   fundamentally expensive**: delivering one transmission to N channel
   members costs N sends from the talker, every frame (relay mode bridges
-  otherwise-unreachable peer groups, but it still blind-floods rather than
-  reducing this fan-out). Channel scoping avoids paying that cost for every
+  otherwise-unreachable peer groups, but doesn't reduce this fan-out). Channel scoping avoids paying that cost for every
   *other* channel, but it cannot avoid it for a channel that itself has
   hundreds/thousands of concurrent members - that would need a
   channel-aware supernode architecture, which this project does not
@@ -831,11 +846,6 @@ bitrate doesn't match `DEFAULT_BITRATE`.
   above), add STUN/hole-punching - today's PEX gossip still assumes peers
   within a segment are mutually reachable by UDP (true on LAN, VPN overlays,
   and mesh radio, but not across arbitrary NATs without a relay/bridge).
-- **Channel-aware relaying**: today's relay mode (see above) blind-floods
-  regardless of channel membership; a relay that also held relevant channel
-  keys could filter forwarding to only actual members, cutting cross-segment
-  bandwidth for large deployments with many channels. Deliberately not done
-  by default, since it would require trusting the relay with channel keys.
 - **Multi-channel simultaneous receive**: currently a client only plays
   audio for its one active channel; could support monitoring multiple
   channels at once with per-channel volume/mute.
