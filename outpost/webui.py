@@ -197,7 +197,7 @@ async function refresh() {{
   try {{
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}` +
+      `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}${{s.bridge_role ? ' (' + s.bridge_role + ' bridge)' : ''}}` +
       (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '') +
       (s.multicast.enabled ? ` · multicast: ${{s.multicast.site_listeners}} on this site` +
         (s.multicast.active_channel_uses_multicast ? ' (in use)' : ' (unicast - below threshold)') : '');
@@ -821,6 +821,9 @@ class WebUI:
             "agc_enabled": c.agc_enabled,
             "agc_target_rms": c.agc.target_rms,
             "relay_enabled": c.enable_relay,
+            # "active"/"standby" for a site bridge (see README "Redundant
+            # bridges"), else None.
+            "bridge_role": c.bridge_role(),
             "highpass_enabled": c.highpass_enabled,
             "squelch_enabled": c.squelch_enabled,
             "squelch_threshold_rms": c.squelch.threshold_rms,

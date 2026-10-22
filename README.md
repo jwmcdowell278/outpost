@@ -666,7 +666,7 @@ present themselves to Linux as ordinary network interfaces:
 
 ### Bridging sites
 
-A *site* is one batman-adv mesh (or LAN). Each site has a **bridge**: a
+A *site* is one batman-adv mesh (or LAN). Each site has a **bridge** (or several - see "Redundant bridges and mixed uplinks"): a
 node on both the site and the VPN, with `enable_relay: true` and a known
 site:
 
@@ -699,13 +699,36 @@ sites:
    enough of the site listens (`multicast_min_listeners`), otherwise unicast
    to each.
 
-Bridges follow **split horizon**: traffic from their own site only goes out
-to other sites, and traffic from another site only goes into their own
-site. So bridges never bounce a packet between each other, and with any
-number of sites each site gets exactly one copy of each frame. In a
-simulated three-site mesh (`tests/test_bridging.py`), one talker reached 14
-listeners across all three sites with 7 transmissions in total, and every
-listener heard each frame exactly once.
+**No packet goes where it already is.** A relay (bridge or not) forwards
+each packet to the neighbours leading to the channel's listeners, but skips:
+
+- the neighbour it came from,
+- neighbours the sender reaches directly - both have listed each other in
+  their peer exchange, so the sender sends to them itself,
+- for a packet that arrived by multicast, the nodes that got that multicast.
+
+This adapts to the network on its own, with no settings:
+
+- Bridges that all reach each other over the VPN never pass packets on to
+  each other, so with any number of sites each site gets exactly one copy
+  of each frame. In a simulated three-site mesh (`tests/test_bridging.py`),
+  one talker reached 14 listeners across all three sites with 7
+  transmissions in total, and every listener heard each frame exactly once.
+- A bridge that is also the VPN hub relays between VPN clients that can't
+  reach each other (hub-and-spoke without IP forwarding between clients),
+  and leaves alone those that can.
+- A relay also carries traffic between nodes on its own site that can't
+  reach each other (e.g. Wi-Fi client isolation).
+
+Until a neighbour's peer exchange has arrived (or with `enable_pex` off)
+a relay forwards to everyone - which can only cost duplicates, never lose
+audio; receivers drop duplicates. In a partially connected VPN (some
+clients reach some bridges but not each other) a client may get a copy from
+more than one relay.
+
+Delivery into a site uses one multicast when at least
+`multicast_min_listeners` of the targets are heard sending multicast, plus
+unicast to the rest (nodes with multicast off, or on a routed subnet).
 
 **Discovery with any number of sites:** each bridge needs one reachable VPN
 peer - a hub, or any other bridge - and peer exchange finds the rest. A
@@ -716,8 +739,67 @@ same subnets.
 
 **Hub-and-spoke VPNs:** a relay with no site of its own (no
 `multicast_interface`/`site_subnets`, e.g. a VPN server) is a plain transit
-relay: it forwards each channel's traffic to every neighbour leading to its
-listeners, except back where it came from.
+relay, following the same rules. Several plain relays between the same
+networks give redundancy as-is: each forwards, and receivers drop the
+duplicates.
+
+On start, a relay logs whether it's running as a site bridge (and for
+which subnets) or as a plain relay.
+
+### Redundant bridges and mixed uplinks
+
+Any number of nodes in a batman-adv group can be bridges, and each can lead
+somewhere different - one on the VPN, another on Ethernet or Wi-Fi to a
+neighbouring group, two on the same VPN for redundancy. Give each one
+`enable_relay: true` and its site (as above); nothing else is required.
+
+There's no single "active" bridge. For each outside neighbour, the
+highest-ranked bridge on the site that reaches it is the one that sends to
+it - rank is `bridge_priority` (0-255, default 100), then the lowest
+`sender_id`. So:
+
+- two bridges on the same VPN: the higher-ranked one carries the VPN
+  traffic and the other stands by, so the site still sends one copy per
+  remote site;
+- a bridge on the VPN and another on Ethernet to a different group: each
+  is the only one reaching its own network, so both forward;
+- a group on its own with no uplink: its bridges just relay inside the
+  group where nodes can't reach each other, one bridge per pair.
+
+Bridges learn about each other from a small *bridge hello* (mesh-key
+authenticated, sent to the site every `bridge_hello_interval_s`, default
+2 s; it carries the bridge's priority and addresses), and what each one
+reaches from peer exchange.
+
+```yaml
+# on each bridge of the site - only the priority differs
+enable_relay: true
+enable_multicast: true
+multicast_interface: bat0
+bridge_priority: 200               # preferred; the backup keeps 100
+peers:
+  - host: 10.1.0.1                 # the other bridge (or any site node)...
+    port: 5555
+  - host: 10.99.0.2                # ...and any other bridge or VPN hub
+    port: 5555
+```
+
+If a bridge goes silent for 3 hello intervals (about 6 s by default), the
+next-ranked bridge that reaches each of its neighbours takes them over:
+
+- it immediately passes on the latest announce of every site member it
+  has seen, so the other side learns the route through it straight away
+  instead of after the next announce (up to `channel_announce_interval_s`);
+- its hellos say which silent bridge it stands in for, and site nodes send
+  traffic they had addressed to the silent bridge to it instead.
+
+A higher-ranked bridge that comes back takes over again. Bridges that can't
+hear each other's hellos (e.g. a split site) each act on their own. Without
+multicast, a lone bridge sends its hello to the site's nodes only every
+15th interval, and every interval once a second bridge is known.
+
+The web UI status line shows each bridge's role: `active`, `standby`, or
+`active for k of n uplink peers`.
 
 ## Scaling to large meshes (hundreds to thousands of nodes)
 

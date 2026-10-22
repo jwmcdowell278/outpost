@@ -77,12 +77,15 @@ class PexGossip:
     """Periodically gossips the known peer list and ingests others' gossip."""
 
     def __init__(self, sender_id: int, mesh_key: bytes, transport, interval_s: float = 30.0, fanout: int = 8,
-                 share_filter=None):
+                 share_filter=None, on_gossip=None):
         self._sender_id = sender_id
         # Optional (target, peer) -> bool: whether to tell `target` about
         # `peer`. Bridges use it to keep site-local addresses on their site
         # and VPN addresses among bridges (see OutpostClient._same_side).
         self._share_filter = share_filter
+        # Optional (header, peers, addr) callback for each authenticated
+        # gossip received: `addr` reaches `peers` directly (see _send_to).
+        self._on_gossip = on_gossip
         self._cipher = ChannelCipher(mesh_key)
         self._transport = transport
         self._interval_s = interval_s
@@ -139,9 +142,13 @@ class PexGossip:
         if self._share_filter is None:
             self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, pack_peers(live), targets=targets)
             return
+        # One packet per distinct list (a bridge has two: site and VPN).
+        by_list: dict[tuple, list[Peer]] = {}
         for target in targets:
-            shared = [p for p in live if self._share_filter(target, p)]
-            self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, pack_peers(shared), targets=[target])
+            shared = tuple(p for p in live if self._share_filter(target, p))
+            by_list.setdefault(shared, []).append(target)
+        for shared, group in by_list.items():
+            self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, pack_peers(list(shared)), targets=group)
 
     def handle_incoming(self, header, ciphertext: bytes, addr) -> None:
         try:
@@ -162,5 +169,8 @@ class PexGossip:
             # expiring. Only on first contact, so two nodes can't ping-pong.
             self._send_to([sender])
 
-        for gossiped in unpack_peers(plaintext):
+        gossiped_peers = unpack_peers(plaintext)
+        if self._on_gossip is not None:
+            self._on_gossip(header, gossiped_peers, addr)
+        for gossiped in gossiped_peers:
             self._transport.add_peer(f"gossip-{gossiped.host}:{gossiped.port}", gossiped)

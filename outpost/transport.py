@@ -224,6 +224,16 @@ class MeshTransport:
         with self._lock:
             return f"peer-{sender_id}" in self._confirmed_keys or f"static-{sender_id}" in self._confirmed_keys
 
+    def sender_address(self, sender_id: int) -> tuple[str, int] | None:
+        """The address `sender_id` has been confirmed at, if any - i.e.
+        where its own authenticated packets come from."""
+        with self._lock:
+            for key in (f"static-{sender_id}", f"peer-{sender_id}"):
+                if key in self._confirmed_keys and key in self._peers:
+                    p = self._peers[key]
+                    return (p.host, p.port)
+        return None
+
     def is_known_address(self, host: str, port: int) -> bool:
         with self._lock:
             return any(p.host == host and p.port == port for p in self._peers.values())

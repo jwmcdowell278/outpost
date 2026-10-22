@@ -162,6 +162,12 @@ enable_multicast: false
 # the VPN): the subnet(s) of its own site. Unset, it's taken from
 # multicast_interface. See README "Bridging sites".
 # site_subnets: [10.1.0.0/24]
+# Several bridges on one site (same uplink for redundancy, or different
+# uplinks): for each outside neighbour the highest-priority bridge reaching
+# it (0-255, then lowest sender_id) forwards; another takes over after 3
+# hello intervals of silence. See README "Redundant bridges and mixed uplinks".
+# bridge_priority: 100
+# bridge_hello_interval_s: 2.0
 # multicast_interface: bat0
 # multicast_group_base: 239.192.77.0   # groups are this + channel id (+0 for announces)
 # multicast_port: 5556

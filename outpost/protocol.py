@@ -48,6 +48,12 @@ TYPE_PING = 3
 TYPE_PEX = 4
 TYPE_CHANNEL_ANNOUNCE = 5
 TYPE_START = 6
+# Sent by site bridges to their own site, encrypted with the mesh key, so
+# several bridges on one site can share the work and fail over - see
+# client.py's "redundant bridges". Payload: priority (1 byte), address
+# count (1 byte), its IPv4 addresses (4 bytes each), then the sender_ids
+# (4 bytes each) of silent bridges it stands in for.
+TYPE_BRIDGE_HELLO = 7
 
 _HEADER_FMT = "!BBBIQ"
 HEADER_SIZE = struct.calcsize(_HEADER_FMT)  # 15 bytes

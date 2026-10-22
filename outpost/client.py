@@ -8,6 +8,7 @@ import math
 import os
 import random
 import time
+from typing import NamedTuple
 from dataclasses import replace
 
 import numpy as np
@@ -23,7 +24,7 @@ from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
 from .replay import ReplayWindow
-from .protocol import audio_pad_size, pad_audio, unpad_audio, TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
+from .protocol import audio_pad_size, pad_audio, unpad_audio, TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, TYPE_BRIDGE_HELLO, encode_packet
 from .subnet_scan import SubnetScanner
 from .transport import MeshTransport
 from .config import OutpostConfig, Channel, Peer
@@ -71,6 +72,15 @@ def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duratio
         pcm = np.concatenate([pcm, np.zeros(pad, dtype=np.int16)])
 
     return [pcm[i:i + frame_size].tobytes() for i in range(0, len(pcm), frame_size)]
+
+
+class _BridgeInfo(NamedTuple):
+    """What a bridge hello told us about another bridge."""
+    addr: tuple[str, int]   # where its hellos come from (its site address)
+    priority: int
+    hosts: frozenset        # all its IPv4 addresses
+    covers: frozenset       # sender_ids of silent bridges it stands in for
+    seen: float
 
 
 def _unique(peers: list[Peer]) -> list[Peer]:
@@ -222,10 +232,16 @@ class OutpostClient:
             if config.enable_mdns
             else None
         )
+        # This node's own site, for bridging (see is_bridge).
+        self._site_networks = _site_networks(config)
         self.pex = (
             PexGossip(config.sender_id, config.mesh_key, self.transport,
                       interval_s=config.pex_interval_s, fanout=config.pex_fanout,
-                      share_filter=lambda target, peer: not self.is_bridge or self._same_side(target, peer))
+                      # Only a node with a site can be a bridge; everyone
+                      # else shares its whole list in one packet.
+                      share_filter=((lambda target, peer: not self.is_bridge or self._same_side(target, peer))
+                                    if self._site_networks else None),
+                      on_gossip=self._note_gossip)
             if config.enable_pex
             else None
         )
@@ -278,8 +294,6 @@ class OutpostClient:
         # (channel_id, sender_id) -> when that member was last confirmed at
         # its own address (not via a relay) - see the announce handling.
         self._member_direct_seen: dict[tuple[int, int], float] = {}
-        # This node's own site, for bridging (see is_bridge).
-        self._site_networks = _site_networks(config)
         self._membership_ttl_s = max(config.channel_announce_interval_s * 2.5, 60.0)
         self._peer_ttl_s = max(config.pex_interval_s * 2.5, 90.0)
 
@@ -292,10 +306,24 @@ class OutpostClient:
         # neighbours that CHANNEL_ANNOUNCEs for that channel have arrived
         # from - see _relay_targets.
         self._relay_routes: dict[int, dict[tuple[str, int], float]] = {}
+        # (host, port) -> last seen, for known peers whose packets reached
+        # this relay by multicast. Unlike _mcast_heard this needs no channel
+        # key, so a keyless relay/bridge can still tell which site nodes get
+        # multicast - see _site_multicast_addresses.
+        self._relay_mcast_heard: dict[tuple[str, int], float] = {}
+        # (host, port) -> (addresses it reaches directly, when it said so),
+        # from its peer exchange - see _forward.
+        self._peer_reach: dict[tuple[str, int], tuple[frozenset, float]] = {}
+        # Redundant bridges (see "redundant bridges" below), from hellos.
+        self._mesh_cipher = ChannelCipher(config.mesh_key)
+        self._bridge_hellos: dict[int, _BridgeInfo] = {}
+        self._announce_cache: dict[tuple[int, int], tuple] = {}
+        self._live_bridges: set[int] = set()  # see _check_bridges
+        self._hello_count = 0
+        self._bridge_hello_task: asyncio.Task | None = None
 
-        # Mutable so the web UI can toggle relay mode live - see __init__'s
-        # agc_enabled for the same pattern/rationale.
-        self.enable_relay = config.enable_relay
+        # Settable live from the web UI - see the enable_relay property.
+        self._enable_relay = config.enable_relay
 
         # Soft half-duplex lockout (see OutpostConfig.enable_tx_lockout) -
         # same always-construct/mutable-flag pattern as AGC/relay above.
@@ -409,6 +437,16 @@ class OutpostClient:
         return {self.active_channel.id} | self.monitored_channel_ids
 
     @property
+    def enable_relay(self) -> bool:
+        return self._enable_relay
+
+    @enable_relay.setter
+    def enable_relay(self, value: bool) -> None:
+        # Relays join extra multicast groups (see _update_groups).
+        self._enable_relay = value
+        self._update_groups()
+
+    @property
     def is_bridge(self) -> bool:
         """A relay that knows its own site: it forwards between its site and
         other sites (split horizon) instead of to everyone."""
@@ -422,7 +460,14 @@ class OutpostClient:
         return any(ip in net for net in self._site_networks)
 
     def _same_side(self, a: Peer, b: Peer) -> bool:
+        """Whether to tell `a` about `b`. Another bridge on this site is on
+        both sides, so it hears about everything."""
+        if (a.host, a.port) in self._site_bridge_addresses():
+            return True
         return self._is_site_local(a.host) == self._is_site_local(b.host)
+
+    def _site_bridge_addresses(self) -> set[tuple[str, int]]:
+        return {b.addr for b in self._site_bridge_peers().values()}
 
     def _group(self, channel_id: int) -> str:
         """Multicast group for a channel; channel 0 is the shared group for
@@ -435,11 +480,24 @@ class OutpostClient:
         channel's audio away from parts of the mesh nobody listens on."""
         if self.transport.multicast_enabled:
             channels = set(self.listening_channel_ids())
-            if self.is_bridge:
-                # A bridge carries site traffic for every channel it has seen
-                # announced, keys or not.
-                channels |= set(self._relay_routes)
+            if self.enable_relay:
+                # A relay carries site traffic for channels it has routes
+                # for, keys or not: talkers leave listeners reached through
+                # it to the multicast (see _channel_delivery).
+                channels |= self._routed_channels(self._MAX_RELAY_GROUPS)
             self.transport.set_groups({self._group(0)} | {self._group(c) for c in channels})
+
+    # Extra groups a relay joins beyond its own channels. Linux allows 20
+    # memberships per socket by default (net.ipv4.igmp_max_memberships), and
+    # channel ids come from unauthenticated announce headers.
+    _MAX_RELAY_GROUPS = 16
+
+    def _routed_channels(self, limit: int) -> set[int]:
+        """Channels with a live relay route, most recently announced first."""
+        cutoff = time.monotonic() - self._membership_ttl_s
+        latest = {cid: max(routes.values()) for cid, routes in self._relay_routes.items() if routes}
+        fresh = sorted((seen, cid) for cid, seen in latest.items() if seen >= cutoff and cid != 0)
+        return {cid for _, cid in fresh[-limit:]}
 
     def _listening_changed(self, channel_ids) -> None:
         """Rejoin groups and tell members straight away (rather than at the
@@ -567,6 +625,12 @@ class OutpostClient:
                 self._update_groups()
             except OSError as exc:
                 log.warning("multicast unavailable (%s) - using unicast only", exc)
+        if self.enable_relay:
+            if self.is_bridge:
+                log.info("relaying as a site bridge for %s (priority %d) - see README \"Bridging sites\"",
+                         ", ".join(str(n) for n in self._site_networks), self.config.bridge_priority)
+            else:
+                log.info("relaying as a plain transit relay (no site configured)")
         if self.discovery:
             try:
                 # PeerDiscovery.start() blocks on zeroconf's own internal
@@ -588,6 +652,8 @@ class OutpostClient:
         self.speaker.start()
         self._tx_task = asyncio.create_task(self._tx_loop())
         self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
+        if self._site_networks:
+            self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
         self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
         if self.web_ui:
             await self.web_ui.start()
@@ -602,6 +668,9 @@ class OutpostClient:
         if self._audio_watchdog_task:
             self._audio_watchdog_task.cancel()
             self._audio_watchdog_task = None
+        if self._bridge_hello_task:
+            self._bridge_hello_task.cancel()
+            self._bridge_hello_task = None
         if self.web_ui:
             await self.web_ui.stop()
         if self.pex:
@@ -695,6 +764,8 @@ class OutpostClient:
         await asyncio.sleep(random.uniform(0, min(2.0, self.config.channel_announce_interval_s)))
         while True:
             self.transport.prune_stale(self._peer_ttl_s)
+            if self.enable_relay:
+                self._update_groups()  # drop groups for channels whose routes expired
             for channel_id in list(self.ciphers):
                 self._send_announce(channel_id)
             await asyncio.sleep(self.config.channel_announce_interval_s * random.uniform(0.8, 1.2))
@@ -745,6 +816,9 @@ class OutpostClient:
         listeners = self._channel_listeners(channel_id)
         if listeners is None:
             return None, None
+        redirects = self._bridge_redirects()
+        if redirects:
+            listeners = [(sid, redirects.get((peer.host, peer.port), peer)) for sid, peer in listeners]
         if self.transport.multicast_enabled:
             local = [sid for sid, _ in listeners if self._is_multicast_local(sid)]
             if len(local) >= self.multicast_min_listeners:
@@ -790,12 +864,15 @@ class OutpostClient:
         and only use this relay node itself as a bootstrap `peers:` entry.
         """
         source = (addr[0], addr[1])
-        if header.ptype == TYPE_CHANNEL_ANNOUNCE and self.transport.is_known_address(*source):
+        known_source = self.transport.is_known_address(*source)
+        if via_multicast and known_source:
+            self._relay_mcast_heard[source] = time.monotonic()
+        if header.ptype == TYPE_CHANNEL_ANNOUNCE and known_source:
             # Recorded before the dedup check below: the same announce
             # arriving via a second neighbour is a second route.
-            new_channel = header.channel_id not in self._relay_routes
+            new_channel = not self._relay_routes.get(header.channel_id)
             self._relay_routes.setdefault(header.channel_id, {})[source] = time.monotonic()
-            if new_channel and self.is_bridge:
+            if new_channel:
                 self._update_groups()  # start carrying this channel's site multicast
 
         dedup_key = (header.sender_id, header.ptype)
@@ -806,42 +883,298 @@ class OutpostClient:
             self._relay_seen.clear()  # safety valve - sender_id is spoofable, don't grow unbounded
         self._relay_seen[dedup_key] = header.seq
 
+        packet = encode_packet(header, ciphertext)
+        if self.is_bridge and header.ptype == TYPE_CHANNEL_ANNOUNCE and known_source \
+                and self._is_site_local(source[0]) and source not in self._site_bridge_addresses():
+            self._cache_announce(header, packet, source, via_multicast)
+        self._forward(header, packet, source, via_multicast)
+
+    def _forward(self, header, packet: bytes, source, via_multicast: bool) -> None:
+        """Send a relayed packet on to every neighbour that leads to the
+        channel's members, except those that already have it:
+          - the neighbour it came from,
+          - neighbours the sender reaches directly - both have listed each
+            other in their peer exchange, so the link works both ways and the
+            sender sends to them itself,
+          - for a packet that arrived by multicast, the neighbours that got
+            the same multicast.
+        This needs no configuration: bridges that all reach each other over
+        the VPN never pass packets between each other (one copy per site),
+        while a hub between VPN clients that can't reach each other, or
+        between site nodes that can't (e.g. Wi-Fi client isolation), relays
+        between them. Where enough targets get this site's multicast, they
+        get one multicast instead of one copy each."""
         if header.ptype == TYPE_CHANNEL_ANNOUNCE:
             # Announces still go everywhere - they're how routes and
             # channel membership are learned in the first place.
             targets = [p for p in self.transport.peers if (p.host, p.port) != source]
         else:
             targets = self._relay_targets(header.channel_id, source)
-        packet = encode_packet(header, ciphertext)
+        reached = self._reached_by(source)
+        targets = [p for p in _unique(targets)
+                   if not ((p.host, p.port) in reached and source in self._reached_by((p.host, p.port)))]
         if self.is_bridge:
-            self._bridge_forward(header, packet, source, via_multicast, targets)
-            return
+            live = self._site_bridge_peers()
+            others = self._other_bridge_hosts(live)
+            targets = [p for p in targets if p.host not in others]
+            # Another bridge on this site that also got this packet and
+            # outranks us sends it to the neighbours it reaches itself.
+            better = self._better_bridges_with(header, source, via_multicast, live)
+            if better:
+                targets = [p for p in targets
+                           if not any((p.host, p.port) in self._reached_by(addr) for addr in better)]
         if via_multicast:
-            # Everyone on this site already got it from the same multicast.
-            local = self._multicast_local_addresses()
-            targets = [p for p in targets if (p.host, p.port) not in local]
+            on_multicast = self._site_multicast_addresses()
+            targets = [p for p in targets if (p.host, p.port) not in on_multicast]
+        elif self.transport.multicast_enabled:
+            on_multicast = self._site_multicast_addresses()
+            if sum((p.host, p.port) in on_multicast for p in targets) >= self.multicast_min_listeners:
+                # Multicast reaches only the nodes that use it; the rest
+                # (multicast off, or on a routed subnet) still get unicast.
+                group = self._group(0 if header.ptype == TYPE_CHANNEL_ANNOUNCE else header.channel_id)
+                self.transport.send_multicast(packet, group)
+                targets = [p for p in targets if (p.host, p.port) not in on_multicast]
         if targets:
             self.transport.forward(packet, targets)
 
-    def _bridge_forward(self, header, packet: bytes, source, via_multicast: bool, targets: list[Peer]) -> None:
-        """Split horizon: traffic from this site goes out to other sites
-        only (this site already has it); traffic from elsewhere goes into
-        this site only (the other sites' bridges handle the rest), as one
-        multicast when enough of this site would want it. This keeps bridges
-        from bouncing packets between each other, and gives each site one
-        copy of each frame however many listeners it has."""
-        from_site = via_multicast or self._is_site_local(source[0])
-        if from_site:
-            out = [p for p in targets if not self._is_site_local(p.host)]
-            if out:
-                self.transport.forward(packet, out)
+    def _site_multicast_addresses(self) -> set[tuple[str, int]]:
+        """Addresses known to get this site's multicast: senders heard via
+        multicast, authenticated or (for channels we have no key for) not."""
+        cutoff = time.monotonic() - self._membership_ttl_s
+        for address in [a for a, seen in self._relay_mcast_heard.items() if seen < cutoff]:
+            del self._relay_mcast_heard[address]
+        return self._multicast_local_addresses() | set(self._relay_mcast_heard)
+
+    def _note_gossip(self, header, peers: list[Peer], addr) -> None:
+        """PEX callback: `addr` reaches `peers` directly (PEX only lists
+        peers heard from first-hand). Replay-checked, since a stale list
+        would make relays skip a neighbour the sender no longer reaches."""
+        if not self._replay.is_fresh(header.sender_id, header.seq):
             return
-        inward = [p for p in targets if self._is_site_local(p.host)]
-        if self.transport.multicast_enabled and len(inward) >= self.multicast_min_listeners:
-            group = self._group(0 if header.ptype == TYPE_CHANNEL_ANNOUNCE else header.channel_id)
-            self.transport.send_multicast(packet, group)
-        elif inward:
-            self.transport.forward(packet, inward)
+        self._replay.mark(header.sender_id, header.seq)
+        self._peer_reach[(addr[0], addr[1])] = (frozenset((p.host, p.port) for p in peers), time.monotonic())
+
+    def _reached_by(self, source) -> frozenset:
+        """Addresses `source` recently said it reaches directly (empty if it
+        hasn't gossiped to us - then we forward to everyone, which can only
+        cost duplicates, never lose audio)."""
+        entry = self._peer_reach.get(source)
+        if entry is None:
+            return frozenset()
+        if time.monotonic() - entry[1] > self._peer_ttl_s:
+            del self._peer_reach[source]
+            return frozenset()
+        return entry[0]
+
+    # --- redundant bridges --------------------------------------------------
+    #
+    # A site can have several bridges, and they may lead to different
+    # networks (one on the VPN, another on Ethernet to a neighbouring
+    # group...). So there's no single "active" bridge: for each neighbour,
+    # the highest-ranked bridge (bridge_priority, then lowest sender_id) that
+    # reaches it is the one that sends to it. Bridges learn about each other
+    # from bridge hellos, and what each reaches from its peer exchange.
+
+    _ANNOUNCE_CACHE_MAX = 1024
+    _MAX_COVERED = 32
+
+    def _rank(self, sender_id: int, priority: int) -> tuple[int, int]:
+        return (priority, -sender_id)
+
+    def _my_rank(self) -> tuple[int, int]:
+        return self._rank(self.config.sender_id, self.config.bridge_priority)
+
+    def _cache_announce(self, header, packet: bytes, source, via_multicast: bool) -> None:
+        """Latest announce per site member, so a bridge that takes over a
+        neighbour can pass them on straight away instead of waiting up to a
+        full announce interval for routes through it to be learned."""
+        if len(self._announce_cache) >= self._ANNOUNCE_CACHE_MAX:
+            self._announce_cache.clear()  # sender_id is unauthenticated - bound it
+        self._announce_cache[(header.sender_id, header.channel_id)] = (
+            header, packet, source, via_multicast, time.monotonic())
+
+    def _site_bridge_peers(self) -> dict[int, "_BridgeInfo"]:
+        """Other bridges heard from recently on this site, by sender_id."""
+        cutoff = time.monotonic() - 3 * self.config.bridge_hello_interval_s
+        return {sid: b for sid, b in self._bridge_hellos.items()
+                if b.seen >= cutoff and self._is_site_local(b.addr[0])}
+
+    def _other_bridge_hosts(self, live: dict) -> set[str]:
+        """Off-site addresses (e.g. VPN) of this site's other bridges. Never
+        worth sending to: they're on this site and get its traffic here."""
+        return {h for b in live.values() for h in b.hosts if not self._is_site_local(h)}
+
+    def _better_bridges_with(self, header, source, via_multicast: bool, live: dict) -> list[tuple[str, int]]:
+        """Addresses of this site's bridges that outrank us and certainly got
+        this packet too: the one it came from, those heard on the multicast
+        it arrived by, or - for an announce straight from its sender, which
+        sends announces to every peer - those the sender reaches. (Unicast
+        audio goes only where the sender chose, so every bridge forwards
+        the audio it gets.)"""
+        me = self._my_rank()
+        better = {b.addr for sid, b in live.items() if self._rank(sid, b.priority) > me}
+        if not better:
+            return []
+        got = {source} & better
+        if via_multicast:
+            got |= better & self._site_multicast_addresses()
+        elif header.ptype == TYPE_CHANNEL_ANNOUNCE and self.transport.sender_address(header.sender_id) == source:
+            got |= better & self._reached_by(source)
+        return list(got)
+
+    def _designated_for(self, address, live: dict) -> bool:
+        """Whether we're the top-ranked bridge here reaching `address`."""
+        me = self._my_rank()
+        return not any(self._rank(sid, b.priority) > me and address in self._reached_by(b.addr)
+                       for sid, b in live.items())
+
+    def bridge_role(self) -> str | None:
+        """For status: "active", "standby", or "active for k of n uplink
+        peers" when other bridges on the site cover the rest."""
+        if not self.is_bridge:
+            return None
+        live = self._site_bridge_peers()
+        others = self._other_bridge_hosts(live)
+        uplink = [(p.host, p.port) for p in self.transport.live_peers
+                  if not self._is_site_local(p.host) and p.host not in others]
+        if not live or not uplink:
+            return "active"
+        mine = sum(self._designated_for(a, live) for a in uplink)
+        if mine == len(uplink):
+            return "active"
+        if mine == 0:
+            return "standby"
+        return f"active for {mine} of {len(uplink)} uplink peers"
+
+    def _covered_bridges(self, live: dict) -> list[int]:
+        """Silent bridges we now stand in for: we're the top-ranked live
+        bridge for at least one neighbour they used to reach."""
+        cutoff = time.monotonic() - 3 * self.config.bridge_hello_interval_s
+        forget = time.monotonic() - self._membership_ttl_s
+        mine = {(p.host, p.port) for p in self.transport.live_peers}
+        covered = []
+        for sid, b in self._bridge_hellos.items():
+            if b.seen >= cutoff or b.seen < forget or not self._is_site_local(b.addr[0]):
+                continue
+            entry = self._peer_reach.get(b.addr)
+            if entry and any(a in mine and not self._is_site_local(a[0]) and self._designated_for(a, live)
+                             for a in entry[0]):
+                covered.append(sid)
+        return covered[:self._MAX_COVERED]
+
+    def _check_bridges(self) -> None:
+        """Hello timer: when a bridge on the site goes silent (or a new one
+        appears), neighbours change hands - pass recent announces on so
+        routes through their new bridge are learned straight away."""
+        live = set(self._site_bridge_peers())
+        if live == self._live_bridges:
+            return
+        lost = self._live_bridges - live
+        self._live_bridges = live
+        if self.is_bridge:
+            if lost:
+                log.info("bridge(s) %s on this site went silent - taking over what they reached",
+                         ", ".join(str(s) for s in sorted(lost)))
+            self._replay_cached_announces()
+
+    def _replay_cached_announces(self) -> None:
+        cutoff = time.monotonic() - self._membership_ttl_s
+        for key, (header, packet, source, via_multicast, seen) in list(self._announce_cache.items()):
+            if seen < cutoff:
+                del self._announce_cache[key]
+            else:
+                self._forward(header, packet, source, via_multicast)
+
+    _MAX_HELLO_ADDRESSES = 16
+
+    def _own_addresses(self) -> list[str]:
+        """This node's IPv4 addresses, so other bridges on the site can tell
+        its VPN/uplink address from a separate node's."""
+        try:
+            import ifaddr
+            return [ip.ip for a in ifaddr.get_adapters() for ip in a.ips
+                    if ip.is_IPv4 and not ip.ip.startswith("127.")][:self._MAX_HELLO_ADDRESSES]
+        except OSError:
+            return []
+
+    def _send_bridge_hello(self) -> None:
+        """Tell this site's other bridges (and its nodes) that we're a bridge:
+        our priority, our addresses, and which silent bridges we stand in
+        for. Multicast where possible; otherwise unicast to the site, every
+        time once another bridge is known (failover then reaches nodes
+        quickly), or now and then until one is (so a lone bridge costs next
+        to nothing).
+
+        Payload: priority (1 byte), address count (1 byte), IPv4 addresses
+        (4 bytes each), then sender_ids of covered bridges (4 bytes each)."""
+        if not self.is_bridge:
+            return
+        self._hello_count += 1
+        others = self._site_bridge_peers()
+        covered = self._covered_bridges(others)
+        hosts = self._own_addresses()
+        payload = (bytes([self.config.bridge_priority, len(hosts)])
+                   + b"".join(ipaddress.IPv4Address(h).packed for h in hosts)
+                   + b"".join(sid.to_bytes(4, "big") for sid in covered))
+        site = [p for p in self.transport.peers if self._is_site_local(p.host)]
+        if self.transport.multicast_enabled:
+            on_multicast = self._site_multicast_addresses()
+            targets = [p for p in site if (p.host, p.port) not in on_multicast]
+            group = self._group(0)
+        else:
+            targets, group = site, None
+        if not others and not covered and self._hello_count % 15 != 1:
+            targets = []
+        if targets or group:
+            self.transport.send_encrypted(self._mesh_cipher, 0, TYPE_BRIDGE_HELLO, payload,
+                                          targets=targets, multicast_group=group)
+
+    def _on_bridge_hello(self, header, ciphertext: bytes, addr) -> None:
+        if not self._is_fresh(header, addr):
+            return
+        try:
+            payload = self._mesh_cipher.decrypt(header, ciphertext)
+        except ValueError:
+            log.debug("dropping unauthenticated bridge hello from %s", addr)
+            return
+        self._replay.mark(header.sender_id, header.seq)
+        if len(payload) < 2 or len(payload) < 2 + 4 * payload[1]:
+            return
+        n = payload[1]
+        hosts = frozenset(str(ipaddress.IPv4Address(payload[2 + 4 * i:6 + 4 * i])) for i in range(n)) | {addr[0]}
+        rest = payload[2 + 4 * n:]
+        covers = frozenset(int.from_bytes(rest[i:i + 4], "big") for i in range(0, len(rest) - 3, 4))
+        self._bridge_hellos[header.sender_id] = _BridgeInfo(
+            (addr[0], addr[1]), payload[0], hosts, covers, time.monotonic())
+        # Authenticated, so it's a peer like any other - this is also how
+        # site nodes find a newly added bridge.
+        self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+        self._check_bridges()
+
+    def _bridge_redirects(self) -> dict[tuple[str, int], Peer]:
+        """For site nodes: address of a bridge that went silent -> the
+        top-ranked live bridge standing in for it, so traffic for other
+        networks fails over without waiting for new announces."""
+        if not self._bridge_hellos:
+            return {}
+        cutoff = time.monotonic() - 3 * self.config.bridge_hello_interval_s
+        live = [(self._rank(sid, b.priority), b.addr, b.covers)
+                for sid, b in self._bridge_hellos.items() if b.seen >= cutoff]
+        redirects = {}
+        for sid, b in self._bridge_hellos.items():
+            if b.seen >= cutoff:
+                continue
+            standing_in = [(rank, a) for rank, a, covers in live if sid in covers]
+            if standing_in:
+                best = max(standing_in)[1]
+                redirects[b.addr] = Peer(host=best[0], port=best[1])
+        return redirects
+
+    async def _bridge_hello_loop(self) -> None:
+        while True:
+            self._check_bridges()
+            self._send_bridge_hello()
+            await asyncio.sleep(self.config.bridge_hello_interval_s * random.uniform(0.9, 1.1))
 
     def _is_fresh(self, header, addr) -> bool:
         """Replay check (see replay.py) - False means drop the packet.
@@ -860,6 +1193,20 @@ class OutpostClient:
         else:
             log.debug("dropping duplicate packet from sender %d (seq %d)", header.sender_id, header.seq)
         return False
+
+    def _note_direct_duplicate(self, header, addr) -> None:
+        """A relayed copy of an announce can beat the direct one, which is
+        then dropped as a duplicate - still evidence that the member is
+        reachable at the address we already trust for it, so the member
+        isn't switched over to the relay's address. (Only ever keeps the
+        address we already have; it never sets a new one.)"""
+        if self._replay.is_too_old(header.sender_id, header.seq):
+            return
+        key = (header.channel_id, header.sender_id)
+        existing = self._channel_members.get(header.channel_id, {}).get(header.sender_id)
+        if key in self._member_direct_seen and existing is not None and \
+                (existing[0].host, existing[0].port) == (addr[0], addr[1]):
+            self._member_direct_seen[key] = time.monotonic()
 
     def _check_sender_id_clash(self, header, ciphertext: bytes, addr) -> None:
         """Called for packets carrying our own sender_id. Usually that's our
@@ -927,6 +1274,10 @@ class OutpostClient:
         if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_START, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
             self._relay_packet(header, ciphertext, addr, via_multicast)
 
+        if header.ptype == TYPE_BRIDGE_HELLO:
+            self._on_bridge_hello(header, ciphertext, addr)
+            return
+
         if header.ptype == TYPE_PEX:
             if self.pex:
                 self.pex.handle_incoming(header, ciphertext, addr)
@@ -937,6 +1288,7 @@ class OutpostClient:
             if cipher is None:
                 return  # not a channel we hold the key for
             if not self._is_fresh(header, addr):
+                self._note_direct_duplicate(header, addr)
                 return
             try:
                 payload = cipher.decrypt(header, ciphertext)

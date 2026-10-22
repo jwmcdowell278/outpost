@@ -203,6 +203,12 @@ class OutpostConfig:
     # multicast_interface when multicast is on, otherwise none - a relay
     # with no site is a plain transit relay (e.g. a VPN hub).
     site_subnets: list[str] = field(default_factory=list)
+    # Several bridges on one site: for each outside neighbour, the
+    # highest-ranked bridge reaching it (bridge_priority 0-255, then lowest
+    # sender_id) sends to it; another takes over once it has been silent for
+    # 3 hello intervals. See README "Redundant bridges and mixed uplinks".
+    bridge_priority: int = 100
+    bridge_hello_interval_s: float = 2.0
 
     enable_multicast: bool = False
     multicast_interface: str | None = None
@@ -338,6 +344,13 @@ def _validate_audio_device(v):
     if v.isdigit():
         return int(v)
     return v or None
+
+
+def _validate_priority(v) -> int:
+    v = int(v)
+    if not 0 <= v <= 255:
+        raise ValueError("bridge_priority must be 0-255")
+    return v
 
 
 def _validate_subnets(v) -> list[str]:
@@ -694,6 +707,8 @@ def load_config(path: str) -> OutpostConfig:
         enable_channel_announce=raw.get("enable_channel_announce", False),
         channel_announce_voice=raw.get("channel_announce_voice"),
         site_subnets=_validate_subnets(raw.get("site_subnets")),
+        bridge_priority=_validate_priority(raw.get("bridge_priority", 100)),
+        bridge_hello_interval_s=_validate_positive_float(raw.get("bridge_hello_interval_s", 2.0)),
         enable_multicast=raw.get("enable_multicast", False),
         multicast_interface=raw.get("multicast_interface"),
         multicast_group_base=_validate_group_base(raw.get("multicast_group_base", "239.192.77.0")),
