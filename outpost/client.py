@@ -87,16 +87,40 @@ def _unique(peers: list[Peer]) -> list[Peer]:
     return list(dict.fromkeys(peers))
 
 
-def _site_networks(config) -> list[ipaddress.IPv4Network]:
-    """This node's site: site_subnets if set, else the multicast
-    interface's subnet when multicast is on."""
+def _auto_multicast_interface(sys_net: str = "/sys/class/net") -> str | None:
+    """The interface carrying the batman-adv mesh, for when
+    multicast_interface isn't set: a bridge with a batman interface in it
+    (e.g. br-lan containing bat0), else the batman interface itself. Linux
+    only (batman-adv is); None elsewhere or with no mesh, meaning the OS
+    default interface."""
+    try:
+        names = sorted(os.listdir(sys_net))
+    except OSError:
+        return None
+
+    def is_batman(name: str) -> bool:
+        return name.startswith("bat") or os.path.isdir(os.path.join(sys_net, name, "mesh"))
+
+    for name in names:
+        try:
+            members = os.listdir(os.path.join(sys_net, name, "brif"))
+        except OSError:
+            continue
+        if any(is_batman(m) for m in members):
+            return name
+    return next((n for n in names if is_batman(n)), None)
+
+
+def _site_networks(config, interface: str | None) -> list[ipaddress.IPv4Network]:
+    """This node's site: site_subnets if set, else the subnet of the
+    multicast interface (configured or detected) when multicast is on."""
     if config.site_subnets:
         return [ipaddress.IPv4Network(n) for n in config.site_subnets]
-    if not (config.enable_multicast and config.multicast_interface):
+    if not (config.enable_multicast and interface):
         return []
     try:
         import ifaddr
-        wanted = _resolve_interface_ip(config.multicast_interface)
+        wanted = _resolve_interface_ip(interface)
         for adapter in ifaddr.get_adapters():
             for ip in adapter.ips:
                 if ip.is_IPv4 and ip.ip == wanted:
@@ -233,7 +257,10 @@ class OutpostClient:
             else None
         )
         # This node's own site, for bridging (see is_bridge).
-        self._site_networks = _site_networks(config)
+        # multicast_interface, or the batman-adv interface if one is found.
+        self._multicast_interface = config.multicast_interface or (
+            _auto_multicast_interface() if config.enable_multicast else None)
+        self._site_networks = _site_networks(config, self._multicast_interface)
         self.pex = (
             PexGossip(config.sender_id, config.mesh_key, self.transport,
                       interval_s=config.pex_interval_s, fanout=config.pex_fanout,
@@ -621,7 +648,8 @@ class OutpostClient:
         if self.config.enable_multicast:
             try:
                 await self.transport.start_multicast(
-                    self.config.multicast_port, _resolve_interface_ip(self.config.multicast_interface))
+                    self.config.multicast_port, _resolve_interface_ip(self._multicast_interface))
+                log.info("multicast on %s", self._multicast_interface or "the default interface")
                 self._update_groups()
             except OSError as exc:
                 log.warning("multicast unavailable (%s) - using unicast only", exc)

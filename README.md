@@ -404,14 +404,25 @@ settings editor without a restart (see "Web UI" above).
 Normally a talker sends a separate copy of every voice frame to each
 listener on the channel - fine for small teams, but a channel with hundreds
 of listeners would need tens of thousands of packets a second from the
-talker, far more than mesh Wi-Fi can carry. With multicast on, a talker
+talker, far more than mesh Wi-Fi can carry. With multicast, a talker
 sends each frame **once** to the channel's multicast group, and every
 listener on the same site (one batman-adv mesh, or one LAN) receives that
-single copy:
+single copy.
+
+**It's automatic - nothing to configure.** Multicast is on by default, and
+each channel switches to it by itself once enough of its listeners have
+actually been heard by multicast, and back when they leave. So a channel
+that grows from 3 to 300 listeners on a site needs no change, and on
+networks multicast doesn't get through (most VPNs, routed links) nothing is
+ever heard by multicast and everything stays unicast. The mesh interface is
+found automatically on Linux: a bridge containing a batman-adv interface
+(e.g. `br-lan` with `bat0` in it), else the batman-adv interface itself,
+else the OS default. The node logs which one it picked. Overrides, if ever
+needed:
 
 ```yaml
-enable_multicast: true
-multicast_interface: bat0      # interface carrying the mesh IP: bat0, or the bridge (e.g. br-lan) if bat0 is bridged
+# enable_multicast: false      # turn it off on this node (it then gets unicast copies)
+# multicast_interface: bat0    # the interface carrying the mesh IP, if detection picks the wrong one
 multicast_min_listeners: 5     # below this many listeners on this site, keep sending unicast
 ```
 
@@ -672,9 +683,7 @@ site:
 
 ```yaml
 # on the bridge
-enable_relay: true
-enable_multicast: true
-multicast_interface: bat0          # its site subnet is taken from this interface...
+enable_relay: true                 # its site is the subnet of the detected mesh interface (bat0)...
 # site_subnets: [10.1.0.0/24]      # ...or list the site's subnets explicitly
 peers:
   - host: 10.99.0.2                # any ONE other bridge or VPN hub
@@ -737,8 +746,8 @@ nodes learn about their own site, bridges about other bridges. So one
 site's local addresses never reach another site, even if sites reuse the
 same subnets.
 
-**Hub-and-spoke VPNs:** a relay with no site of its own (no
-`multicast_interface`/`site_subnets`, e.g. a VPN server) is a plain transit
+**Hub-and-spoke VPNs:** a relay with no site of its own (no batman-adv
+interface, `multicast_interface` or `site_subnets`, e.g. a VPN server) is a plain transit
 relay, following the same rules. Several plain relays between the same
 networks give redundancy as-is: each forwards, and receivers drop the
 duplicates.
@@ -774,8 +783,6 @@ reaches from peer exchange.
 ```yaml
 # on each bridge of the site - only the priority differs
 enable_relay: true
-enable_multicast: true
-multicast_interface: bat0
 bridge_priority: 200               # preferred; the backup keeps 100
 peers:
   - host: 10.1.0.1                 # the other bridge (or any site node)...

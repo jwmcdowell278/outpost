@@ -194,9 +194,13 @@ class OutpostConfig:
     # Wi-Fi. Members heard via multicast are skipped for unicast; everyone
     # else (VPN peers, nodes with this off) still gets unicast. Channels
     # with fewer than multicast_min_listeners listeners on this site stay
-    # unicast, since a multicast floods the whole mesh. multicast_interface
-    # is the interface (name, e.g. "bat0" or "br-lan", or its IPv4 address)
-    # carrying the mesh - unset uses the OS default. Groups are
+    # unicast, since a multicast floods the whole mesh. On by default: a
+    # channel only switches to multicast once that many listeners have
+    # actually been heard by multicast, so where it doesn't get through
+    # (VPN, routed networks) nothing changes. multicast_interface is the
+    # interface (name, e.g. "bat0" or "br-lan", or its IPv4 address)
+    # carrying the mesh - unset, a batman-adv interface (or the bridge it's
+    # in) is used if there is one, else the OS default. Groups are
     # multicast_group_base + channel id (+0 for channel announces).
     # Subnets that make up this node's own site, for a relay acting as a
     # site bridge (see README "Bridging sites"). Unset: the subnet of
@@ -210,7 +214,7 @@ class OutpostConfig:
     bridge_priority: int = 100
     bridge_hello_interval_s: float = 2.0
 
-    enable_multicast: bool = False
+    enable_multicast: bool = True
     multicast_interface: str | None = None
     multicast_group_base: str = "239.192.77.0"
     multicast_port: int = 5556
@@ -709,7 +713,7 @@ def load_config(path: str) -> OutpostConfig:
         site_subnets=_validate_subnets(raw.get("site_subnets")),
         bridge_priority=_validate_priority(raw.get("bridge_priority", 100)),
         bridge_hello_interval_s=_validate_positive_float(raw.get("bridge_hello_interval_s", 2.0)),
-        enable_multicast=raw.get("enable_multicast", False),
+        enable_multicast=raw.get("enable_multicast", True),
         multicast_interface=raw.get("multicast_interface"),
         multicast_group_base=_validate_group_base(raw.get("multicast_group_base", "239.192.77.0")),
         multicast_port=_validate_port(raw.get("multicast_port", 5556)),

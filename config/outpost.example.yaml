@@ -153,11 +153,14 @@ channel_announce_voice:
 # listener - what makes a large channel workable on mesh Wi-Fi. Listeners
 # reached by multicast get no unicast copy; everyone else (VPN peers, nodes
 # with this off) still gets unicast. Channels with fewer than
-# multicast_min_listeners listeners on this site stay unicast. Set
-# multicast_interface to the interface carrying the mesh IP (bat0, or the
-# bridge such as br-lan if bat0 is bridged). See README "Large channels on a
-# mesh site".
-enable_multicast: false
+# multicast_min_listeners listeners on this site stay unicast. On by default
+# and safe to leave on everywhere: a channel only switches to multicast once
+# that many listeners have actually been heard by multicast, so on networks
+# where it doesn't get through (VPN, routed links) nothing changes. The mesh
+# interface is found automatically (bat0, or the bridge such as br-lan it's
+# in); set multicast_interface only to override that. See README "Large
+# channels on a mesh site".
+enable_multicast: true
 # For a site bridge (enable_relay: true on a node that's on both the site and
 # the VPN): the subnet(s) of its own site. Unset, it's taken from
 # multicast_interface. See README "Bridging sites".
