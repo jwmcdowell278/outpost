@@ -76,7 +76,8 @@ flowchart LR
     directions, with no edits to already-deployed devices' configs. The
     fanout bound keeps each node's gossip send cost constant rather than
     growing with total mesh size - see Scaling below. `max_peers` caps how
-    many peer addresses a node will track in total (raise for large meshes).
+    many peer addresses a node will track in total (default 1024 - a safety
+    ceiling, raise only for meshes beyond about a thousand devices).
     A node only gossips peers it has heard from directly, and only direct,
     authenticated traffic keeps a peer from expiring - being mentioned
     again by gossip or mDNS doesn't. So a peer that goes away drops out of
@@ -904,9 +905,10 @@ remaining hard limits worth knowing about:
 - **PEX fanout gossip** (`pex_fanout`, default 8) keeps each node's gossip
   send cost constant instead of growing with total mesh size, at the cost of
   needing a few extra rounds for full propagation on a very large mesh.
-- **`max_peers`** must be raised from its small-deployment default (128) for
-  a mesh with many hundreds/thousands of devices, or legitimate peers will be
-  silently dropped once the table fills.
+- **`max_peers`** (default 1024) is a safety ceiling against junk addresses
+  filling the peer table. Raise it for a mesh of more than about a thousand
+  devices, or legitimate peers will be dropped once the table fills (logged
+  as "peer table full").
 - **mDNS does not scale** to large meshes on one multicast segment (risk of
   multicast storms) - set `enable_mdns: false` and rely on PEX plus a couple
   of static bootstrap peers for meshes beyond roughly a hundred devices.

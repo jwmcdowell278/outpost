@@ -27,7 +27,7 @@ DEFAULT_MAX_PACKET_BYTES = 1200
 # per-packet fan-out) grow without bound. Configurable per deployment - a
 # mesh with thousands of nodes needs this raised well above the default to
 # avoid silently dropping legitimate peers/channel members.
-DEFAULT_MAX_PEERS = 128
+DEFAULT_MAX_PEERS = 1024
 
 # How far past the last persisted seq high-water mark to resume counting
 # from on startup - must comfortably exceed how many packets could plausibly

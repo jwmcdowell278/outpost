@@ -74,11 +74,12 @@ class OutpostConfig:
     # mesh has many hundreds-to-thousands of nodes.
     pex_fanout: int = 8
 
-    # Ceiling on how many peer addresses a single node will track at once
-    # (static + mDNS + PEX-gossiped). The default suits small/medium
-    # deployments; raise it for a mesh with many hundreds/thousands of
-    # devices so legitimate peers/channel members aren't silently dropped.
-    max_peers: int = 128
+    # Safety ceiling on how many peer addresses a single node will track at
+    # once (static + mDNS + PEX-gossiped). Bounds memory and the worst-case
+    # flood/announce fan-out if junk addresses get gossiped or advertised.
+    # The default covers most deployments, including a relay hub; raise it
+    # only for a mesh of more than about a thousand devices.
+    max_peers: int = 1024
 
     # Auto-discovery for subnets mDNS can't reach (e.g. a WireGuard tunnel -
     # point-to-point VPN links don't carry multicast) without hand-
@@ -719,7 +720,7 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         enable_pex=raw.get("enable_pex", True),
         pex_interval_s=raw.get("pex_interval_s", 30.0),
         pex_fanout=raw.get("pex_fanout", 8),
-        max_peers=raw.get("max_peers", 128),
+        max_peers=raw.get("max_peers", 1024),
         enable_subnet_scan=raw.get("enable_subnet_scan", False),
         subnet_scan_interval_s=raw.get("subnet_scan_interval_s", 60.0),
         subnet_scan_max_hosts=raw.get("subnet_scan_max_hosts", 512),

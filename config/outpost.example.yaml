@@ -56,10 +56,11 @@ pex_interval_s: 30
 # hop-by-hop spread. Raise only on a small mesh for faster convergence.
 pex_fanout: 8
 
-# Ceiling on how many peer addresses one node will track at once (static +
-# mDNS + gossiped). Raise this for a mesh with many hundreds/thousands of
-# devices so legitimate peers aren't silently dropped once the table fills.
-max_peers: 128
+# Safety ceiling on how many peer addresses one node will track at once
+# (static + mDNS + gossiped) - limits the damage from junk addresses being
+# advertised. The default covers most deployments, relay hubs included;
+# raise it only for a mesh of more than about a thousand devices.
+max_peers: 1024
 
 # Auto-discovery for subnets mDNS can't reach (e.g. a WireGuard tunnel -
 # point-to-point VPN links don't carry multicast) without hand-maintaining
