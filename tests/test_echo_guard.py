@@ -41,13 +41,13 @@ def test_own_speaker_active_false_before_any_playback():
 
 def test_own_speaker_active_true_right_after_playback():
     client, _ = _make_client(enable_echo_guard=True)
-    client._play_on_speaker(b"\x00" * (client.codec.frame_size * 2))
+    client._play_local([b"\x00" * (client.codec.frame_size * 2)])
     assert client._own_speaker_active() is True
 
 
 def test_own_speaker_active_false_after_hold_expires():
     client, _ = _make_client(enable_echo_guard=True, echo_guard_hold_ms=10)
-    client._play_on_speaker(b"\x00" * (client.codec.frame_size * 2))
+    client._play_local([b"\x00" * (client.codec.frame_size * 2)])
     time.sleep(0.02)
     assert client._own_speaker_active() is False
 
@@ -133,5 +133,8 @@ def test_speaker_activity_recorded_from_received_audio_playback():
     header = Header(VERSION, TYPE_AUDIO, channel_id=1, sender_id=2, seq=0)
     ciphertext = cipher.encrypt(header, pad_audio(opus_bytes, None))
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
+    client.mixer.stop(1, 2)
+    # The speaker's callback pulls the received frame out of the mixer.
+    client.mixer.next_frame()
 
     assert client._own_speaker_active() is True

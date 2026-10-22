@@ -208,20 +208,38 @@ class MicCapture(_AudioStream):
 
 class SpeakerPlayback(_AudioStream):
     """Plays mono int16 PCM frames through the configured output device
-    (see resolve_device), or the system default."""
+    (see resolve_device), or the system default.
+
+    With `source` set (the client's Mixer.next_frame), the audio callback
+    pulls each frame from it, so playout is clocked by the sound card.
+    Otherwise frames queued via play_frame() are played in order."""
 
     kind = "output"
 
-    def __init__(self, sample_rate: int, frame_size: int, device: str | int | None = None):
+    def __init__(self, sample_rate: int, frame_size: int, device: str | int | None = None,
+                 source=None):
         super().__init__(sample_rate, frame_size, device)
         self._silence = np.zeros(frame_size, dtype=np.int16).tobytes()
+        self._source = source
+        self._source_failed = False
 
     def _callback(self, outdata, frames, time_info, status) -> None:
         self.last_callback = time.monotonic()
-        try:
-            frame = self._queue.get_nowait()
-        except queue.Empty:
-            frame = self._silence
+        if self._source is not None:
+            try:
+                frame = self._source()
+            except Exception:
+                # Never let an exception escape the audio callback - that
+                # stops the stream. Log once; keep playing silence.
+                if not self._source_failed:
+                    self._source_failed = True
+                    log.exception("speaker source failed - playing silence")
+                frame = self._silence
+        else:
+            try:
+                frame = self._queue.get_nowait()
+            except queue.Empty:
+                frame = self._silence
         outdata[:] = frame
 
     def _make_stream(self, device):

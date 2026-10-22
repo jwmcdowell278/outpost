@@ -86,7 +86,7 @@ def test_pad_roundtrip(opus):
 def test_receiver_drops_audio_with_bad_padding():
     client, key = _make_client()
     played = []
-    client.speaker.play_frame = played.append
+    client.mixer.push = lambda ch, sid, seq, opus: played.append(opus)
     client.transport.confirm_peer = lambda *a: True
     header = Header(VERSION, TYPE_AUDIO, 1, 7, 100)
     opus = client.codec.encode(b"\x00\x00" * client.codec.frame_size)

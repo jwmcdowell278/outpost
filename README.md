@@ -399,6 +399,40 @@ settings editor without a restart (see "Web UI" above).
   noisy environments versus open-mic/VOX, since nothing is transmitted
   (or even captured) outside of a deliberate PTT press.
 
+## Listening to several channels
+
+A node talks on one channel (the *active* channel) but can listen to as
+many as you like - e.g. a team member on their team channel who also
+monitors the main channel:
+
+```yaml
+monitor_channels: [main]        # in addition to the active channel
+channel_volumes: {main: 0.6}    # 0.0-1.0 per channel, default 1.0
+duck_monitored_channels: true   # turn monitored channels down while someone talks on the active one
+```
+
+All three can also be changed live from the web UI's Status page (a
+"Listen" checkbox and volume slider per channel), and are saved back to the
+config file. Your node must hold a channel's key to hear it.
+
+Received audio goes through a jitter buffer per sender, and everyone being
+heard is mixed together (`outpost/mixer.py`):
+
+- **Two people talking at once** are both heard, mixed, instead of their
+  audio interleaving into garble. A limiter stops the sum from clipping.
+- **Network jitter** is smoothed out: frames are held briefly and played on
+  the sound card's own clock. The delay adapts to the link, from 40 ms on a
+  clean LAN up to 160 ms on a bad mesh link (at the default 20 ms frames),
+  and grows mid-transmission if frames start arriving late.
+- **Lost frames** are recovered with Opus FEC when the next frame has
+  arrived, otherwise concealed. A burst that arrives all at once after a
+  stall is trimmed so delay doesn't build up.
+
+To keep a transmission's packet numbers gap-free (so the receiver can tell
+a lost frame from a control packet), a node holds back its own control
+traffic (channel announces, peer exchange) while PTT is held and sends it
+on release - or every 20 seconds during a very long transmission.
+
 ## Preventing people from talking over each other
 
 `enable_tx_lockout` (off by default) makes a client ignore its own new PTT
@@ -846,9 +880,6 @@ bitrate doesn't match `DEFAULT_BITRATE`.
   above), add STUN/hole-punching - today's PEX gossip still assumes peers
   within a segment are mutually reachable by UDP (true on LAN, VPN overlays,
   and mesh radio, but not across arbitrary NATs without a relay/bridge).
-- **Multi-channel simultaneous receive**: currently a client only plays
-  audio for its one active channel; could support monitoring multiple
-  channels at once with per-channel volume/mute.
 - **Mobile clients**: iOS/Android would need native audio APIs; the wire
   protocol/crypto design is portable, only `audio.py`/`ptt/` are
   platform-specific.

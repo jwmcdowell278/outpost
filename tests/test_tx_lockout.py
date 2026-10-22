@@ -65,7 +65,7 @@ def test_blocked_ptt_plays_audible_lockout_tone():
     client, key = _make_client(enable_tx_lockout=True)
     _deliver_audio(client, key)
     played: list[bytes] = []
-    client.speaker.play_frame = played.append
+    client.mixer.play_local = played.extend
 
     client.set_ptt(True)
 
@@ -77,7 +77,7 @@ def test_blocked_ptt_plays_audible_lockout_tone():
 def test_allowed_ptt_does_not_play_lockout_tone():
     client, _key = _make_client(enable_tx_lockout=True)
     played: list[bytes] = []
-    client.speaker.play_frame = played.append
+    client.mixer.play_local = played.extend
 
     client.set_ptt(True)
 

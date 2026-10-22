@@ -32,6 +32,7 @@ from .config import (
     rotate_channel_key_in_file,
     add_peer_to_file,
     remove_peer_from_file,
+    _validate_volume,
 )
 
 log = logging.getLogger(__name__)
@@ -156,8 +157,9 @@ _INDEX_HTML = f"""<!doctype html>
 </div>
 
 <div class="card">
-  <h2>Channel</h2>
-  <div class="row" id="channels"></div>
+  <h2>Channels</h2>
+  <div class="muted">Talk on one channel; listen to as many as you like.</div>
+  <table id="channelTable"><thead><tr><th>Talk on</th><th>Listen</th><th>Volume</th><th>Speaking</th></tr></thead><tbody></tbody></table>
   <button id="ptt">Hold to talk</button>
   <div class="muted" id="speakingLine">loading...</div>
 </div>
@@ -203,18 +205,7 @@ async function refresh() {{
       ? '\U0001F50A speaking: ' + s.speaking.map(p => p.alias || ('sender ' + p.sender_id)).join(', ')
       : '\U0001F507 no one speaking';
 
-    const channelsDiv = document.getElementById('channels');
-    channelsDiv.textContent = '';
-    for (const name of s.channels) {{
-      const btn = document.createElement('button');
-      btn.textContent = name;
-      if (name === s.active_channel) btn.classList.add('active');
-      btn.onclick = () => api('/api/channel', {{
-        method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ name }}),
-      }}).then(refresh).catch(e => alert(e.message));
-      channelsDiv.appendChild(btn);
-    }}
+    renderChannels(s.channel_list);
 
     document.getElementById('peerCount').textContent = s.peer_count;
     fillTable('peerTable', s.peers, p =>
@@ -223,6 +214,46 @@ async function refresh() {{
       `<td>${{m.sender_id}}</td><td>${{m.host}}:${{m.port}}</td><td>${{fmtAge(m.age_s)}}</td>`);
   }} catch (e) {{
     document.getElementById('statusLine').textContent = 'error: ' + e.message;
+  }}
+}}
+
+const postJson = (path, body) => api(path, {{
+  method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body),
+}});
+
+function renderChannels(list) {{
+  const tbody = document.querySelector('#channelTable tbody');
+  // Don't rebuild rows while a volume slider is being dragged.
+  if (tbody.contains(document.activeElement) && document.activeElement.type === 'range') return;
+  tbody.textContent = '';
+  for (const ch of list) {{
+    const tr = document.createElement('tr');
+
+    const talk = document.createElement('button');
+    talk.textContent = ch.name;
+    if (ch.active) talk.classList.add('active');
+    talk.onclick = () => postJson('/api/channel', {{ name: ch.name }}).then(refresh).catch(e => alert(e.message));
+
+    const listen = document.createElement('input');
+    listen.type = 'checkbox';
+    listen.checked = ch.active || ch.monitored;
+    listen.disabled = ch.active;  // always hear the channel you talk on
+    listen.title = ch.active ? 'You always hear the channel you talk on' : 'Also listen to this channel';
+    listen.onchange = () => postJson('/api/monitor', {{ name: ch.name, listen: listen.checked }})
+      .then(refresh).catch(e => alert(e.message));
+
+    const vol = document.createElement('input');
+    vol.type = 'range'; vol.min = 0; vol.max = 100; vol.value = Math.round(ch.volume * 100);
+    vol.onchange = () => postJson('/api/monitor', {{ name: ch.name, volume: vol.value / 100 }})
+      .catch(e => alert(e.message));
+
+    const speaking = document.createElement('span');
+    speaking.textContent = ch.speaking.map(p => p.alias || ('sender ' + p.sender_id)).join(', ');
+
+    for (const el of [talk, listen, vol, speaking]) {{
+      const td = document.createElement('td'); td.appendChild(el); tr.appendChild(td);
+    }}
+    tbody.appendChild(tr);
   }}
 }}
 
@@ -725,6 +756,7 @@ class WebUI:
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
+            web.post("/api/monitor", self._handle_set_monitor),
             web.post("/api/generate_key", self._handle_generate_key),
             web.get("/api/config", self._handle_get_config),
             web.post("/api/config", self._handle_set_config),
@@ -797,6 +829,17 @@ class WebUI:
             "peers": c.transport.peer_details(),
             "channel_members": c.channel_member_details(),
             "speaking": c.speaking_details(),
+            "channel_list": [
+                {
+                    "name": ch.name,
+                    "active": cid == c.active_channel.id,
+                    "monitored": cid in c.monitored_channel_ids,
+                    "volume": c.channel_volume(cid),
+                    "speaking": c.speaking_details(cid) if cid in c.listening_channel_ids() else [],
+                }
+                for cid, ch in c.config.channels.items()
+            ],
+            "duck_monitored_channels": c.mixer.duck_enabled,
         })
 
     async def _handle_set_channel(self, request) -> web.Response:
@@ -809,6 +852,37 @@ class WebUI:
         except KeyError:
             raise web.HTTPNotFound(text=f"no channel named {name!r}")
         return web.json_response({"active_channel": self.client.active_channel.name})
+
+    async def _handle_set_monitor(self, request) -> web.Response:
+        """{"name": channel, "listen": bool?, "volume": 0.0-1.0?} - listen to
+        a channel besides the active one, and/or set its volume. Applies
+        live and is saved to the config file when there is one."""
+        data = await request.json()
+        name = data.get("name") if isinstance(data, dict) else None
+        if not name:
+            raise web.HTTPBadRequest(text="missing 'name'")
+        try:
+            if "listen" in data:
+                if not isinstance(data["listen"], bool):
+                    raise web.HTTPBadRequest(text="'listen' must be true or false")
+                self.client.set_monitor(name, data["listen"])
+            if "volume" in data:
+                try:
+                    volume = _validate_volume(data["volume"])
+                except (TypeError, ValueError) as exc:
+                    raise web.HTTPBadRequest(text=f"volume: {exc}")
+                self.client.set_channel_volume(name, volume)
+        except KeyError:
+            raise web.HTTPNotFound(text=f"no channel named {name!r}")
+        if self.client.config_path is not None:
+            save_config_fields(self.client.config_path, {
+                "monitor_channels": self.client.config.monitor_channels,
+                "channel_volumes": self.client.config.channel_volumes,
+            })
+        return web.json_response({
+            "monitor_channels": self.client.config.monitor_channels,
+            "channel_volumes": self.client.config.channel_volumes,
+        })
 
     async def _handle_set_ptt(self, request) -> web.Response:
         data = await request.json()
@@ -999,6 +1073,8 @@ class WebUI:
             self.client.echo_guard_hold_s = validated["echo_guard_hold_ms"] / 1000.0
         if "sender_alias" in validated:
             self.client.sender_alias = validated["sender_alias"]
+        if "duck_monitored_channels" in validated:
+            self.client.mixer.duck_enabled = validated["duck_monitored_channels"]
 
         return web.json_response({
             "saved": sorted(validated),

@@ -64,7 +64,7 @@ def _make_client():
         channels={1: Channel(1, "ops", key)}, enable_mdns=False, enable_pex=False,
     ), "ops")
     played = []
-    client.speaker.play_frame = played.append
+    client.mixer.push = lambda ch, sid, seq, opus: played.append(opus)
     client.transport.confirm_peer = lambda *a: True
     return client, ChannelCipher(key), played
 

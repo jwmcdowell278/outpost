@@ -14,7 +14,8 @@ import numpy as np
 from .agc import AutomaticGainControl
 from .announce import ChannelAnnouncer
 from .audio import MicCapture, SpeakerPlayback, device_available, list_devices_fresh, restart_streams
-from .codec import OpusCodec
+from .codec import OpusCodec, OpusDecoder
+from .mixer import Mixer
 from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
 from .dsp import HighPassFilter, Squelch
@@ -132,7 +133,26 @@ class OutpostClient:
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
         self.mic = MicCapture(self.codec.sample_rate, self.codec.frame_size, device=config.input_device)
-        self.speaker = SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size, device=config.output_device)
+        # Received audio goes through per-sender jitter buffers and is mixed
+        # (see mixer.py); the speaker's callback pulls each frame from it.
+        self.mixer = Mixer(
+            self.codec.frame_size, config.frame_ms,
+            decoder_factory=lambda: OpusDecoder(self.codec.sample_rate, frame_ms=config.frame_ms),
+        )
+        self.mixer.duck_enabled = config.duck_monitored_channels
+        self.mixer.active_channel_id = self.active_channel.id
+        self.speaker = SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size,
+                                       device=config.output_device, source=self.mixer.next_frame)
+        # Channels listened to besides the active one (by id, so renames
+        # don't break them) - see OutpostConfig.monitor_channels.
+        self.monitored_channel_ids: set[int] = {
+            config.channel_by_name(name).id for name in config.monitor_channels
+        }
+        for name, volume in config.channel_volumes.items():
+            try:
+                self.mixer.volumes[config.channel_by_name(name).id] = volume
+            except KeyError:
+                log.warning("channel_volumes: ignoring unknown channel %r", name)
         self.transport = MeshTransport(
             config.sender_id, config.peers, self._on_packet,
             max_packet_bytes=config.max_packet_bytes, max_peers=config.max_peers,
@@ -182,10 +202,7 @@ class OutpostClient:
         self._tx_task: asyncio.Task | None = None
         self._channel_announce_task: asyncio.Task | None = None
         self._audio_watchdog_task: asyncio.Task | None = None
-        self._last_seq_seen: dict[int, int] = {}
-        # Rejects replayed channel packets - see replay.py. Separate from
-        # _last_seq_seen above, which only orders playback and is reset on
-        # every STOP.
+        # Rejects replayed channel packets - see replay.py.
         self._replay = ReplayWindow()
         self._replay_warned_at: dict[int, float] = {}
         # Random per-run marker carried in our CHANNEL_ANNOUNCE payloads. If
@@ -236,8 +253,8 @@ class OutpostClient:
         self.enable_echo_guard = config.enable_echo_guard
         self.echo_guard_hold_s = config.echo_guard_hold_ms / 1000.0
         # monotonic time this device's own speaker last played anything -
-        # updated by _play_on_speaker(), the single path everything that
-        # plays audio locally goes through.
+        # updated by _play_local() for local sounds; received audio is
+        # tracked by mixer.last_active (see _own_speaker_active).
         self._last_own_speaker_activity = 0.0
         # Precomputed once - sample rate/frame size are fixed for the life
         # of the client.
@@ -270,18 +287,14 @@ class OutpostClient:
 
     def _play_lockout_tone(self) -> None:
         """Local-only audible feedback that a PTT press was blocked - never
-        transmitted. Shares the speaker's single output queue with any audio
-        currently playing, so it may briefly interrupt/overlay whoever is
-        already talking rather than play on a separate line."""
-        for frame in self._lockout_tone_frames:
-            self._play_on_speaker(frame)
+        transmitted. Mixed over whatever is currently playing."""
+        self._play_local(self._lockout_tone_frames)
 
-    def _play_on_speaker(self, frame: bytes) -> None:
-        """Every path that plays audio through this device's own speaker
-        goes through here, so echo_guard (see _tx_loop) knows when this
-        device was last actually making sound."""
+    def _play_local(self, frames: list[bytes]) -> None:
+        """Plays locally-generated sound (not received audio) through the
+        mixer, recording it for echo_guard."""
         self._last_own_speaker_activity = time.monotonic()
-        self.speaker.play_frame(frame)
+        self.mixer.play_local(frames)
 
     def _own_speaker_active(self) -> bool:
         """True if this device's own speaker played something within the
@@ -289,7 +302,8 @@ class OutpostClient:
         this device's own speaker (e.g. two devices placed too close
         together) isn't picked back up and re-transmitted into a feedback
         loop."""
-        return (time.monotonic() - self._last_own_speaker_activity) < self.echo_guard_hold_s
+        last = max(self._last_own_speaker_activity, self.mixer.last_active)
+        return (time.monotonic() - last) < self.echo_guard_hold_s
 
     def set_ptt(self, pressed: bool) -> None:
         """Call from a PTTSource callback (may run on any thread)."""
@@ -300,6 +314,9 @@ class OutpostClient:
         self._ptt_active = pressed
         cipher = self.ciphers[self.active_channel.id]
         targets = self._channel_target_peers(self.active_channel.id)
+        if pressed:
+            # Keep our AUDIO seqs contiguous for receivers' jitter buffers.
+            self.transport.hold_control(True)
         try:
             if pressed:
                 # Sent once per transmission (not per AUDIO frame) so other
@@ -315,11 +332,45 @@ class OutpostClient:
             # START/STOP for this edge. Must not raise into a PTTSource
             # callback, which may run on an arbitrary driver/audio thread.
             log.debug("PTT edge not sent - transport not started")
+        if not pressed:
+            self.transport.hold_control(False)
 
     def set_active_channel(self, name: str) -> None:
+        previous = self.active_channel
         self.active_channel = self.config.channel_by_name(name)
+        self.mixer.active_channel_id = self.active_channel.id
+        if previous.id != self.active_channel.id and previous.id not in self.monitored_channel_ids:
+            self.mixer.remove_channel(previous.id)
         if self.channel_announcer is not None:
             self.channel_announcer.announce(f"Channel {name}")
+
+    def listening_channel_ids(self) -> set[int]:
+        return {self.active_channel.id} | self.monitored_channel_ids
+
+    def set_monitor(self, name: str, listen: bool) -> None:
+        """Start/stop listening to a channel besides the active one. Raises
+        KeyError for an unknown channel name."""
+        channel_id = self.config.channel_by_name(name).id
+        if listen:
+            self.monitored_channel_ids.add(channel_id)
+        else:
+            self.monitored_channel_ids.discard(channel_id)
+            if channel_id != self.active_channel.id:
+                self.mixer.remove_channel(channel_id)
+        self.config = replace(self.config, monitor_channels=self.monitored_channel_names())
+
+    def set_channel_volume(self, name: str, volume: float) -> None:
+        channel_id = self.config.channel_by_name(name).id
+        self.mixer.volumes[channel_id] = volume
+        volumes = dict(self.config.channel_volumes)
+        volumes[name] = volume
+        self.config = replace(self.config, channel_volumes=volumes)
+
+    def monitored_channel_names(self) -> list[str]:
+        return [ch.name for cid, ch in self.config.channels.items() if cid in self.monitored_channel_ids]
+
+    def channel_volume(self, channel_id: int) -> float:
+        return self.mixer.volumes.get(channel_id, 1.0)
 
     def request_restart(self) -> None:
         """Signals scripts/run_client.py's main loop to cleanly stop and
@@ -342,6 +393,8 @@ class OutpostClient:
         self.config.channels[channel_id] = renamed
         if self.active_channel.id == channel_id:
             self.active_channel = renamed
+        # Monitored channels are tracked by id; refresh the saved names.
+        self.config = replace(self.config, monitor_channels=self.monitored_channel_names())
 
     def rotate_channel_key(self, channel_id: int, key: bytes) -> None:
         """Replaces a channel's key immediately - every other peer on that
@@ -546,13 +599,6 @@ class OutpostClient:
 
     _RELAY_SEEN_MAX = 4096
 
-    # Cap on how many synthetic loss-concealment frames a single seq gap can
-    # produce (see _on_packet's TYPE_AUDIO handling) - a real burst loss on a
-    # lossy link is at most a handful of frames; anything larger reflects
-    # non-audio traffic sharing the seq counter during an idle gap, not
-    # genuine loss, and must not flood playback with fake audio.
-    _MAX_CONCEALED_FRAMES = 10
-
     def _relay_packet(self, header, ciphertext: bytes, addr) -> None:
         """Blind flood-forward for AUDIO/STOP/CHANNEL_ANNOUNCE packets to
         every other known peer, keyed only on the cleartext header - no
@@ -700,8 +746,8 @@ class OutpostClient:
                     members[header.sender_id] = (existing[0], time.monotonic())
             return
 
-        if header.channel_id != self.active_channel.id:
-            return  # only play audio for the currently selected channel
+        if header.channel_id not in self.listening_channel_ids():
+            return  # only play the active channel and any monitored ones
 
         cipher = self.ciphers.get(header.channel_id)
         if cipher is None:
@@ -730,17 +776,11 @@ class OutpostClient:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
-            self._last_seq_seen.pop(header.sender_id, None)
+            self.mixer.stop(header.channel_id, header.sender_id)
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio.pop(header.channel_id, None)
             self._channel_speaking.get(header.channel_id, {}).pop(header.sender_id, None)
             return
-        last_seq = self._last_seq_seen.get(header.sender_id)
-        if last_seq is not None and header.seq <= last_seq:
-            log.debug("dropping stale/duplicate/out-of-order audio from sender %d (seq %d <= last %d)",
-                      header.sender_id, header.seq, last_seq)
-            return  # drop rather than play audio backwards
-
         try:
             opus_bytes = unpad_audio(cipher.decrypt(header, ciphertext))
         except ValueError:
@@ -759,34 +799,5 @@ class OutpostClient:
         prev_alias = speaking.get(header.sender_id, (None, 0.0))[0]
         speaking[header.sender_id] = (prev_alias, time.monotonic())
 
-        if last_seq is not None and header.seq == last_seq + 2:
-            # Exactly one frame missing - try Opus in-band FEC to recover it
-            # from the redundancy carried in this packet before falling back
-            # to plain concealment.
-            try:
-                recovered = self.codec.decode_fec(opus_bytes)
-                self._play_on_speaker(recovered)
-            except Exception:
-                self._play_on_speaker(self.codec.decode_loss())
-        elif last_seq is not None and header.seq > last_seq + 1:
-            missing = header.seq - last_seq - 1
-            # seq is one counter shared across every packet type from this
-            # sender (START/STOP/CHANNEL_ANNOUNCE/PEX too - see transport.py)
-            # so it never repeats a nonce, but it also means a gap here isn't
-            # purely lost AUDIO frames - a sender idle between transmissions
-            # still advances seq via its periodic channel-announce/PEX
-            # traffic, which would otherwise inflate `missing` with every
-            # minute of silence and flood playback with fake concealment
-            # right as real audio resumes. Only treat a small gap as genuine
-            # loss; a larger one almost certainly reflects elapsed idle time,
-            # not dropped frames, so just play the real frame as-is.
-            if missing <= self._MAX_CONCEALED_FRAMES:
-                for _ in range(missing):
-                    self._play_on_speaker(self.codec.decode_loss())
-            else:
-                log.debug("seq gap of %d from sender %d treated as idle time, not loss - skipping concealment",
-                          missing, header.sender_id)
-
-        self._last_seq_seen[header.sender_id] = header.seq
-        pcm = self.codec.decode(opus_bytes)
-        self._play_on_speaker(pcm)
+        # Ordering, loss recovery and timing are the jitter buffer's job.
+        self.mixer.push(header.channel_id, header.sender_id, header.seq, opus_bytes)

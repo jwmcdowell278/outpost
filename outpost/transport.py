@@ -9,7 +9,7 @@ import time
 
 import ifaddr
 
-from .protocol import Header, TYPE_AUDIO, VERSION, UnsupportedVersion, encode_packet, decode_packet
+from .protocol import Header, TYPE_AUDIO, TYPE_START, TYPE_STOP, VERSION, UnsupportedVersion, encode_packet, decode_packet
 from .config import Peer
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,15 @@ _OWN_ADDRESS_CACHE_TTL_S = 30.0
 # this long - doubling each time it expires again, up to the max - so a dead
 # address that other nodes still mention isn't re-added (and sent to) every
 # gossip round. Hearing from it directly (confirm_peer) clears this at once.
+# While this node is transmitting, control packets (announces, PEX) are
+# held back so its AUDIO sequence numbers stay contiguous - every packet
+# type shares one counter, and a gap would look like a lost frame to the
+# receiver's jitter buffer (see mixer.py). Held packets go out on PTT
+# release, or every this-many seconds during a very long transmission so
+# membership/peer liveness elsewhere doesn't lapse.
+_MAX_CONTROL_HOLD_S = 20.0
+_MAX_DEFERRED_CONTROL = 1024
+
 _UNHEARD_BACKOFF_START_S = 300.0
 _UNHEARD_BACKOFF_MAX_S = 3600.0
 
@@ -159,6 +168,9 @@ class MeshTransport:
         # (host, port) -> (ignore second-hand mentions until, backoff_s) -
         # see _UNHEARD_BACKOFF_START_S.
         self._backoff: dict[tuple[str, int], tuple[float, float]] = {}
+        # See _MAX_CONTROL_HOLD_S.
+        self._hold_since: float | None = None
+        self._deferred: list[tuple] = []
 
     def _load_seq_start(self, seq_persist_path: str | None) -> int:
         if seq_persist_path is None:
@@ -439,13 +451,48 @@ class MeshTransport:
             self._persist_seq()
         return seq
 
+    def hold_control(self, hold: bool) -> None:
+        """Start/stop holding back control packets while transmitting - see
+        _MAX_CONTROL_HOLD_S. Releasing sends everything held, in order."""
+        if hold:
+            if self._hold_since is None:
+                self._hold_since = time.monotonic()
+        else:
+            self._hold_since = None
+            self._flush_deferred()
+
+    def _flush_deferred(self) -> None:
+        deferred, self._deferred = self._deferred, []
+        for args in deferred:
+            try:
+                self._send_encrypted_now(*args)
+            except RuntimeError:
+                pass  # transport stopped meanwhile
+
     def send_encrypted(self, cipher, channel_id: int, ptype: int, plaintext: bytes,
                        targets: list[Peer] | None = None) -> None:
         """Encrypts `plaintext` with `cipher` bound to this packet's exact
         header (so the header can't be altered in transit - see crypto.py)
         and sends it. Use this rather than encrypting and calling send()
         separately, so the header that's authenticated is always the one
-        that goes on the wire."""
+        that goes on the wire.
+
+        Control packets sent while hold_control is on are queued instead
+        (their seq is assigned when they're actually sent)."""
+        if self._hold_since is not None and ptype not in (TYPE_AUDIO, TYPE_START, TYPE_STOP):
+            if time.monotonic() - self._hold_since < _MAX_CONTROL_HOLD_S:
+                if len(self._deferred) >= _MAX_DEFERRED_CONTROL:
+                    self._deferred.pop(0)
+                self._deferred.append((cipher, channel_id, ptype, plaintext, targets))
+                return
+            # Very long transmission: let the backlog out (one gap in the
+            # audio seq, concealed by receivers) and start a new hold window.
+            self._hold_since = time.monotonic()
+            self._flush_deferred()
+        self._send_encrypted_now(cipher, channel_id, ptype, plaintext, targets)
+
+    def _send_encrypted_now(self, cipher, channel_id: int, ptype: int, plaintext: bytes,
+                            targets: list[Peer] | None = None) -> None:
         seq = self.next_seq()
         header = Header(VERSION, ptype, channel_id, self.sender_id, seq)
         self.send(channel_id, seq, cipher.encrypt(header, plaintext), ptype=ptype, targets=targets)

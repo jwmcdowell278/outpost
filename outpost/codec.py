@@ -22,6 +22,31 @@ def frame_size(sample_rate: int = DEFAULT_SAMPLE_RATE, frame_ms: int = DEFAULT_F
     return sample_rate * frame_ms // 1000
 
 
+class OpusDecoder:
+    """Decode-only Opus state. Opus decoders carry state between frames
+    (prediction, concealment), so every sender being played needs its own -
+    feeding two senders' frames through one decoder corrupts both."""
+
+    def __init__(self, sample_rate: int = DEFAULT_SAMPLE_RATE, channels: int = DEFAULT_CHANNELS,
+                 frame_ms: int = DEFAULT_FRAME_MS):
+        self.sample_rate = sample_rate
+        self.frame_size = frame_size(sample_rate, frame_ms)
+        self._decoder = opuslib.Decoder(sample_rate, channels)
+
+    def decode(self, opus_bytes: bytes) -> bytes:
+        return self._decoder.decode(opus_bytes, self.frame_size)
+
+    def decode_loss(self) -> bytes:
+        """Packet-loss-concealment audio for a single missing frame."""
+        return self._decoder.decode(b"", self.frame_size)
+
+    def decode_fec(self, opus_bytes: bytes) -> bytes:
+        """Recover the PREVIOUS (missing) frame from the FEC redundancy in
+        `opus_bytes` - must be followed by a normal decode() of `opus_bytes`
+        itself for the current frame."""
+        return self._decoder.decode(opus_bytes, self.frame_size, decode_fec=True)
+
+
 class OpusCodec:
     def __init__(
         self,

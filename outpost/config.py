@@ -188,6 +188,17 @@ class OutpostConfig:
     # enable_channel_announce.
     channel_announce_voice: str | None = None
 
+    # Channels to listen to in addition to the active (transmit) channel -
+    # e.g. a team member on their team channel who also monitors the main
+    # channel. Names must match configured channels. Audio from all of them
+    # is mixed; channel_volumes (name -> 0.0-1.0) sets each one's level, and
+    # with duck_monitored_channels the monitored ones are turned down while
+    # someone is talking on the active channel. All three can be changed
+    # live from the web UI's Status page.
+    monitor_channels: list[str] = field(default_factory=list)
+    channel_volumes: dict[str, float] = field(default_factory=dict)
+    duck_monitored_channels: bool = True
+
     # Which microphone / speaker to use when a node has more than one (e.g.
     # a USB headset plus a built-in mic). Either a case-insensitive
     # substring of the device name (preferred - indices can change when USB
@@ -307,6 +318,33 @@ def _validate_audio_device(v):
     return v or None
 
 
+def _validate_volume(v):
+    v = float(v)
+    if not 0.0 <= v <= 1.0:
+        raise ValueError("volume must be between 0.0 and 1.0")
+    return v
+
+
+def _load_monitor_channels(raw_value, channels: dict) -> list[str]:
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list) or not all(isinstance(n, str) for n in raw_value):
+        raise ValueError("monitor_channels must be a list of channel names")
+    names = {ch.name for ch in channels.values()}
+    unknown = [n for n in raw_value if n not in names]
+    if unknown:
+        log.warning("monitor_channels: ignoring unknown channel(s) %s", ", ".join(unknown))
+    return [n for n in dict.fromkeys(raw_value) if n in names]
+
+
+def _load_channel_volumes(raw_value) -> dict[str, float]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError("channel_volumes must be a mapping of channel name -> volume")
+    return {str(k): _validate_volume(v) for k, v in raw_value.items()}
+
+
 # Fields the web UI's settings editor is allowed to change, each mapped to
 # (validator, applies_live). applies_live=True means OutpostClient can adopt
 # the new value on the running process immediately; everything else only
@@ -322,6 +360,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "frame_ms": (_validate_positive_int, False),
     "max_packet_bytes": (_validate_positive_int, False),
     "inband_fec": (_validate_bool, False),
+    "duck_monitored_channels": (_validate_bool, True),
     "constant_size_audio": (_validate_bool, False),
     "enable_mdns": (_validate_bool, False),
     "enable_pex": (_validate_bool, False),
@@ -613,6 +652,9 @@ def load_config(path: str) -> OutpostConfig:
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_channel_announce=raw.get("enable_channel_announce", False),
         channel_announce_voice=raw.get("channel_announce_voice"),
+        monitor_channels=_load_monitor_channels(raw.get("monitor_channels"), channels),
+        channel_volumes=_load_channel_volumes(raw.get("channel_volumes")),
+        duck_monitored_channels=raw.get("duck_monitored_channels", True),
         input_device=_validate_audio_device(raw.get("input_device")),
         output_device=_validate_audio_device(raw.get("output_device")),
         log_file=raw.get("log_file"),

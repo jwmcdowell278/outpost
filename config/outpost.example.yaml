@@ -148,6 +148,16 @@ enable_channel_announce: false
 # default voice.
 channel_announce_voice:
 
+# Channels to listen to besides the one you talk on (the active channel) -
+# e.g. a team member on their team channel who also monitors "main". Audio
+# from all of them is mixed. channel_volumes sets each channel's level
+# (0.0-1.0, default 1.0); with duck_monitored_channels, monitored channels are
+# turned down while someone talks on your active channel. All of these can
+# also be changed live from the web UI's Status page.
+# monitor_channels: [main]
+# channel_volumes: {main: 0.6}
+duck_monitored_channels: true
+
 # Which microphone / speaker to use when this node has more than one (e.g. a
 # USB headset plus a built-in mic). Run `python -m outpost.audio` to list
 # this machine's devices. Use part of the device name (case-insensitive,
