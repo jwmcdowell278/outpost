@@ -73,6 +73,29 @@ def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duratio
     return [pcm[i:i + frame_size].tobytes() for i in range(0, len(pcm), frame_size)]
 
 
+def _unique(peers: list[Peer]) -> list[Peer]:
+    return list(dict.fromkeys(peers))
+
+
+def _site_networks(config) -> list[ipaddress.IPv4Network]:
+    """This node's site: site_subnets if set, else the multicast
+    interface's subnet when multicast is on."""
+    if config.site_subnets:
+        return [ipaddress.IPv4Network(n) for n in config.site_subnets]
+    if not (config.enable_multicast and config.multicast_interface):
+        return []
+    try:
+        import ifaddr
+        wanted = _resolve_interface_ip(config.multicast_interface)
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                if ip.is_IPv4 and ip.ip == wanted:
+                    return [ipaddress.IPv4Network(f"{ip.ip}/{ip.network_prefix}", strict=False)]
+    except OSError:
+        pass
+    return []
+
+
 def _resolve_interface_ip(interface: str | None) -> str | None:
     """multicast_interface may be an IPv4 address or an interface name
     (e.g. "bat0", "br-lan"); returns its IPv4 address, or None for the OS
@@ -201,7 +224,8 @@ class OutpostClient:
         )
         self.pex = (
             PexGossip(config.sender_id, config.mesh_key, self.transport,
-                      interval_s=config.pex_interval_s, fanout=config.pex_fanout)
+                      interval_s=config.pex_interval_s, fanout=config.pex_fanout,
+                      share_filter=lambda target, peer: not self.is_bridge or self._same_side(target, peer))
             if config.enable_pex
             else None
         )
@@ -251,6 +275,11 @@ class OutpostClient:
         # reach us by multicast, i.e. on this site - see _channel_delivery.
         self._mcast_heard: dict[int, tuple[tuple[str, int], float]] = {}
         self.multicast_min_listeners = config.multicast_min_listeners
+        # (channel_id, sender_id) -> when that member was last confirmed at
+        # its own address (not via a relay) - see the announce handling.
+        self._member_direct_seen: dict[tuple[int, int], float] = {}
+        # This node's own site, for bridging (see is_bridge).
+        self._site_networks = _site_networks(config)
         self._membership_ttl_s = max(config.channel_announce_interval_s * 2.5, 60.0)
         self._peer_ttl_s = max(config.pex_interval_s * 2.5, 90.0)
 
@@ -379,6 +408,22 @@ class OutpostClient:
     def listening_channel_ids(self) -> set[int]:
         return {self.active_channel.id} | self.monitored_channel_ids
 
+    @property
+    def is_bridge(self) -> bool:
+        """A relay that knows its own site: it forwards between its site and
+        other sites (split horizon) instead of to everyone."""
+        return self.enable_relay and bool(self._site_networks)
+
+    def _is_site_local(self, host: str) -> bool:
+        try:
+            ip = ipaddress.IPv4Address(host)
+        except ValueError:
+            return False
+        return any(ip in net for net in self._site_networks)
+
+    def _same_side(self, a: Peer, b: Peer) -> bool:
+        return self._is_site_local(a.host) == self._is_site_local(b.host)
+
     def _group(self, channel_id: int) -> str:
         """Multicast group for a channel; channel 0 is the shared group for
         channel announces."""
@@ -389,7 +434,12 @@ class OutpostClient:
         listened to - with batman-adv multicast optimizations, that keeps a
         channel's audio away from parts of the mesh nobody listens on."""
         if self.transport.multicast_enabled:
-            self.transport.set_groups({self._group(0)} | {self._group(c) for c in self.listening_channel_ids()})
+            channels = set(self.listening_channel_ids())
+            if self.is_bridge:
+                # A bridge carries site traffic for every channel it has seen
+                # announced, keys or not.
+                channels |= set(self._relay_routes)
+            self.transport.set_groups({self._group(0)} | {self._group(c) for c in channels})
 
     def _listening_changed(self, channel_ids) -> None:
         """Rejoin groups and tell members straight away (rather than at the
@@ -698,9 +748,12 @@ class OutpostClient:
         if self.transport.multicast_enabled:
             local = [sid for sid, _ in listeners if self._is_multicast_local(sid)]
             if len(local) >= self.multicast_min_listeners:
-                remote = [peer for sid, peer in listeners if not self._is_multicast_local(sid)]
-                return remote, self._group(channel_id)
-        return [peer for _, peer in listeners], None
+                on_site = self._multicast_local_addresses()
+                remote = [peer for sid, peer in listeners
+                          if not self._is_multicast_local(sid) and (peer.host, peer.port) not in on_site]
+                return _unique(remote), self._group(channel_id)
+        # Members behind the same bridge share its address: one copy each.
+        return _unique([peer for _, peer in listeners]), None
 
     def _channel_listeners(self, channel_id: int) -> list[tuple[int, Peer]] | None:
         members = self._channel_members.get(channel_id)
@@ -740,7 +793,10 @@ class OutpostClient:
         if header.ptype == TYPE_CHANNEL_ANNOUNCE and self.transport.is_known_address(*source):
             # Recorded before the dedup check below: the same announce
             # arriving via a second neighbour is a second route.
+            new_channel = header.channel_id not in self._relay_routes
             self._relay_routes.setdefault(header.channel_id, {})[source] = time.monotonic()
+            if new_channel and self.is_bridge:
+                self._update_groups()  # start carrying this channel's site multicast
 
         dedup_key = (header.sender_id, header.ptype)
         last_fwd = self._relay_seen.get(dedup_key)
@@ -756,12 +812,36 @@ class OutpostClient:
             targets = [p for p in self.transport.peers if (p.host, p.port) != source]
         else:
             targets = self._relay_targets(header.channel_id, source)
+        packet = encode_packet(header, ciphertext)
+        if self.is_bridge:
+            self._bridge_forward(header, packet, source, via_multicast, targets)
+            return
         if via_multicast:
             # Everyone on this site already got it from the same multicast.
             local = self._multicast_local_addresses()
             targets = [p for p in targets if (p.host, p.port) not in local]
         if targets:
-            self.transport.forward(encode_packet(header, ciphertext), targets)
+            self.transport.forward(packet, targets)
+
+    def _bridge_forward(self, header, packet: bytes, source, via_multicast: bool, targets: list[Peer]) -> None:
+        """Split horizon: traffic from this site goes out to other sites
+        only (this site already has it); traffic from elsewhere goes into
+        this site only (the other sites' bridges handle the rest), as one
+        multicast when enough of this site would want it. This keeps bridges
+        from bouncing packets between each other, and gives each site one
+        copy of each frame however many listeners it has."""
+        from_site = via_multicast or self._is_site_local(source[0])
+        if from_site:
+            out = [p for p in targets if not self._is_site_local(p.host)]
+            if out:
+                self.transport.forward(packet, out)
+            return
+        inward = [p for p in targets if self._is_site_local(p.host)]
+        if self.transport.multicast_enabled and len(inward) >= self.multicast_min_listeners:
+            group = self._group(0 if header.ptype == TYPE_CHANNEL_ANNOUNCE else header.channel_id)
+            self.transport.send_multicast(packet, group)
+        elif inward:
+            self.transport.forward(packet, inward)
 
     def _is_fresh(self, header, addr) -> bool:
         """Replay check (see replay.py) - False means drop the packet.
@@ -864,23 +944,30 @@ class OutpostClient:
                 log.debug("dropping unauthenticated channel announce from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
-            if via_multicast:
-                self._note_multicast(header, addr)
             # Older nodes send no flags byte - assume they're listening.
             listening = bool(payload[8] & 1) if len(payload) > 8 else True
             peer = Peer(host=addr[0], port=addr[1])
             members = self._channel_members.setdefault(header.channel_id, {})
+            now = time.monotonic()
             if self.transport.confirm_peer(header.sender_id, peer):
-                members[header.sender_id] = (peer, time.monotonic(), listening)
+                if via_multicast:
+                    self._note_multicast(header, addr)
+                members[header.sender_id] = (peer, now, listening)
+                self._member_direct_seen[(header.channel_id, header.sender_id)] = now
             else:
                 # Address rejected (e.g. relayed through another node's
                 # address, not this sender's own) - keep whatever address we
                 # already trusted for this sender, if any, just refresh
                 # liveness so a relayed-only member doesn't go stale/get
                 # dropped from _channel_target_peers.
+                # Relayed: reach this member through the relay it came from,
+                # unless we've recently heard from it directly.
+                direct = self._member_direct_seen.get((header.channel_id, header.sender_id), -1e9)
                 existing = members.get(header.sender_id)
-                if existing is not None:
-                    members[header.sender_id] = (existing[0], time.monotonic(), listening)
+                if existing is not None and now - direct < self._membership_ttl_s:
+                    members[header.sender_id] = (existing[0], now, listening)
+                else:
+                    members[header.sender_id] = (peer, now, listening)
             return
 
         if header.channel_id not in self.listening_channel_ids():
@@ -901,10 +988,9 @@ class OutpostClient:
                 log.debug("dropping unauthenticated start from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
-            if via_multicast:
-                self._note_multicast(header, addr)
             alias = alias_bytes.decode("utf-8", errors="replace") or None
-            self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+            if self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1])) and via_multicast:
+                self._note_multicast(header, addr)
             self._channel_last_audio[header.channel_id] = time.monotonic()
             self._channel_speaking.setdefault(header.channel_id, {})[header.sender_id] = (alias, time.monotonic())
             return
@@ -915,10 +1001,9 @@ class OutpostClient:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
-            if via_multicast:
-                self._note_multicast(header, addr)
             self.mixer.stop(header.channel_id, header.sender_id)
-            self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+            if self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1])) and via_multicast:
+                self._note_multicast(header, addr)
             self._channel_last_audio.pop(header.channel_id, None)
             self._channel_speaking.get(header.channel_id, {}).pop(header.sender_id, None)
             return
@@ -928,12 +1013,13 @@ class OutpostClient:
             log.debug("dropping packet with bad auth tag or padding from %s", addr)
             return
         self._replay.mark(header.sender_id, header.seq)
-        if via_multicast:
-            self._note_multicast(header, addr)
 
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.
-        self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
+        # A relayed copy (from a bridge's address) isn't confirmed, and so
+        # doesn't make the original sender look like it's on this site.
+        if self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1])) and via_multicast:
+            self._note_multicast(header, addr)
         self._channel_last_audio[header.channel_id] = time.monotonic()
         # Keep "who's speaking" fresh even if this sender's TYPE_START was
         # lost - preserve whatever alias we already know (if any) rather

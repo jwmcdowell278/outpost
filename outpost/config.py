@@ -198,6 +198,12 @@ class OutpostConfig:
     # is the interface (name, e.g. "bat0" or "br-lan", or its IPv4 address)
     # carrying the mesh - unset uses the OS default. Groups are
     # multicast_group_base + channel id (+0 for channel announces).
+    # Subnets that make up this node's own site, for a relay acting as a
+    # site bridge (see README "Bridging sites"). Unset: the subnet of
+    # multicast_interface when multicast is on, otherwise none - a relay
+    # with no site is a plain transit relay (e.g. a VPN hub).
+    site_subnets: list[str] = field(default_factory=list)
+
     enable_multicast: bool = False
     multicast_interface: str | None = None
     multicast_group_base: str = "239.192.77.0"
@@ -332,6 +338,15 @@ def _validate_audio_device(v):
     if v.isdigit():
         return int(v)
     return v or None
+
+
+def _validate_subnets(v) -> list[str]:
+    import ipaddress
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError("site_subnets must be a list like [10.0.0.0/24]")
+    return [str(ipaddress.IPv4Network(str(n), strict=False)) for n in v]
 
 
 def _validate_group_base(v):
@@ -678,6 +693,7 @@ def load_config(path: str) -> OutpostConfig:
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_channel_announce=raw.get("enable_channel_announce", False),
         channel_announce_voice=raw.get("channel_announce_voice"),
+        site_subnets=_validate_subnets(raw.get("site_subnets")),
         enable_multicast=raw.get("enable_multicast", False),
         multicast_interface=raw.get("multicast_interface"),
         multicast_group_base=_validate_group_base(raw.get("multicast_group_base", "239.192.77.0")),

@@ -76,8 +76,13 @@ def _pack_address(host: str) -> tuple[int, bytes]:
 class PexGossip:
     """Periodically gossips the known peer list and ingests others' gossip."""
 
-    def __init__(self, sender_id: int, mesh_key: bytes, transport, interval_s: float = 30.0, fanout: int = 8):
+    def __init__(self, sender_id: int, mesh_key: bytes, transport, interval_s: float = 30.0, fanout: int = 8,
+                 share_filter=None):
         self._sender_id = sender_id
+        # Optional (target, peer) -> bool: whether to tell `target` about
+        # `peer`. Bridges use it to keep site-local addresses on their site
+        # and VPN addresses among bridges (see OutpostClient._same_side).
+        self._share_filter = share_filter
         self._cipher = ChannelCipher(mesh_key)
         self._transport = transport
         self._interval_s = interval_s
@@ -130,8 +135,13 @@ class PexGossip:
     def _send_to(self, targets: list[Peer]) -> None:
         # Only gossip peers we've heard from ourselves - passing on
         # second-hand addresses is how dead peers used to circulate forever.
-        plaintext = pack_peers(self._transport.live_peers)
-        self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, plaintext, targets=targets)
+        live = self._transport.live_peers
+        if self._share_filter is None:
+            self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, pack_peers(live), targets=targets)
+            return
+        for target in targets:
+            shared = [p for p in live if self._share_filter(target, p)]
+            self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, pack_peers(shared), targets=[target])
 
     def handle_incoming(self, header, ciphertext: bytes, addr) -> None:
         try:

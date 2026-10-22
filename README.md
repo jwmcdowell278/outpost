@@ -661,13 +661,63 @@ present themselves to Linux as ordinary network interfaces:
   (or hub-and-spoke) link over consumer LTE, presenting as a `wg0` interface.
   Only the device(s) acting as the bridge need `enable_relay: true` and a
   WireGuard interface; plain field units don't need WireGuard at all.
-- A device bridging both (local mesh relay with an LTE uplink) simply has
-  both interfaces up with normal OS routing between them, `enable_relay:
-  true`, and a `peers:` entry for at least one already-reachable device on
-  each side. Outpost's single UDP socket (bound to `0.0.0.0`) already
-  receives from and sends out whichever interface the OS routing table
-  picks for a given peer's address - no per-interface Outpost
-  configuration is needed beyond the relay flag and bootstrap peers.
+- A device bridging both (local mesh relay with an LTE uplink) is a **site
+  bridge** - see the next section.
+
+### Bridging sites
+
+A *site* is one batman-adv mesh (or LAN). Each site has a **bridge**: a
+node on both the site and the VPN, with `enable_relay: true` and a known
+site:
+
+```yaml
+# on the bridge
+enable_relay: true
+enable_multicast: true
+multicast_interface: bat0          # its site subnet is taken from this interface...
+# site_subnets: [10.1.0.0/24]      # ...or list the site's subnets explicitly
+peers:
+  - host: 10.99.0.2                # any ONE other bridge or VPN hub
+    port: 5555
+```
+
+Site nodes only need their own bridge (or any site node) as a bootstrap
+peer, or mDNS. A bridge needs no channel keys - it forwards encrypted
+packets without being able to read them.
+
+How traffic flows when someone talks on a channel with listeners on several
+sites:
+
+1. The talker sends one multicast to its own site (or unicast, for small
+   channels), plus one copy to its bridge. Listeners on other sites are
+   recorded with their bridge as the next hop, and copies are de-duplicated
+   by address, so it's one copy per bridge rather than per remote listener.
+2. The talker's bridge sends one copy to each other site's bridge that has
+   listeners on that channel (learned from channel announces passing
+   through).
+3. Each receiving bridge delivers it into its own site - one multicast if
+   enough of the site listens (`multicast_min_listeners`), otherwise unicast
+   to each.
+
+Bridges follow **split horizon**: traffic from their own site only goes out
+to other sites, and traffic from another site only goes into their own
+site. So bridges never bounce a packet between each other, and with any
+number of sites each site gets exactly one copy of each frame. In a
+simulated three-site mesh (`tests/test_bridging.py`), one talker reached 14
+listeners across all three sites with 7 transmissions in total, and every
+listener heard each frame exactly once.
+
+**Discovery with any number of sites:** each bridge needs one reachable VPN
+peer - a hub, or any other bridge - and peer exchange finds the rest. A
+bridge only shares peers on the same side as the node it's talking to: site
+nodes learn about their own site, bridges about other bridges. So one
+site's local addresses never reach another site, even if sites reuse the
+same subnets.
+
+**Hub-and-spoke VPNs:** a relay with no site of its own (no
+`multicast_interface`/`site_subnets`, e.g. a VPN server) is a plain transit
+relay: it forwards each channel's traffic to every neighbour leading to its
+listeners, except back where it came from.
 
 ## Scaling to large meshes (hundreds to thousands of nodes)
 
