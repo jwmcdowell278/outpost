@@ -8,6 +8,9 @@ Examples:
 
 --channel is optional - omit it to join whichever channel is configured
 with id 1.
+
+Relay only (a server or desktop bridging networks - no audio, PTT or channels):
+    python scripts/run_client.py --config config/relay.yaml --relay-only
 """
 from __future__ import annotations
 import argparse
@@ -74,6 +77,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--product-id", type=lambda s: int(s, 0), default=None)
     parser.add_argument("--gpio-pin", type=int, default=None)
     parser.add_argument("--serial-port", default=None)
+    parser.add_argument("--relay-only", action="store_true", default=None,
+                        help="run as a relay/bridge only - no audio devices, PTT or channel keys needed "
+                             "(same as relay_only: true in the config)")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--log-file", default=None,
                         help="path to a size-rotated log file for diagnosing issues after the fact "
@@ -116,9 +122,11 @@ def configure_logging(verbose: bool, config: OutpostConfig, log_file_override: s
 
 async def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config = load_config(args.config, relay_only=args.relay_only)
     configure_logging(args.verbose, config, args.log_file)
-    if args.channel is not None:
+    if config.relay_only:
+        channel_name = None
+    elif args.channel is not None:
         channel_name = args.channel
     else:
         default_channel = config.channels.get(1)
@@ -127,23 +135,30 @@ async def main() -> None:
         channel_name = default_channel.name
 
     client = OutpostClient(config, channel_name, config_path=args.config)
-    try:
-        ptt = build_ptt(args, client.set_ptt)
-    except Exception as exc:
-        # e.g. pynput's keyboard backend probes for an X11 display at
-        # import time and fails outright on a headless box - don't take
-        # the whole client (and its web UI PTT button, which doesn't go
-        # through this PTTSource at all) down with it.
-        logging.warning("--ptt %s could not be built (%s); PTT only available via the web UI if enabled", args.ptt, exc)
+    if config.relay_only:
         ptt = NullPTT()
+    else:
+        try:
+            ptt = build_ptt(args, client.set_ptt)
+        except Exception as exc:
+            # e.g. pynput's keyboard backend probes for an X11 display at
+            # import time and fails outright on a headless box - don't take
+            # the whole client (and its web UI PTT button, which doesn't go
+            # through this PTTSource at all) down with it.
+            logging.warning("--ptt %s could not be built (%s); PTT only available via the web UI if enabled", args.ptt, exc)
+            ptt = NullPTT()
 
     await client.start()
     try:
         ptt.start()
     except Exception as exc:
         logging.warning("--ptt %s failed to start (%s); PTT only available via the web UI if enabled", args.ptt, exc)
-    print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
-          f"Hold the configured PTT to talk. Ctrl+C to quit.")
+    if config.relay_only:
+        print(f"Outpost relay running on UDP port {config.listen_port} (sender_id={config.sender_id}). "
+              f"Forwarding traffic between peers; no audio. Ctrl+C to quit.")
+    else:
+        print(f"Outpost client running on channel {channel_name!r} (sender_id={config.sender_id}). "
+              f"Hold the configured PTT to talk. Ctrl+C to quit.")
     if client.web_ui:
         for url in web_ui_urls(config.web_ui_host, config.web_ui_port):
             print(f"Web UI: {url}")

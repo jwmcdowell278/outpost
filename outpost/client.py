@@ -15,7 +15,16 @@ import numpy as np
 
 from .agc import AutomaticGainControl
 from .announce import ChannelAnnouncer
-from .audio import MicCapture, SpeakerPlayback, device_available, list_devices_fresh, restart_streams
+try:
+    from .audio import MicCapture, SpeakerPlayback, device_available, list_devices_fresh, restart_streams
+except OSError as _audio_import_error:
+    # PortAudio isn't installed - fine for a relay-only node (e.g. a
+    # server), which never opens audio devices. A normal client fails
+    # with this error when it constructs its audio streams.
+    MicCapture = SpeakerPlayback = None
+    _AUDIO_IMPORT_ERROR: OSError | None = _audio_import_error
+else:
+    _AUDIO_IMPORT_ERROR = None
 from .codec import OpusCodec, OpusDecoder
 from .mixer import Mixer
 from .crypto import ChannelCipher
@@ -153,7 +162,7 @@ class OutpostClient:
     def __init__(
         self,
         config: OutpostConfig,
-        active_channel_name: str,
+        active_channel_name: str | None,
         noise_suppressor: NoiseSuppressor | None = None,
         agc: AutomaticGainControl | None = None,
         highpass: HighPassFilter | None = None,
@@ -167,7 +176,17 @@ class OutpostClient:
         # config.save_config_fields). None in tests/embedding scenarios that
         # construct OutpostConfig directly rather than via load_config.
         self.config_path = config_path
-        self.active_channel = config.channel_by_name(active_channel_name)
+        # Relay-only: no audio, PTT or channels - just networking and relay
+        # forwarding (see OutpostConfig.relay_only).
+        self.relay_only = config.relay_only
+        if self.relay_only:
+            config = replace(config, enable_relay=True, channels={}, monitor_channels=[])
+            self.config = config
+            self.active_channel = None
+        else:
+            if active_channel_name is None:
+                raise ValueError("an active channel is required unless relay_only is set")
+            self.active_channel = config.channel_by_name(active_channel_name)
         self.noise_suppressor = noise_suppressor or PassthroughSuppressor()
         # Always construct the AGC object (cheap, pure DSP) and gate its use
         # with a separate mutable flag, rather than leaving self.agc None
@@ -209,7 +228,11 @@ class OutpostClient:
 
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
-        self.mic = MicCapture(self.codec.sample_rate, self.codec.frame_size, device=config.input_device)
+        if not self.relay_only and _AUDIO_IMPORT_ERROR is not None:
+            raise RuntimeError(f"audio support unavailable ({_AUDIO_IMPORT_ERROR}) - install PortAudio, "
+                               "or set relay_only: true to run as a relay without audio")
+        self.mic = (None if self.relay_only else
+                    MicCapture(self.codec.sample_rate, self.codec.frame_size, device=config.input_device))
         # Received audio goes through per-sender jitter buffers and is mixed
         # (see mixer.py); the speaker's callback pulls each frame from it.
         self.mixer = Mixer(
@@ -217,9 +240,10 @@ class OutpostClient:
             decoder_factory=lambda: OpusDecoder(self.codec.sample_rate, frame_ms=config.frame_ms),
         )
         self.mixer.duck_enabled = config.duck_monitored_channels
-        self.mixer.active_channel_id = self.active_channel.id
-        self.speaker = SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size,
-                                       device=config.output_device, source=self.mixer.next_frame)
+        self.mixer.active_channel_id = self.active_channel.id if self.active_channel else None
+        self.speaker = (None if self.relay_only else
+                        SpeakerPlayback(self.codec.sample_rate, self.codec.frame_size,
+                                        device=config.output_device, source=self.mixer.next_frame))
         # Channels listened to besides the active one (by id, so renames
         # don't break them) - see OutpostConfig.monitor_channels.
         self.monitored_channel_ids: set[int] = {
@@ -391,6 +415,8 @@ class OutpostClient:
         channel) was received recently enough to still count as an ongoing
         transmission. Best-effort only - see enable_tx_lockout."""
         if channel_id is None:
+            if self.active_channel is None:
+                return False
             channel_id = self.active_channel.id
         last_audio = self._channel_last_audio.get(channel_id)
         if last_audio is None:
@@ -419,6 +445,8 @@ class OutpostClient:
 
     def set_ptt(self, pressed: bool) -> None:
         """Call from a PTTSource callback (may run on any thread)."""
+        if self.active_channel is None:
+            return  # relay-only: nothing to transmit
         if pressed and self.enable_tx_lockout and self.channel_busy(self.active_channel.id):
             log.debug("PTT press ignored - channel busy (tx lockout)")
             self._play_lockout_tone()
@@ -461,7 +489,8 @@ class OutpostClient:
             self.channel_announcer.announce(f"Channel {name}")
 
     def listening_channel_ids(self) -> set[int]:
-        return {self.active_channel.id} | self.monitored_channel_ids
+        active = {self.active_channel.id} if self.active_channel else set()
+        return active | self.monitored_channel_ids
 
     @property
     def enable_relay(self) -> bool:
@@ -469,6 +498,8 @@ class OutpostClient:
 
     @enable_relay.setter
     def enable_relay(self, value: bool) -> None:
+        if self.relay_only and not value:
+            raise ValueError("relay can't be turned off on a relay-only node")
         # Relays join extra multicast groups (see _update_groups).
         self._enable_relay = value
         self._update_groups()
@@ -574,6 +605,8 @@ class OutpostClient:
         Channels page) - no restart needed, since `_channel_announce_loop`
         iterates `self.ciphers` fresh every cycle and `_on_packet`/
         `set_active_channel` look channels up via `self.config.channels`."""
+        if self.relay_only:
+            raise ValueError("a relay-only node holds no channel keys")
         channel = Channel(id=channel_id, name=name, key=key)
         self.config.channels[channel_id] = channel
         self.ciphers[channel_id] = ChannelCipher(key)
@@ -582,7 +615,7 @@ class OutpostClient:
     def rename_channel(self, channel_id: int, new_name: str) -> None:
         renamed = replace(self.config.channels[channel_id], name=new_name)
         self.config.channels[channel_id] = renamed
-        if self.active_channel.id == channel_id:
+        if self.active_channel is not None and self.active_channel.id == channel_id:
             self.active_channel = renamed
         # Monitored channels are tracked by id; refresh the saved names.
         self.config = replace(self.config, monitor_channels=self.monitored_channel_names())
@@ -618,6 +651,8 @@ class OutpostClient:
         announce) of a channel - defaults to the active channel. For
         display only (e.g. the web UI's status detail)."""
         if channel_id is None:
+            if self.active_channel is None:
+                return []
             channel_id = self.active_channel.id
         now = time.monotonic()
         return [
@@ -633,6 +668,8 @@ class OutpostClient:
         a received STOP, with a short staleness fallback (_SPEAKING_STALE_S)
         in case that STOP is lost."""
         if channel_id is None:
+            if self.active_channel is None:
+                return []
             channel_id = self.active_channel.id
         now = time.monotonic()
         return [
@@ -676,13 +713,15 @@ class OutpostClient:
             self.pex.start()
         if self.subnet_scan:
             self.subnet_scan.start()
-        self.mic.start()
-        self.speaker.start()
-        self._tx_task = asyncio.create_task(self._tx_loop())
+        if not self.relay_only:
+            self.mic.start()
+            self.speaker.start()
+            self._tx_task = asyncio.create_task(self._tx_loop())
         self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
         if self._site_networks:
             self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
-        self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+        if not self.relay_only:
+            self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
         if self.web_ui:
             await self.web_ui.start()
 
@@ -707,8 +746,10 @@ class OutpostClient:
             self.subnet_scan.stop()
         if self.discovery:
             self.discovery.stop()
-        self.mic.stop()
-        self.speaker.stop()
+        if self.mic:
+            self.mic.stop()
+        if self.speaker:
+            self.speaker.stop()
         self.transport.stop()
 
     # --- audio device recovery -------------------------------------------
@@ -817,8 +858,11 @@ class OutpostClient:
             self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, payload)
 
     def multicast_status(self) -> dict:
-        listeners = self._channel_listeners(self.active_channel.id) or []
-        _, group = self._channel_delivery(self.active_channel.id)
+        if self.active_channel is None:
+            listeners, group = [], None
+        else:
+            listeners = self._channel_listeners(self.active_channel.id) or []
+            _, group = self._channel_delivery(self.active_channel.id)
         return {
             "enabled": self.transport.multicast_enabled,
             "site_listeners": sum(1 for sid, _ in listeners if self._is_multicast_local(sid)),

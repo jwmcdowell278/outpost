@@ -35,7 +35,9 @@ flowchart LR
   optional opt-in **relay/bridge mode** (`enable_relay`) lets a node
   additionally flood-forward traffic between two peer groups that can't
   otherwise reach each other (e.g. a local mesh segment and a
-  WireGuard-connected uplink) - see "Relay / bridge mode" below.
+  WireGuard-connected uplink) - see "Relay / bridge mode" below. A server
+  or desktop can also run as a relay only, with no audio hardware - see
+  "Running a relay on a server".
 - **Multi-homed peers** (`outpost/transport.py`'s `add_peer_group`): a
   device reachable via more than one live path at once (e.g. both the local
   subnet/mesh radio *and* a VPN tunnel to the same peer) is tracked as ONE
@@ -807,6 +809,86 @@ multicast, a lone bridge sends its hello to the site's nodes only every
 
 The web UI status line shows each bridge's role: `active`, `standby`, or
 `active for k of n uplink peers`.
+
+### Running a relay on a server (e.g. your WireGuard server)
+
+A relay or bridge doesn't have to be a field radio. Any Linux server or
+desktop can run Outpost in **relay-only mode**: no microphone, speaker, PTT
+or channel keys, just networking and forwarding. A common setup is the
+machine that already runs your WireGuard server. Field nodes and laptops
+connect to it over WireGuard, and Outpost on the server relays voice between
+them.
+
+This also covers a gap in WireGuard itself. In a hub-and-spoke WireGuard
+setup, clients can usually reach the server but not each other, unless you
+turn on IP forwarding and widen `AllowedIPs`. With an Outpost relay on the
+hub, each client only needs to reach the server.
+
+Turn it on with `relay_only: true` in the config, or `--relay-only` on the
+command line. It implies `enable_relay: true`, and any `channels:` in the file
+are ignored, so the relay never holds channel keys. It still needs the
+mesh's `mesh_key`, for peer exchange.
+
+Install (no audio libraries needed, only `libopus`):
+
+```bash
+sudo apt install python3-venv libopus0
+# If pip has to build a dependency from source (no wheel for your platform),
+# also: sudo apt install build-essential python3-dev
+git clone <this repo> /opt/outpost && cd /opt/outpost
+python3 -m venv .venv && .venv/bin/pip install -e .
+cp config/relay.example.yaml config/relay.yaml   # then set mesh_key
+.venv/bin/python scripts/run_client.py --config config/relay.yaml
+```
+
+[config/relay.example.yaml](config/relay.example.yaml) covers the settings.
+Then:
+
+- **Other nodes**: add the server's WireGuard address (e.g. `10.99.0.1`) as
+  a `peers:` entry. Peer exchange takes care of the rest.
+- **Firewall**: allow UDP `listen_port` (default 5555) in on the WireGuard
+  interface, e.g. `ufw allow in on wg0 to any port 5555 proto udp`.
+- **Server also on a LAN or mesh with Outpost nodes**: set `site_subnets` to
+  that LAN so the server acts as its site bridge (see "Bridging sites"), and
+  set `enable_mdns: true` if the LAN carries multicast.
+
+To run it as a service, use `/etc/systemd/system/outpost-relay.service`:
+
+```ini
+[Unit]
+Description=Outpost relay
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/outpost
+ExecStart=/opt/outpost/.venv/bin/python scripts/run_client.py --config config/relay.yaml
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=outpost
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The relay writes small `relay.yaml.identity` and `relay.yaml.seq` files next
+to its config, so the service user must be able to write to that directory.
+Either drop `DynamicUser=yes` and run as a user that owns `/opt/outpost/config`,
+or put the config in `/var/lib/outpost` (the `StateDirectory`) and point
+`--config` there. Then `sudo systemctl enable --now outpost-relay`.
+
+With Docker, there are no devices to pass through:
+
+```bash
+docker run -d --restart unless-stopped --network host \
+  -v "$(pwd)/config:/config" outpost --config /config/relay.yaml --relay-only
+```
+
+The config volume is mounted read-write here so the identity and sequence
+files can be saved.
+
+The web UI (if enabled) shows `relay only` in its status line, along with
+peers and the bridge role.
 
 ## Scaling to large meshes (hundreds to thousands of nodes)
 

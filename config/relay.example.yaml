@@ -1,0 +1,39 @@
+# Relay-only node: forwards Outpost traffic between networks, with no
+# microphone, speaker, PTT or channel keys. For a server or desktop that sits
+# on more than one network, e.g. a Linux box that is also the WireGuard
+# server. See README "Running a relay on a server".
+#
+# Copy to config/relay.yaml and run:
+#   python scripts/run_client.py --config config/relay.yaml
+relay_only: true
+
+# Same mesh_key as every other node (used for peer exchange and bridge
+# hellos, never for audio). Channel keys are not needed: the relay forwards
+# encrypted audio without being able to read it.
+mesh_key: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+
+listen_port: 5555
+
+# At least one reachable node on each network the relay joins. Field nodes
+# that dial in over WireGuard find the relay on their own once they list it
+# as their peer, so only seed what the relay can't learn by itself (e.g.
+# another relay or HQ).
+peers: []
+#  - host: 10.99.0.2
+#    port: 5555
+
+# A server with only a WireGuard interface has no LAN to search, so mDNS
+# finds nothing. Turn it on if the relay also has a LAN with Outpost nodes.
+enable_mdns: false
+
+# If the relay is also on a local site (a LAN or batman-adv mesh) and should
+# act as that site's bridge, list the site's subnet(s). See README
+# "Bridging sites".
+# site_subnets: [192.168.1.0/24]
+
+# Optional: status page showing peers and bridge role. Set a token before
+# binding to anything other than localhost.
+# enable_web_ui: true
+# web_ui_host: 127.0.0.1
+# web_ui_port: 8765
+# web_ui_token: "change-me"

@@ -143,6 +143,15 @@ class OutpostConfig:
     # mode" section. Off by default - most nodes are plain clients.
     enable_relay: bool = False
 
+    # Relay-only (headless) mode: run purely as a relay/bridge - no mic,
+    # speaker, PTT or channels. For a server or desktop that just sits on
+    # two networks (e.g. a Linux box that is also the WireGuard server) and
+    # forwards traffic between them. Implies enable_relay. Channel keys
+    # aren't needed (relays forward without decrypting) and are ignored if
+    # present, so the relay never holds them. See README "Running a relay
+    # on a server".
+    relay_only: bool = False
+
     # Soft half-duplex lockout: while enabled, a new local PTT press is
     # ignored if audio from another peer on the active channel was received
     # within the last tx_lockout_timeout_ms (cleared immediately once that
@@ -565,7 +574,9 @@ def validate_config_yaml(text: str) -> None:
         raise ValueError(f"mesh_key must decode to {KEY_SIZE} bytes")
 
     channels = raw.get("channels")
-    if not isinstance(channels, list) or not channels:
+    if raw.get("relay_only") is True and channels in (None, []):
+        channels = []
+    elif not isinstance(channels, list) or not channels:
         raise ValueError("missing or empty required field 'channels' (list)")
     for entry in channels:
         if not isinstance(entry, dict) or not {"id", "name", "key"} <= entry.keys():
@@ -658,12 +669,29 @@ def _resolve_sender_id(config_path: str, raw: dict) -> int:
     return sender_id
 
 
-def load_config(path: str) -> OutpostConfig:
+def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
+    """`relay_only`, if given, overrides the file's relay_only setting
+    (run_client.py's --relay-only flag)."""
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
+    if relay_only is not None:
+        raw["relay_only"] = relay_only
 
+    try:
+        relay_only = _validate_bool(raw.get("relay_only", False))
+    except ValueError:
+        raise ValueError("relay_only must be true or false")
     channels: dict[int, Channel] = {}
-    for entry in raw["channels"]:
+    raw_channels = raw.get("channels") or []
+    if relay_only:
+        if raw_channels:
+            log.info("relay_only: ignoring the %d configured channel(s) - a relay forwards without keys",
+                     len(raw_channels))
+        raw_channels = []
+    elif not raw_channels:
+        raise ValueError("missing or empty required field 'channels' (list) - "
+                         "set relay_only: true to run as a relay with no channels")
+    for entry in raw_channels:
         key = base64.b64decode(entry["key"])
         if len(key) != KEY_SIZE:
             raise ValueError(f"channel {entry['name']!r} key must decode to {KEY_SIZE} bytes")
@@ -703,7 +731,8 @@ def load_config(path: str) -> OutpostConfig:
         enable_squelch=raw.get("enable_squelch", False),
         squelch_threshold_rms=raw.get("squelch_threshold_rms", 300.0),
         squelch_hold_ms=raw.get("squelch_hold_ms", 300.0),
-        enable_relay=raw.get("enable_relay", False),
+        enable_relay=relay_only or raw.get("enable_relay", False),
+        relay_only=relay_only,
         enable_tx_lockout=raw.get("enable_tx_lockout", False),
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_echo_guard=raw.get("enable_echo_guard", False),

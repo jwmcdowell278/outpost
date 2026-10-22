@@ -197,7 +197,7 @@ async function refresh() {{
   try {{
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
-      `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}${{s.bridge_role ? ' (' + s.bridge_role + ' bridge)' : ''}}` +
+      `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_only ? 'only' : (s.relay_enabled ? 'on' : 'off')}}${{s.bridge_role ? ' (' + s.bridge_role + ' bridge)' : ''}}` +
       (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '') +
       (s.multicast.enabled ? ` · multicast: ${{s.multicast.site_listeners}} on this site` +
         (s.multicast.active_channel_uses_multicast ? ' (in use)' : ' (unicast - below threshold)') : '');
@@ -815,7 +815,8 @@ class WebUI:
         return web.json_response({
             "sender_id": c.config.sender_id,
             "sender_alias": c.sender_alias,
-            "active_channel": c.active_channel.name,
+            "active_channel": c.active_channel.name if c.active_channel else None,
+            "relay_only": c.relay_only,
             "channels": [ch.name for ch in c.config.channels.values()],
             "ptt_active": c._ptt_active,
             "agc_enabled": c.agc_enabled,
@@ -857,7 +858,7 @@ class WebUI:
             self.client.set_active_channel(name)
         except KeyError:
             raise web.HTTPNotFound(text=f"no channel named {name!r}")
-        return web.json_response({"active_channel": self.client.active_channel.name})
+        return web.json_response({"active_channel": self.client.active_channel.name if self.client.active_channel else None})
 
     async def _handle_set_monitor(self, request) -> web.Response:
         """{"name": channel, "listen": bool?, "volume": 0.0-1.0?} - listen to
@@ -907,6 +908,8 @@ class WebUI:
         return web.json_response({"channels": channels, "can_save": self.client.config_path is not None})
 
     async def _handle_create_channel(self, request) -> web.Response:
+        if self.client.relay_only:
+            raise web.HTTPBadRequest(text="a relay-only node holds no channel keys")
         if self.client.config_path is None:
             raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
         data = await request.json()
@@ -1037,6 +1040,8 @@ class WebUI:
                 validated[name] = validator(raw_value)
             except (TypeError, ValueError) as exc:
                 raise web.HTTPBadRequest(text=f"{name}: {exc}")
+        if self.client.relay_only and validated.get("enable_relay") is False:
+            raise web.HTTPBadRequest(text="enable_relay: always on for a relay-only node")
 
         save_config_fields(self.client.config_path, validated)
         # OutpostConfig is frozen, and the fields below are kept live via

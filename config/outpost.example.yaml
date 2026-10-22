@@ -228,6 +228,10 @@ enable_web_ui: false
 # WireGuard-connected HQ/uplink segment) - see README's "Relay / bridge
 # mode" section. Off by default; most nodes are plain clients.
 enable_relay: false
+# A machine that should ONLY relay (a server, e.g. your WireGuard server, with
+# no mic/speaker/PTT) can set relay_only: true instead - no channels needed.
+# See config/relay.example.yaml and README "Running a relay on a server".
+# relay_only: false
 
 # Only needed to seed PEX on a link mDNS can't reach (VPN/mesh radio) - a
 # single reachable peer is enough for the rest to be learned via gossip.
