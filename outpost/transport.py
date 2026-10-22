@@ -2,8 +2,10 @@
 dispatches incoming packets to a callback. Peer-to-peer - no central server."""
 from __future__ import annotations
 import asyncio
+import ipaddress
 import logging
 import os
+import socket
 import threading
 import time
 
@@ -119,7 +121,8 @@ class MeshTransport:
     """
 
     def __init__(self, sender_id: int, peers: list[Peer], on_packet, max_packet_bytes: int = DEFAULT_MAX_PACKET_BYTES,
-                 max_peers: int = DEFAULT_MAX_PEERS, seq_persist_path: str | None = None):
+                 max_peers: int = DEFAULT_MAX_PEERS, seq_persist_path: str | None = None,
+                 on_multicast_packet=None):
         self.sender_id = sender_id
         self.max_packet_bytes = max_packet_bytes
         self.max_peers = max_peers
@@ -171,6 +174,15 @@ class MeshTransport:
         # See _MAX_CONTROL_HOLD_S.
         self._hold_since: float | None = None
         self._deferred: list[tuple] = []
+        # Multicast (see start_multicast): packets received on the group
+        # socket go to on_multicast_packet, so the client knows they arrived
+        # by multicast.
+        self._on_multicast_packet = on_multicast_packet or on_packet
+        self._mcast_transport = None
+        self._mcast_sock: socket.socket | None = None
+        self._mcast_port: int | None = None
+        self._mcast_iface_ip: str | None = None
+        self._mcast_groups: set[str] = set()
 
     def _load_seq_start(self, seq_persist_path: str | None) -> int:
         if seq_persist_path is None:
@@ -413,6 +425,69 @@ class MeshTransport:
         # ("any free port"), and _is_own_address needs the real one.
         self.listen_port = self._transport.get_extra_info("sockname")[1]
 
+    async def start_multicast(self, port: int, interface_ip: str | None = None) -> None:
+        """Open a socket for receiving multicast on `port`, and set up the
+        main socket to send multicast out of `interface_ip` (None = the OS
+        default for multicast). Outgoing multicast goes from the main socket
+        so its source address is our normal unicast address - receivers
+        reply and confirm us exactly as for unicast. Groups are joined with
+        join_group()."""
+        iface = interface_ip or "0.0.0.0"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            # Lets several nodes on one machine share the group port.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(("", port))
+        sock.setblocking(False)
+        loop = asyncio.get_running_loop()
+        self._mcast_transport, _ = await loop.create_datagram_endpoint(
+            lambda: _MeshProtocol(self._on_multicast_packet), sock=sock,
+        )
+        self._mcast_sock = sock
+        self._mcast_port = port
+        self._mcast_iface_ip = interface_ip
+
+        main = self._transport.get_extra_info("socket")
+        main.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(iface))
+        # One IP hop: a batman-adv mesh is a single layer-2 segment, so
+        # every node on it is one hop away however many radio hops it is.
+        main.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+        # On, so several nodes on one machine hear each other; a node
+        # ignores its own packets by sender_id anyway.
+        main.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+
+    @property
+    def multicast_enabled(self) -> bool:
+        return self._mcast_transport is not None
+
+    def join_group(self, group: str) -> None:
+        if self._mcast_sock is None or group in self._mcast_groups:
+            return
+        mreq = socket.inet_aton(group) + socket.inet_aton(self._mcast_iface_ip or "0.0.0.0")
+        try:
+            self._mcast_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+            self._mcast_groups.add(group)
+        except OSError as exc:
+            log.warning("could not join multicast group %s: %s", group, exc)
+
+    def leave_group(self, group: str) -> None:
+        if self._mcast_sock is None or group not in self._mcast_groups:
+            return
+        mreq = socket.inet_aton(group) + socket.inet_aton(self._mcast_iface_ip or "0.0.0.0")
+        try:
+            self._mcast_sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
+        except OSError as exc:
+            log.debug("could not leave multicast group %s: %s", group, exc)
+        self._mcast_groups.discard(group)
+
+    def set_groups(self, groups: set[str]) -> None:
+        """Join/leave so exactly `groups` are joined."""
+        for group in self._mcast_groups - groups:
+            self.leave_group(group)
+        for group in groups - self._mcast_groups:
+            self.join_group(group)
+
     def _is_own_address(self, host: str, port: int) -> bool:
         """True if host:port is this node's own listening endpoint.
 
@@ -433,6 +508,11 @@ class MeshTransport:
         return host in self._own_hosts
 
     def stop(self) -> None:
+        if self._mcast_transport:
+            self._mcast_transport.close()
+            self._mcast_transport = None
+            self._mcast_sock = None
+            self._mcast_groups.clear()
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -470,7 +550,7 @@ class MeshTransport:
                 pass  # transport stopped meanwhile
 
     def send_encrypted(self, cipher, channel_id: int, ptype: int, plaintext: bytes,
-                       targets: list[Peer] | None = None) -> None:
+                       targets: list[Peer] | None = None, multicast_group: str | None = None) -> None:
         """Encrypts `plaintext` with `cipher` bound to this packet's exact
         header (so the header can't be altered in transit - see crypto.py)
         and sends it. Use this rather than encrypting and calling send()
@@ -483,19 +563,34 @@ class MeshTransport:
             if time.monotonic() - self._hold_since < _MAX_CONTROL_HOLD_S:
                 if len(self._deferred) >= _MAX_DEFERRED_CONTROL:
                     self._deferred.pop(0)
-                self._deferred.append((cipher, channel_id, ptype, plaintext, targets))
+                self._deferred.append((cipher, channel_id, ptype, plaintext, targets, multicast_group))
                 return
             # Very long transmission: let the backlog out (one gap in the
             # audio seq, concealed by receivers) and start a new hold window.
             self._hold_since = time.monotonic()
             self._flush_deferred()
-        self._send_encrypted_now(cipher, channel_id, ptype, plaintext, targets)
+        self._send_encrypted_now(cipher, channel_id, ptype, plaintext, targets, multicast_group)
 
     def _send_encrypted_now(self, cipher, channel_id: int, ptype: int, plaintext: bytes,
-                            targets: list[Peer] | None = None) -> None:
+                            targets: list[Peer] | None = None, multicast_group: str | None = None) -> None:
         seq = self.next_seq()
         header = Header(VERSION, ptype, channel_id, self.sender_id, seq)
-        self.send(channel_id, seq, cipher.encrypt(header, plaintext), ptype=ptype, targets=targets)
+        ciphertext = cipher.encrypt(header, plaintext)
+        if multicast_group is not None:
+            self.send_multicast(encode_packet(header, ciphertext), multicast_group)
+        if targets is None or targets:
+            self.send(channel_id, seq, ciphertext, ptype=ptype, targets=targets)
+
+    def send_multicast(self, packet: bytes, group: str) -> None:
+        """One copy to everyone on this site listening to `group`."""
+        if self._transport is None:
+            raise RuntimeError("transport not started")
+        if self._mcast_port is None:
+            return
+        try:
+            self._transport.sendto(packet, (group, self._mcast_port))
+        except OSError as exc:
+            log.debug("multicast send to %s failed: %s", group, exc)
 
     def send(self, channel_id: int, seq: int, ciphertext: bytes, ptype: int = TYPE_AUDIO,
               targets: list[Peer] | None = None) -> None:

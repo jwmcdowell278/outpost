@@ -2,6 +2,7 @@
 the mesh transport for a configured set of channels."""
 from __future__ import annotations
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -70,6 +71,25 @@ def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duratio
         pcm = np.concatenate([pcm, np.zeros(pad, dtype=np.int16)])
 
     return [pcm[i:i + frame_size].tobytes() for i in range(0, len(pcm), frame_size)]
+
+
+def _resolve_interface_ip(interface: str | None) -> str | None:
+    """multicast_interface may be an IPv4 address or an interface name
+    (e.g. "bat0", "br-lan"); returns its IPv4 address, or None for the OS
+    default."""
+    if not interface:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(interface))
+    except ValueError:
+        pass
+    import ifaddr
+    for adapter in ifaddr.get_adapters():
+        if adapter.nice_name == interface or adapter.name == interface:
+            for ip in adapter.ips:
+                if ip.is_IPv4:
+                    return ip.ip
+    raise OSError(f"multicast_interface {interface!r} not found or has no IPv4 address")
 
 
 class OutpostClient:
@@ -164,6 +184,7 @@ class OutpostClient:
             # details. None (no persistence) in tests/embedding scenarios
             # that construct OutpostConfig directly without config_path.
             seq_persist_path=(config_path + ".seq") if config_path else None,
+            on_multicast_packet=lambda h, c, a: self._on_packet(h, c, a, via_multicast=True),
         )
 
         # mDNS only helps on a plain multicast-reachable LAN; PEX gossip is
@@ -222,7 +243,14 @@ class OutpostClient:
         # channel_id -> {sender_id: (Peer, last_seen_monotonic)} - built from
         # authenticated channel-announce beacons, so AUDIO/STOP sends can
         # target only known members instead of every peer in the mesh.
-        self._channel_members: dict[int, dict[int, tuple[Peer, float]]] = {}
+        # channel_id -> {sender_id: (Peer, last_seen, listening)} - listening
+        # is whether that member is actually playing the channel (from its
+        # announce), not just holding the key; only listeners get audio.
+        self._channel_members: dict[int, dict[int, tuple[Peer, float, bool]]] = {}
+        # sender_id -> ((host, port), last_seen) for senders whose packets
+        # reach us by multicast, i.e. on this site - see _channel_delivery.
+        self._mcast_heard: dict[int, tuple[tuple[str, int], float]] = {}
+        self.multicast_min_listeners = config.multicast_min_listeners
         self._membership_ttl_s = max(config.channel_announce_interval_s * 2.5, 60.0)
         self._peer_ttl_s = max(config.pex_interval_s * 2.5, 90.0)
 
@@ -313,7 +341,7 @@ class OutpostClient:
             return
         self._ptt_active = pressed
         cipher = self.ciphers[self.active_channel.id]
-        targets = self._channel_target_peers(self.active_channel.id)
+        targets, group = self._channel_delivery(self.active_channel.id)
         if pressed:
             # Keep our AUDIO seqs contiguous for receivers' jitter buffers.
             self.transport.hold_control(True)
@@ -323,9 +351,11 @@ class OutpostClient:
                 # users learn who's speaking without paying per-frame
                 # overhead for it - see protocol.TYPE_START.
                 alias_bytes = self.sender_alias.encode("utf-8") if self.sender_alias else b""
-                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_START, alias_bytes, targets=targets)
+                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_START, alias_bytes,
+                                              targets=targets, multicast_group=group)
             else:
-                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_STOP, b"", targets=targets)
+                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_STOP, b"",
+                                              targets=targets, multicast_group=group)
         except RuntimeError:
             # Transport not started yet (e.g. PTT pressed during startup) -
             # local PTT state still toggles above; the peer just won't get a
@@ -341,11 +371,36 @@ class OutpostClient:
         self.mixer.active_channel_id = self.active_channel.id
         if previous.id != self.active_channel.id and previous.id not in self.monitored_channel_ids:
             self.mixer.remove_channel(previous.id)
+        if previous.id != self.active_channel.id:
+            self._listening_changed({previous.id, self.active_channel.id})
         if self.channel_announcer is not None:
             self.channel_announcer.announce(f"Channel {name}")
 
     def listening_channel_ids(self) -> set[int]:
         return {self.active_channel.id} | self.monitored_channel_ids
+
+    def _group(self, channel_id: int) -> str:
+        """Multicast group for a channel; channel 0 is the shared group for
+        channel announces."""
+        return str(ipaddress.IPv4Address(self.config.multicast_group_base) + channel_id)
+
+    def _update_groups(self) -> None:
+        """Join the announce group plus the group of every channel being
+        listened to - with batman-adv multicast optimizations, that keeps a
+        channel's audio away from parts of the mesh nobody listens on."""
+        if self.transport.multicast_enabled:
+            self.transport.set_groups({self._group(0)} | {self._group(c) for c in self.listening_channel_ids()})
+
+    def _listening_changed(self, channel_ids) -> None:
+        """Rejoin groups and tell members straight away (rather than at the
+        next periodic announce) that we've started/stopped listening, so
+        audio starts reaching us - or stops being sent to us - promptly."""
+        self._update_groups()
+        for channel_id in channel_ids:
+            try:
+                self._send_announce(channel_id)
+            except RuntimeError:
+                pass  # transport not started yet
 
     def set_monitor(self, name: str, listen: bool) -> None:
         """Start/stop listening to a channel besides the active one. Raises
@@ -358,6 +413,7 @@ class OutpostClient:
             if channel_id != self.active_channel.id:
                 self.mixer.remove_channel(channel_id)
         self.config = replace(self.config, monitor_channels=self.monitored_channel_names())
+        self._listening_changed({channel_id})
 
     def set_channel_volume(self, name: str, volume: float) -> None:
         channel_id = self.config.channel_by_name(name).id
@@ -430,8 +486,9 @@ class OutpostClient:
             channel_id = self.active_channel.id
         now = time.monotonic()
         return [
-            {"sender_id": sender_id, "host": peer.host, "port": peer.port, "age_s": round(now - last_seen, 1)}
-            for sender_id, (peer, last_seen) in self._channel_members.get(channel_id, {}).items()
+            {"sender_id": sender_id, "host": peer.host, "port": peer.port, "age_s": round(now - last_seen, 1),
+             "listening": listening, "multicast": self._is_multicast_local(sender_id)}
+            for sender_id, (peer, last_seen, listening) in self._channel_members.get(channel_id, {}).items()
         ]
 
     def speaking_details(self, channel_id: int | None = None) -> list[dict]:
@@ -453,6 +510,13 @@ class OutpostClient:
 
     async def start(self) -> None:
         await self.transport.start(self.config.listen_port)
+        if self.config.enable_multicast:
+            try:
+                await self.transport.start_multicast(
+                    self.config.multicast_port, _resolve_interface_ip(self.config.multicast_interface))
+                self._update_groups()
+            except OSError as exc:
+                log.warning("multicast unavailable (%s) - using unicast only", exc)
         if self.discovery:
             try:
                 # PeerDiscovery.start() blocks on zeroconf's own internal
@@ -569,8 +633,9 @@ class OutpostClient:
             opus_bytes = self.codec.encode(frame, max_bytes=self.audio_pad - 1 if self.audio_pad else None)
             payload = pad_audio(opus_bytes, self.audio_pad)
             cipher = self.ciphers[self.active_channel.id]
-            targets = self._channel_target_peers(self.active_channel.id)
-            self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_AUDIO, payload, targets=targets)
+            targets, group = self._channel_delivery(self.active_channel.id)
+            self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_AUDIO, payload,
+                                          targets=targets, multicast_group=group)
 
     async def _channel_announce_loop(self) -> None:
         """Periodically floods a tiny empty-payload beacon per held channel so
@@ -580,26 +645,87 @@ class OutpostClient:
         await asyncio.sleep(random.uniform(0, min(2.0, self.config.channel_announce_interval_s)))
         while True:
             self.transport.prune_stale(self._peer_ttl_s)
-            for channel_id, cipher in self.ciphers.items():
-                self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, self._instance_token)
+            for channel_id in list(self.ciphers):
+                self._send_announce(channel_id)
             await asyncio.sleep(self.config.channel_announce_interval_s * random.uniform(0.8, 1.2))
 
-    def _channel_target_peers(self, channel_id: int) -> list[Peer] | None:
-        """Known, not-yet-stale members of a channel, or None to fall back to
-        flooding every known peer (bootstrap case - before any announce has
-        propagated, or if a channel currently has no confirmed members)."""
+    def _send_announce(self, channel_id: int) -> None:
+        """Payload: our per-run token (clash detection) + a flags byte, bit 0
+        = we're listening to this channel. With multicast on, one copy goes
+        to the announce group for everyone on this site, and unicast only
+        to peers not heard via multicast."""
+        cipher = self.ciphers.get(channel_id)
+        if cipher is None:
+            return
+        listening = channel_id in self.listening_channel_ids()
+        payload = self._instance_token + bytes([1 if listening else 0])
+        if self.transport.multicast_enabled:
+            local = self._multicast_local_addresses()
+            targets = [p for p in self.transport.peers if (p.host, p.port) not in local]
+            self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, payload,
+                                          targets=targets, multicast_group=self._group(0))
+        else:
+            self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, payload)
+
+    def multicast_status(self) -> dict:
+        listeners = self._channel_listeners(self.active_channel.id) or []
+        _, group = self._channel_delivery(self.active_channel.id)
+        return {
+            "enabled": self.transport.multicast_enabled,
+            "site_listeners": sum(1 for sid, _ in listeners if self._is_multicast_local(sid)),
+            "off_site_listeners": sum(1 for sid, _ in listeners if not self._is_multicast_local(sid)),
+            "active_channel_uses_multicast": group is not None,
+            "min_listeners": self.multicast_min_listeners,
+        }
+
+    def _is_multicast_local(self, sender_id: int) -> bool:
+        entry = self._mcast_heard.get(sender_id)
+        return entry is not None and time.monotonic() - entry[1] < self._membership_ttl_s
+
+    def _multicast_local_addresses(self) -> set[tuple[str, int]]:
+        cutoff = time.monotonic() - self._membership_ttl_s
+        return {addr for addr, seen in self._mcast_heard.values() if seen >= cutoff}
+
+    def _channel_delivery(self, channel_id: int) -> tuple[list[Peer] | None, str | None]:
+        """(unicast targets, multicast group or None) for sending on a
+        channel. With enough listeners on this site (heard via multicast),
+        one multicast reaches them all and only off-site listeners get
+        unicast; otherwise every listener gets unicast. None targets = no
+        members known yet, flood every peer (bootstrap)."""
+        listeners = self._channel_listeners(channel_id)
+        if listeners is None:
+            return None, None
+        if self.transport.multicast_enabled:
+            local = [sid for sid, _ in listeners if self._is_multicast_local(sid)]
+            if len(local) >= self.multicast_min_listeners:
+                remote = [peer for sid, peer in listeners if not self._is_multicast_local(sid)]
+                return remote, self._group(channel_id)
+        return [peer for _, peer in listeners], None
+
+    def _channel_listeners(self, channel_id: int) -> list[tuple[int, Peer]] | None:
         members = self._channel_members.get(channel_id)
         if not members:
             return None
         cutoff = time.monotonic() - self._membership_ttl_s
-        fresh = [peer for peer, last_seen in members.values() if last_seen >= cutoff]
-        return fresh or None
+        fresh = [(sid, peer, listening) for sid, (peer, seen, listening) in members.items() if seen >= cutoff]
+        if not fresh:
+            return None
+        return [(sid, peer) for sid, peer, listening in fresh if listening]
+
+    def _channel_target_peers(self, channel_id: int) -> list[Peer] | None:
+        """Listening members of a channel, or None to fall back to flooding
+        every known peer (bootstrap case - before any announce has
+        propagated, or if a channel currently has no confirmed members)."""
+        listeners = self._channel_listeners(channel_id)
+        if listeners is None:
+            return None
+        return [peer for _, peer in listeners] or None
 
     # --- receive path -----------------------------------------------------
 
     _RELAY_SEEN_MAX = 4096
 
-    def _relay_packet(self, header, ciphertext: bytes, addr) -> None:
+    def _relay_packet(self, header, ciphertext: bytes, addr, via_multicast: bool = False) -> None:
         """Blind flood-forward for AUDIO/STOP/CHANNEL_ANNOUNCE packets to
         every other known peer, keyed only on the cleartext header - no
         channel key needed, so a relay node can bridge two otherwise-
@@ -630,6 +756,10 @@ class OutpostClient:
             targets = [p for p in self.transport.peers if (p.host, p.port) != source]
         else:
             targets = self._relay_targets(header.channel_id, source)
+        if via_multicast:
+            # Everyone on this site already got it from the same multicast.
+            local = self._multicast_local_addresses()
+            targets = [p for p in targets if (p.host, p.port) not in local]
         if targets:
             self.transport.forward(encode_packet(header, ciphertext), targets)
 
@@ -667,7 +797,7 @@ class OutpostClient:
             token = cipher.decrypt(header, ciphertext)
         except ValueError:
             return
-        if token == self._instance_token:
+        if token[:8] == self._instance_token:
             return
         now = time.monotonic()
         if now - self._clash_warned_at < 60.0:
@@ -701,7 +831,10 @@ class OutpostClient:
             return targets  # may be empty: the only route leads back to the sender
         return [p for a, p in known.items() if a != source]
 
-    def _on_packet(self, header, ciphertext: bytes, addr) -> None:
+    def _note_multicast(self, header, addr) -> None:
+        self._mcast_heard[header.sender_id] = ((addr[0], addr[1]), time.monotonic())
+
+    def _on_packet(self, header, ciphertext: bytes, addr, via_multicast: bool = False) -> None:
         if header.sender_id == self.config.sender_id:
             self._check_sender_id_clash(header, ciphertext, addr)
             # Our own traffic looped back to us - e.g. a multi-hop relay mesh
@@ -712,7 +845,7 @@ class OutpostClient:
             return
 
         if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_START, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
-            self._relay_packet(header, ciphertext, addr)
+            self._relay_packet(header, ciphertext, addr, via_multicast)
 
         if header.ptype == TYPE_PEX:
             if self.pex:
@@ -726,15 +859,19 @@ class OutpostClient:
             if not self._is_fresh(header, addr):
                 return
             try:
-                cipher.decrypt(header, ciphertext)
+                payload = cipher.decrypt(header, ciphertext)
             except ValueError:
                 log.debug("dropping unauthenticated channel announce from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
+            if via_multicast:
+                self._note_multicast(header, addr)
+            # Older nodes send no flags byte - assume they're listening.
+            listening = bool(payload[8] & 1) if len(payload) > 8 else True
             peer = Peer(host=addr[0], port=addr[1])
             members = self._channel_members.setdefault(header.channel_id, {})
             if self.transport.confirm_peer(header.sender_id, peer):
-                members[header.sender_id] = (peer, time.monotonic())
+                members[header.sender_id] = (peer, time.monotonic(), listening)
             else:
                 # Address rejected (e.g. relayed through another node's
                 # address, not this sender's own) - keep whatever address we
@@ -743,7 +880,7 @@ class OutpostClient:
                 # dropped from _channel_target_peers.
                 existing = members.get(header.sender_id)
                 if existing is not None:
-                    members[header.sender_id] = (existing[0], time.monotonic())
+                    members[header.sender_id] = (existing[0], time.monotonic(), listening)
             return
 
         if header.channel_id not in self.listening_channel_ids():
@@ -764,6 +901,8 @@ class OutpostClient:
                 log.debug("dropping unauthenticated start from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
+            if via_multicast:
+                self._note_multicast(header, addr)
             alias = alias_bytes.decode("utf-8", errors="replace") or None
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio[header.channel_id] = time.monotonic()
@@ -776,6 +915,8 @@ class OutpostClient:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
+            if via_multicast:
+                self._note_multicast(header, addr)
             self.mixer.stop(header.channel_id, header.sender_id)
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio.pop(header.channel_id, None)
@@ -787,6 +928,8 @@ class OutpostClient:
             log.debug("dropping packet with bad auth tag or padding from %s", addr)
             return
         self._replay.mark(header.sender_id, header.seq)
+        if via_multicast:
+            self._note_multicast(header, addr)
 
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.

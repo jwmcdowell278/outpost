@@ -198,7 +198,9 @@ async function refresh() {{
     const s = await api('/api/status');
     document.getElementById('statusLine').textContent =
       `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_enabled ? 'on' : 'off'}}` +
-      (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '');
+      (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '') +
+      (s.multicast.enabled ? ` · multicast: ${{s.multicast.site_listeners}} on this site` +
+        (s.multicast.active_channel_uses_multicast ? ' (in use)' : ' (unicast - below threshold)') : '');
 
     const speakingLine = document.getElementById('speakingLine');
     speakingLine.textContent = s.speaking.length
@@ -840,6 +842,7 @@ class WebUI:
                 for cid, ch in c.config.channels.items()
             ],
             "duck_monitored_channels": c.mixer.duck_enabled,
+            "multicast": c.multicast_status(),
         })
 
     async def _handle_set_channel(self, request) -> web.Response:
@@ -1073,6 +1076,8 @@ class WebUI:
             self.client.echo_guard_hold_s = validated["echo_guard_hold_ms"] / 1000.0
         if "sender_alias" in validated:
             self.client.sender_alias = validated["sender_alias"]
+        if "multicast_min_listeners" in validated:
+            self.client.multicast_min_listeners = validated["multicast_min_listeners"]
         if "duck_monitored_channels" in validated:
             self.client.mixer.duck_enabled = validated["duck_monitored_channels"]
 

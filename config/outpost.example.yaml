@@ -148,6 +148,21 @@ enable_channel_announce: false
 # default voice.
 channel_announce_voice:
 
+# Multicast within a site (one batman-adv mesh or LAN): a talker sends each
+# voice frame once to the channel's multicast group instead of one copy per
+# listener - what makes a large channel workable on mesh Wi-Fi. Listeners
+# reached by multicast get no unicast copy; everyone else (VPN peers, nodes
+# with this off) still gets unicast. Channels with fewer than
+# multicast_min_listeners listeners on this site stay unicast. Set
+# multicast_interface to the interface carrying the mesh IP (bat0, or the
+# bridge such as br-lan if bat0 is bridged). See README "Large channels on a
+# mesh site".
+enable_multicast: false
+# multicast_interface: bat0
+# multicast_group_base: 239.192.77.0   # groups are this + channel id (+0 for announces)
+# multicast_port: 5556
+multicast_min_listeners: 5
+
 # Channels to listen to besides the one you talk on (the active channel) -
 # e.g. a team member on their team channel who also monitors "main". Audio
 # from all of them is mixed. channel_volumes sets each channel's level

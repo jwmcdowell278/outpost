@@ -188,6 +188,22 @@ class OutpostConfig:
     # enable_channel_announce.
     channel_announce_voice: str | None = None
 
+    # Multicast delivery within a site (e.g. one batman-adv mesh): a talker
+    # sends each frame once to a per-channel multicast group instead of one
+    # copy per member, which is what makes a large channel workable on mesh
+    # Wi-Fi. Members heard via multicast are skipped for unicast; everyone
+    # else (VPN peers, nodes with this off) still gets unicast. Channels
+    # with fewer than multicast_min_listeners listeners on this site stay
+    # unicast, since a multicast floods the whole mesh. multicast_interface
+    # is the interface (name, e.g. "bat0" or "br-lan", or its IPv4 address)
+    # carrying the mesh - unset uses the OS default. Groups are
+    # multicast_group_base + channel id (+0 for channel announces).
+    enable_multicast: bool = False
+    multicast_interface: str | None = None
+    multicast_group_base: str = "239.192.77.0"
+    multicast_port: int = 5556
+    multicast_min_listeners: int = 5
+
     # Channels to listen to in addition to the active (transmit) channel -
     # e.g. a team member on their team channel who also monitors the main
     # channel. Names must match configured channels. Audio from all of them
@@ -318,6 +334,14 @@ def _validate_audio_device(v):
     return v or None
 
 
+def _validate_group_base(v):
+    import ipaddress
+    addr = ipaddress.IPv4Address(str(v))
+    if not addr.is_multicast or int(addr) & 0xFF:
+        raise ValueError("multicast_group_base must be a multicast address ending in .0, e.g. 239.192.77.0")
+    return str(addr)
+
+
 def _validate_volume(v):
     v = float(v)
     if not 0.0 <= v <= 1.0:
@@ -361,6 +385,8 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "max_packet_bytes": (_validate_positive_int, False),
     "inband_fec": (_validate_bool, False),
     "duck_monitored_channels": (_validate_bool, True),
+    "enable_multicast": (_validate_bool, False),
+    "multicast_min_listeners": (_validate_positive_int, True),
     "constant_size_audio": (_validate_bool, False),
     "enable_mdns": (_validate_bool, False),
     "enable_pex": (_validate_bool, False),
@@ -652,6 +678,11 @@ def load_config(path: str) -> OutpostConfig:
         echo_guard_hold_ms=raw.get("echo_guard_hold_ms", 500.0),
         enable_channel_announce=raw.get("enable_channel_announce", False),
         channel_announce_voice=raw.get("channel_announce_voice"),
+        enable_multicast=raw.get("enable_multicast", False),
+        multicast_interface=raw.get("multicast_interface"),
+        multicast_group_base=_validate_group_base(raw.get("multicast_group_base", "239.192.77.0")),
+        multicast_port=_validate_port(raw.get("multicast_port", 5556)),
+        multicast_min_listeners=_validate_positive_int(raw.get("multicast_min_listeners", 5)),
         monitor_channels=_load_monitor_channels(raw.get("monitor_channels"), channels),
         channel_volumes=_load_channel_volumes(raw.get("channel_volumes")),
         duck_monitored_channels=raw.get("duck_monitored_channels", True),

@@ -399,6 +399,61 @@ settings editor without a restart (see "Web UI" above).
   noisy environments versus open-mic/VOX, since nothing is transmitted
   (or even captured) outside of a deliberate PTT press.
 
+## Large channels on a mesh site: multicast
+
+Normally a talker sends a separate copy of every voice frame to each
+listener on the channel - fine for small teams, but a channel with hundreds
+of listeners would need tens of thousands of packets a second from the
+talker, far more than mesh Wi-Fi can carry. With multicast on, a talker
+sends each frame **once** to the channel's multicast group, and every
+listener on the same site (one batman-adv mesh, or one LAN) receives that
+single copy:
+
+```yaml
+enable_multicast: true
+multicast_interface: bat0      # interface carrying the mesh IP: bat0, or the bridge (e.g. br-lan) if bat0 is bridged
+multicast_min_listeners: 5     # below this many listeners on this site, keep sending unicast
+```
+
+How it decides, per channel:
+
+- Each channel has its own group (`multicast_group_base` + channel id), and a
+  node joins a channel's group only while listening to it. A shared group
+  (`+0`) carries channel announcements, so on a site those are one multicast
+  per node per channel instead of one unicast per peer.
+- A listener whose packets reach you by multicast is on your site and gets no
+  unicast copy. Everyone else - peers over the VPN, or nodes with multicast
+  off - still gets unicast, so mixed setups work.
+- Below `multicast_min_listeners` listeners on this site, the channel stays
+  unicast: a multicast is flooded across the whole mesh, which costs more
+  than a few unicast copies for a small team.
+- Channel announcements now say whether a node is actually *listening* to a
+  channel, not just holding its key, and audio is only sent to listeners -
+  this saves bandwidth with multicast off too. Changing what you listen to
+  is announced straight away.
+- A relay never unicasts a packet it received by multicast back to nodes on
+  the same site.
+
+The web UI's Status line shows how many listeners on this site the active
+channel has, and whether it's currently using multicast.
+
+**batman-adv notes:**
+
+- batman-adv carries IP multicast as layer-2 broadcast across the mesh by
+  default - every node rebroadcasts each frame once per hop - so one voice
+  stream costs roughly one transmission per node per frame, spread across
+  the mesh, instead of hundreds of unicasts concentrated around the talker.
+- With batman-adv's multicast optimizations (`batctl multicast_forceflood
+  0`, the default on recent versions), frames for a group are only delivered
+  to nodes that joined it, so team channels' audio stays where its listeners
+  are.
+- Multicast frames on Wi-Fi are sent at a low fixed rate without
+  retransmission, so expect somewhat more loss than unicast; the receive
+  side's FEC and concealment cover moderate loss.
+- The multicast TTL is 1: a batman-adv mesh is a single IP hop however many
+  radio hops it spans. Multicast doesn't cross routers or the VPN - traffic
+  between sites still goes by unicast (and through relays).
+
 ## Listening to several channels
 
 A node talks on one channel (the *active* channel) but can listen to as
