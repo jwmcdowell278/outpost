@@ -129,13 +129,11 @@ class PexGossip:
 
     def _send_to(self, targets: list[Peer]) -> None:
         plaintext = pack_peers(self._transport.peers)
-        seq = self._transport.next_seq()
-        ciphertext = self._cipher.encrypt(self._sender_id, seq, plaintext)
-        self._transport.send(channel_id=0, seq=seq, ciphertext=ciphertext, ptype=TYPE_PEX, targets=targets)
+        self._transport.send_encrypted(self._cipher, 0, TYPE_PEX, plaintext, targets=targets)
 
     def handle_incoming(self, header, ciphertext: bytes, addr) -> None:
         try:
-            plaintext = self._cipher.decrypt(header.sender_id, header.seq, ciphertext)
+            plaintext = self._cipher.decrypt(header, ciphertext)
         except ValueError:
             log.debug("dropping PEX packet with bad auth tag from %s", addr)
             return

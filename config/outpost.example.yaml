@@ -206,3 +206,10 @@ frame_ms: 20             # 20-60ms; larger frames mean fewer, bigger packets
 max_packet_bytes: 1200   # lower for small-MTU radio links (e.g. 200 for LoRa)
 inband_fec: true
 
+# Makes every voice packet the same size, so someone watching the network
+# can't infer what's being said from packet lengths (Opus frame sizes
+# otherwise follow the speech). Each frame is capped at the bitrate above and
+# padded up to it, so while transmitting you use a steady `bitrate`. Only
+# turn off on links where every byte counts and that leak is acceptable.
+constant_size_audio: true
+

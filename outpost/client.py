@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import random
 import time
 from dataclasses import replace
@@ -19,7 +20,8 @@ from .discovery import PeerDiscovery
 from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
 from .pex import PexGossip
-from .protocol import TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
+from .replay import ReplayWindow
+from .protocol import audio_pad_size, pad_audio, unpad_audio, TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, encode_packet
 from .subnet_scan import SubnetScanner
 from .transport import MeshTransport
 from .config import OutpostConfig, Channel, Peer
@@ -101,6 +103,9 @@ class OutpostClient:
             frame_ms=config.frame_ms,
             inband_fec=config.inband_fec,
         )
+        # Fixed AUDIO payload size (None = off) - see protocol.pad_audio.
+        self.audio_pad = (audio_pad_size(config.bitrate, config.frame_ms)
+                          if config.constant_size_audio else None)
 
         # High-pass filter and squelch - same always-construct/separate-flag
         # pattern as AGC above, so the web UI can toggle/retune them live.
@@ -178,6 +183,17 @@ class OutpostClient:
         self._channel_announce_task: asyncio.Task | None = None
         self._audio_watchdog_task: asyncio.Task | None = None
         self._last_seq_seen: dict[int, int] = {}
+        # Rejects replayed channel packets - see replay.py. Separate from
+        # _last_seq_seen above, which only orders playback and is reset on
+        # every STOP.
+        self._replay = ReplayWindow()
+        self._replay_warned_at: dict[int, float] = {}
+        # Random per-run marker carried in our CHANNEL_ANNOUNCE payloads. If
+        # we ever receive an authenticated announce with our own sender_id
+        # but a different marker, another node is using our sender_id -
+        # see _check_sender_id_clash.
+        self._instance_token = os.urandom(8)
+        self._clash_warned_at = -1e9
 
         # Set by the web UI's Settings page "Restart" button - scripts/
         # run_client.py's main loop waits on this alongside SIGINT/SIGTERM
@@ -285,14 +301,10 @@ class OutpostClient:
                 # Sent once per transmission (not per AUDIO frame) so other
                 # users learn who's speaking without paying per-frame
                 # overhead for it - see protocol.TYPE_START.
-                seq = self.transport.next_seq()
                 alias_bytes = self.sender_alias.encode("utf-8") if self.sender_alias else b""
-                ciphertext = cipher.encrypt(self.config.sender_id, seq, alias_bytes)
-                self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_START, targets=targets)
+                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_START, alias_bytes, targets=targets)
             else:
-                seq = self.transport.next_seq()
-                ciphertext = cipher.encrypt(self.config.sender_id, seq, b"")
-                self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_STOP, targets=targets)
+                self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_STOP, b"", targets=targets)
         except RuntimeError:
             # Transport not started yet (e.g. PTT pressed during startup) -
             # local PTT state still toggles above; the peer just won't get a
@@ -496,12 +508,12 @@ class OutpostClient:
                 if self.agc_enabled:
                     frame = self.agc.process(frame)
                 frame = self.noise_suppressor.process(frame)
-            opus_bytes = self.codec.encode(frame)
+            # Cap leaves room for pad_audio's 1-byte marker.
+            opus_bytes = self.codec.encode(frame, max_bytes=self.audio_pad - 1 if self.audio_pad else None)
+            payload = pad_audio(opus_bytes, self.audio_pad)
             cipher = self.ciphers[self.active_channel.id]
-            seq = self.transport.next_seq()
-            ciphertext = cipher.encrypt(self.config.sender_id, seq, opus_bytes)
             targets = self._channel_target_peers(self.active_channel.id)
-            self.transport.send(self.active_channel.id, seq, ciphertext, ptype=TYPE_AUDIO, targets=targets)
+            self.transport.send_encrypted(cipher, self.active_channel.id, TYPE_AUDIO, payload, targets=targets)
 
     async def _channel_announce_loop(self) -> None:
         """Periodically floods a tiny empty-payload beacon per held channel so
@@ -512,9 +524,7 @@ class OutpostClient:
         while True:
             self.transport.prune_stale(self._peer_ttl_s)
             for channel_id, cipher in self.ciphers.items():
-                seq = self.transport.next_seq()
-                ciphertext = cipher.encrypt(self.config.sender_id, seq, b"")
-                self.transport.send(channel_id, seq, ciphertext, ptype=TYPE_CHANNEL_ANNOUNCE)
+                self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, self._instance_token)
             await asyncio.sleep(self.config.channel_announce_interval_s * random.uniform(0.8, 1.2))
 
     def _channel_target_peers(self, channel_id: int) -> list[Peer] | None:
@@ -562,8 +572,56 @@ class OutpostClient:
         if targets:
             self.transport.forward(encode_packet(header, ciphertext), targets)
 
+    def _is_fresh(self, header, addr) -> bool:
+        """Replay check (see replay.py) - False means drop the packet.
+        Recent duplicates are routine on a multi-path mesh and only logged
+        at debug; anything older than the window is a likely replay (or a
+        sender whose seq went backwards, e.g. a lost .seq file) and gets a
+        rate-limited warning."""
+        if self._replay.is_fresh(header.sender_id, header.seq):
+            return True
+        if self._replay.is_too_old(header.sender_id, header.seq):
+            now = time.monotonic()
+            if now - self._replay_warned_at.get(header.sender_id, -1e9) >= 60.0:
+                self._replay_warned_at[header.sender_id] = now
+                log.warning("dropping old (likely replayed) packets claiming to be sender %d, from %s:%d",
+                            header.sender_id, addr[0], addr[1])
+        else:
+            log.debug("dropping duplicate packet from sender %d (seq %d)", header.sender_id, header.seq)
+        return False
+
+    def _check_sender_id_clash(self, header, ciphertext: bytes, addr) -> None:
+        """Called for packets carrying our own sender_id. Usually that's our
+        own traffic looped back through a relay - but an announce whose
+        marker isn't ours means a second node shares our sender_id (cloned
+        identity file, or the same explicit sender_id in two configs). Two
+        nodes with one sender_id on a shared channel key reuse encryption
+        nonces, which leaks audio and allows forgery, so this is an error."""
+        if header.ptype != TYPE_CHANNEL_ANNOUNCE:
+            return
+        cipher = self.ciphers.get(header.channel_id)
+        if cipher is None:
+            return
+        try:
+            token = cipher.decrypt(header, ciphertext)
+        except ValueError:
+            return
+        if token == self._instance_token:
+            return
+        now = time.monotonic()
+        if now - self._clash_warned_at < 60.0:
+            return
+        self._clash_warned_at = now
+        log.error(
+            "another node at %s:%d is using this node's sender_id %d - their traffic can compromise "
+            "each other's encryption. If sender_id is set in the config, give each node its own (or "
+            "remove it to auto-generate); otherwise delete the copied %s.identity file on one of them "
+            "and restart it.", addr[0], addr[1], self.config.sender_id,
+            self.config_path or "<config>")
+
     def _on_packet(self, header, ciphertext: bytes, addr) -> None:
         if header.sender_id == self.config.sender_id:
+            self._check_sender_id_clash(header, ciphertext, addr)
             # Our own traffic looped back to us - e.g. a multi-hop relay mesh
             # can bounce a packet through a downstream relay and back to its
             # original sender if that relay also knows us as a peer. Without
@@ -583,11 +641,14 @@ class OutpostClient:
             cipher = self.ciphers.get(header.channel_id)
             if cipher is None:
                 return  # not a channel we hold the key for
+            if not self._is_fresh(header, addr):
+                return
             try:
-                cipher.decrypt(header.sender_id, header.seq, ciphertext)
+                cipher.decrypt(header, ciphertext)
             except ValueError:
                 log.debug("dropping unauthenticated channel announce from %s", addr)
                 return
+            self._replay.mark(header.sender_id, header.seq)
             peer = Peer(host=addr[0], port=addr[1])
             members = self._channel_members.setdefault(header.channel_id, {})
             if self.transport.confirm_peer(header.sender_id, peer):
@@ -609,13 +670,18 @@ class OutpostClient:
         cipher = self.ciphers.get(header.channel_id)
         if cipher is None:
             return  # we don't hold this channel's key - can't be a member
+        if header.ptype not in (TYPE_START, TYPE_STOP, TYPE_AUDIO):
+            return
+        if not self._is_fresh(header, addr):
+            return
 
         if header.ptype == TYPE_START:
             try:
-                alias_bytes = cipher.decrypt(header.sender_id, header.seq, ciphertext)
+                alias_bytes = cipher.decrypt(header, ciphertext)
             except ValueError:
                 log.debug("dropping unauthenticated start from %s", addr)
                 return
+            self._replay.mark(header.sender_id, header.seq)
             alias = alias_bytes.decode("utf-8", errors="replace") or None
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio[header.channel_id] = time.monotonic()
@@ -623,18 +689,16 @@ class OutpostClient:
             return
         if header.ptype == TYPE_STOP:
             try:
-                cipher.decrypt(header.sender_id, header.seq, ciphertext)
+                cipher.decrypt(header, ciphertext)
             except ValueError:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
+            self._replay.mark(header.sender_id, header.seq)
             self._last_seq_seen.pop(header.sender_id, None)
             self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1]))
             self._channel_last_audio.pop(header.channel_id, None)
             self._channel_speaking.get(header.channel_id, {}).pop(header.sender_id, None)
             return
-        if header.ptype != TYPE_AUDIO:
-            return
-
         last_seq = self._last_seq_seen.get(header.sender_id)
         if last_seq is not None and header.seq <= last_seq:
             log.debug("dropping stale/duplicate/out-of-order audio from sender %d (seq %d <= last %d)",
@@ -642,10 +706,11 @@ class OutpostClient:
             return  # drop rather than play audio backwards
 
         try:
-            opus_bytes = cipher.decrypt(header.sender_id, header.seq, ciphertext)
+            opus_bytes = unpad_audio(cipher.decrypt(header, ciphertext))
         except ValueError:
-            log.debug("dropping packet with bad auth tag from %s", addr)
+            log.debug("dropping packet with bad auth tag or padding from %s", addr)
             return
+        self._replay.mark(header.sender_id, header.seq)
 
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.

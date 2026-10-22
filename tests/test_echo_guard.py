@@ -12,7 +12,7 @@ import numpy as np
 from outpost.client import OutpostClient
 from outpost.config import OutpostConfig, Channel
 from outpost.crypto import ChannelCipher, generate_channel_key
-from outpost.protocol import TYPE_AUDIO
+from outpost.protocol import Header, VERSION, TYPE_AUDIO, pad_audio, unpad_audio
 
 
 def _make_client(**overrides) -> tuple[OutpostClient, bytes]:
@@ -78,7 +78,7 @@ async def _tx_loop_sends_silence_while_echo_guard_active():
     assert sent, "expected at least one frame to have been sent"
     cipher = ChannelCipher(ops_key)
     channel_id, seq, ciphertext = sent[0][0], sent[0][1], sent[0][2]
-    opus_bytes = cipher.decrypt(client.config.sender_id, seq, ciphertext)
+    opus_bytes = unpad_audio(cipher.decrypt(Header(VERSION, TYPE_AUDIO, channel_id, client.config.sender_id, seq), ciphertext))
     pcm = client.codec.decode(opus_bytes)
     # Opus is lossy even for silence input (tiny dither noise survives the
     # encode/decode round trip), so assert "near silent" rather than
@@ -116,7 +116,7 @@ async def _tx_loop_sends_real_audio_once_echo_guard_hold_expires():
     assert sent, "expected at least one frame to have been sent"
     cipher = ChannelCipher(ops_key)
     channel_id, seq, ciphertext = sent[0][0], sent[0][1], sent[0][2]
-    opus_bytes = cipher.decrypt(client.config.sender_id, seq, ciphertext)
+    opus_bytes = unpad_audio(cipher.decrypt(Header(VERSION, TYPE_AUDIO, channel_id, client.config.sender_id, seq), ciphertext))
     pcm = client.codec.decode(opus_bytes)
     assert np.frombuffer(pcm, dtype=np.int16).max() > 0
 
@@ -130,8 +130,8 @@ def test_speaker_activity_recorded_from_received_audio_playback():
     silence = b"\x00" * (client.codec.frame_size * 2)
     opus_bytes = client.codec.encode(silence)
     cipher = ChannelCipher(key)
-    ciphertext = cipher.encrypt(2, 0, opus_bytes)
     header = Header(VERSION, TYPE_AUDIO, channel_id=1, sender_id=2, seq=0)
+    ciphertext = cipher.encrypt(header, pad_audio(opus_bytes, None))
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
 
     assert client._own_speaker_active() is True

@@ -9,7 +9,7 @@ import time
 
 import ifaddr
 
-from .protocol import Header, TYPE_AUDIO, VERSION, encode_packet, decode_packet
+from .protocol import Header, TYPE_AUDIO, VERSION, UnsupportedVersion, encode_packet, decode_packet
 from .config import Peer
 
 log = logging.getLogger(__name__)
@@ -64,13 +64,27 @@ def _local_addresses() -> set[str]:
     return hosts
 
 
+# Seconds between repeated "incompatible version" warnings for one host.
+_VERSION_WARN_INTERVAL_S = 300.0
+
+
 class _MeshProtocol(asyncio.DatagramProtocol):
     def __init__(self, on_packet):
         self._on_packet = on_packet
+        self._version_warned_at: dict[str, float] = {}
 
     def datagram_received(self, data: bytes, addr) -> None:
         try:
             header, ciphertext = decode_packet(data)
+        except UnsupportedVersion as exc:
+            # Visible (not debug): a half-upgraded mesh otherwise just goes
+            # quiet between old and new nodes with no clue why.
+            now = time.monotonic()
+            if now - self._version_warned_at.get(addr[0], -1e9) >= _VERSION_WARN_INTERVAL_S:
+                self._version_warned_at[addr[0]] = now
+                log.warning("ignoring %s:%d - it runs Outpost protocol version %d, this node runs %d; "
+                            "upgrade every node to the same version", addr[0], addr[1], exc.version, VERSION)
+            return
         except ValueError as exc:
             log.debug("dropping malformed packet from %s: %s", addr, exc)
             return
@@ -377,6 +391,17 @@ class MeshTransport:
             self._seq_calls_since_persist = 0
             self._persist_seq()
         return seq
+
+    def send_encrypted(self, cipher, channel_id: int, ptype: int, plaintext: bytes,
+                       targets: list[Peer] | None = None) -> None:
+        """Encrypts `plaintext` with `cipher` bound to this packet's exact
+        header (so the header can't be altered in transit - see crypto.py)
+        and sends it. Use this rather than encrypting and calling send()
+        separately, so the header that's authenticated is always the one
+        that goes on the wire."""
+        seq = self.next_seq()
+        header = Header(VERSION, ptype, channel_id, self.sender_id, seq)
+        self.send(channel_id, seq, cipher.encrypt(header, plaintext), ptype=ptype, targets=targets)
 
     def send(self, channel_id: int, seq: int, ciphertext: bytes, ptype: int = TYPE_AUDIO,
               targets: list[Peer] | None = None) -> None:

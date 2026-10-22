@@ -52,6 +52,9 @@ class _FakeTransport:
     def send(self, channel_id, seq, ciphertext, ptype=None, targets=None):
         self.sent_targets.append(targets)
 
+    def send_encrypted(self, cipher, channel_id, ptype, plaintext, targets=None):
+        self.send(channel_id, self.next_seq(), b"", ptype=ptype, targets=targets)
+
 
 def test_announce_only_targets_a_bounded_fanout_subset_of_peers():
     """With hundreds of known peers, each gossip round must still only send

@@ -1,12 +1,16 @@
 """Channel and peer configuration loading (YAML)."""
 from __future__ import annotations
 import base64
+import logging
 import os
 import secrets
 from dataclasses import dataclass, field
 import yaml
 
 from .crypto import KEY_SIZE
+from .identity import hardware_ids
+
+log = logging.getLogger(__name__)
 
 DEFAULT_LISTEN_PORT = 5555
 
@@ -46,6 +50,14 @@ class OutpostConfig:
     frame_ms: int = 20
     max_packet_bytes: int = 1200
     inband_fec: bool = True
+
+    # Makes every AUDIO packet the same size, so packet lengths can't reveal
+    # what's being said (Opus frame sizes otherwise follow the speech - see
+    # protocol.pad_audio). Caps each frame at the configured bitrate and
+    # pads up to it, so on-air usage is a steady `bitrate` while
+    # transmitting. Turn off only on links where every byte counts and that
+    # leak is acceptable. Receivers handle either setting.
+    constant_size_audio: bool = True
 
     # Discovery - mDNS only works where multicast is reachable (typically
     # plain LAN, not most VPNs or mesh radio links); PEX gossip works over
@@ -310,6 +322,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "frame_ms": (_validate_positive_int, False),
     "max_packet_bytes": (_validate_positive_int, False),
     "inband_fec": (_validate_bool, False),
+    "constant_size_audio": (_validate_bool, False),
     "enable_mdns": (_validate_bool, False),
     "enable_pex": (_validate_bool, False),
     "pex_interval_s": (_validate_positive_float, False),
@@ -485,6 +498,28 @@ def write_config_text(path: str, text: str) -> None:
 
 
 
+def _read_identity(identity_path: str) -> tuple[int, set[str]]:
+    """(sender_id, recorded hardware ids) from an identity file. Files
+    written before hardware ids were recorded are just the sender_id."""
+    with open(identity_path, "r") as f:
+        lines = f.read().splitlines()
+    sender_id = int(lines[0].strip())
+    hw: set[str] = set()
+    for line in lines[1:]:
+        if line.startswith("hardware:"):
+            hw = {h for h in line.split(":", 1)[1].strip().split(",") if h}
+    return sender_id, hw
+
+
+def _write_identity(identity_path: str, sender_id: int, hw: set[str]) -> None:
+    tmp_path = identity_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(f"{sender_id}\n")
+        if hw:
+            f.write(f"hardware: {','.join(sorted(hw))}\n")
+    os.replace(tmp_path, identity_path)
+
+
 def _resolve_sender_id(config_path: str, raw: dict) -> int:
     """Returns the configured sender_id, or auto-generates and persists one.
 
@@ -494,18 +529,35 @@ def _resolve_sender_id(config_path: str, raw: dict) -> int:
     the config so it stays stable across restarts (sender_id feeds the
     encryption nonce, so it must not change while old sequence numbers are
     still in play - see crypto.py).
+
+    The cache also records which hardware it was made on (see identity.py).
+    If it turns up on different hardware - an SD card image or folder copied
+    from another node - a new sender_id is picked, since two nodes sharing
+    one can reuse encryption nonces. An explicit sender_id in the config is
+    never changed; client.py warns at runtime if another node uses it too.
     """
     if "sender_id" in raw and raw["sender_id"] is not None:
         return raw["sender_id"]
 
     identity_path = config_path + ".identity"
+    current_hw = hardware_ids()
     if os.path.exists(identity_path):
-        with open(identity_path, "r") as f:
-            return int(f.read().strip())
+        sender_id, recorded_hw = _read_identity(identity_path)
+        if recorded_hw and current_hw and not (recorded_hw & current_hw):
+            new_id = secrets.randbits(32)
+            log.warning(
+                "%s was created on different hardware (copied or cloned from another node?) - "
+                "replacing sender_id %d with a new one, %d, so the two nodes don't share an "
+                "encryption identity", identity_path, sender_id, new_id)
+            _write_identity(identity_path, new_id, current_hw)
+            return new_id
+        if not recorded_hw and current_hw:
+            # Pre-fingerprint identity file: assume it belongs here.
+            _write_identity(identity_path, sender_id, current_hw)
+        return sender_id
 
     sender_id = secrets.randbits(32)
-    with open(identity_path, "w") as f:
-        f.write(str(sender_id))
+    _write_identity(identity_path, sender_id, current_hw)
     return sender_id
 
 
@@ -537,6 +589,7 @@ def load_config(path: str) -> OutpostConfig:
         frame_ms=raw.get("frame_ms", 20),
         max_packet_bytes=raw.get("max_packet_bytes", 1200),
         inband_fec=raw.get("inband_fec", True),
+        constant_size_audio=raw.get("constant_size_audio", True),
         enable_mdns=raw.get("enable_mdns", True),
         enable_pex=raw.get("enable_pex", True),
         pex_interval_s=raw.get("pex_interval_s", 30.0),

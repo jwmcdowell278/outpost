@@ -81,10 +81,8 @@ async def _audio_is_targeted_only_at_announced_channel_members():
 
         # B (a real ops member) authenticates itself via a channel announce.
         cipher_b = client_b.ciphers[1]
-        seq = client_b.transport.next_seq()
-        ciphertext = cipher_b.encrypt(2, seq, b"")
         client_a.transport.add_peer("peer-2", Peer(host="127.0.0.1", port=port_b))
-        client_b.transport.send(1, seq, ciphertext, ptype=TYPE_CHANNEL_ANNOUNCE, targets=[
+        client_b.transport.send_encrypted(cipher_b, 1, TYPE_CHANNEL_ANNOUNCE, b"", targets=[
             Peer(host="127.0.0.1", port=client_a.transport._transport.get_extra_info("sockname")[1]),
         ])
 
@@ -101,9 +99,7 @@ async def _audio_is_targeted_only_at_announced_channel_members():
         received_by_b.clear()
         received_by_c.clear()
         cipher_a = client_a.ciphers[1]
-        seq2 = client_a.transport.next_seq()
-        ciphertext2 = cipher_a.encrypt(1, seq2, b"fake-opus-bytes")
-        client_a.transport.send(1, seq2, ciphertext2, ptype=TYPE_AUDIO, targets=targets)
+        client_a.transport.send_encrypted(cipher_a, 1, TYPE_AUDIO, b"fake-opus-bytes", targets=targets)
         await asyncio.sleep(0.3)
         assert TYPE_AUDIO in received_by_b
         assert TYPE_AUDIO not in received_by_c

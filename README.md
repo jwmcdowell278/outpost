@@ -14,7 +14,7 @@ flowchart LR
     HPF --> Squelch[Squelch\nnoise gate, off by default]
     Squelch --> AGC[AGC\nauto gain normalization]
     AGC --> Codec[Opus encoder\nconfigurable bitrate/frame + FEC]
-    Codec --> Crypto[XSalsa20-Poly1305\nper-channel key]
+    Codec --> Crypto[XChaCha20-Poly1305\nper-channel key, header authenticated]
     Crypto --> Wire[UDP packet\nheader + ciphertext]
     Wire -- mesh: send to every known peer --> Net((Network:\nLAN / VPN / radio mesh))
     Net --> WireIn[UDP packet in]
@@ -113,10 +113,16 @@ flowchart LR
   16kHz mono, 20ms frames, ~16kbps) tuned for low-bitrate voice
   (`outpost/codec.py`). Lower `bitrate`/raise `frame_ms` further for
   constrained mesh radio links - see network profiles below.
-- **Encryption**: NaCl `secretbox` (XSalsa20-Poly1305), one key per channel
-  plus a separate mesh-wide key for PEX control traffic (`outpost/crypto.py`).
-  The encryption nonce is derived from `(sender_id, sequence_number)` instead
-  of being transmitted, saving 24 bytes/packet - safe because secretbox only
+- **Encryption**: XChaCha20-Poly1305 (libsodium's IETF AEAD), one key per
+  channel plus a separate mesh-wide key for PEX control traffic
+  (`outpost/crypto.py`). The cleartext packet header is authenticated as
+  the AEAD's associated data, so it stays readable (relays need it) but
+  can't be altered - relabelling a captured AUDIO packet as a STOP, or
+  moving it to another channel or sender, makes it fail authentication.
+  Configured keys are passed through keyed BLAKE2b before use, so this
+  format never shares a key with the old protocol-version-1 cipher. The
+  encryption nonce is derived from `(sender_id, sequence_number)` instead
+  of being transmitted, saving 24 bytes/packet - safe because the AEAD only
   requires a nonce never repeat for a given key, which a strictly increasing
   per-sender counter guarantees. PTT-release STOP markers are encrypted (not
   just sent as a bare marker) so they can't be spoofed by an unauthenticated
@@ -127,6 +133,36 @@ flowchart LR
   pair already used under the same channel key - and so peers don't
   mistake this node's post-restart packets for stale duplicates of its own
   higher pre-restart sequence numbers (`outpost/transport.py`).
+- **Replay protection** (`outpost/replay.py`): encryption alone doesn't stop
+  someone recording packets off the network and resending them later (they
+  still decrypt). Each node tracks, per sender, the highest sequence number
+  it has accepted plus which of the 1024 below it it has already seen, and
+  drops anything repeated or older - for AUDIO, START, STOP and
+  CHANNEL_ANNOUNCE alike. The window tolerates normal multi-path
+  reordering. Dropped old packets log a "likely replayed" warning (at most
+  once a minute per sender); that can also mean a node's `.seq` file was
+  lost or restored from an old backup, so its counter went backwards.
+- **Constant-size audio** (`constant_size_audio`, on by default): Opus is
+  variable-bitrate, so frame sizes follow the speech (silence a few bytes,
+  speech up to several times the average), and packet lengths alone have
+  been used to recover phrases from encrypted voice calls. Each frame is
+  capped at the configured `bitrate` and padded up to exactly that before
+  encryption, so every AUDIO packet is the same size. The cap is passed
+  straight to `opus_encode()`, so it's enforced even on platforms where
+  setting the bitrate fails. Costs a steady `bitrate` while transmitting
+  instead of slightly less on average.
+- **Cloned-node protection** (`outpost/identity.py`): `sender_id` is half
+  of every encryption nonce, so two nodes sharing one can reuse nonces. The
+  auto-generated ID is tied to the hardware it was made on and replaced if
+  it's found on other hardware. CHANNEL_ANNOUNCE packets carry a random
+  per-run marker, so a node that hears its own ID with someone else's marker
+  logs an error.
+- **Protocol version 2 - upgrade every node together**: the header-
+  authentication change above isn't compatible with version 1, so old and
+  new nodes can't hear each other. Existing channel and mesh keys keep
+  working unchanged - no new keys needed. A node receiving packets from a
+  different version logs "runs Outpost protocol version N ... upgrade every
+  node to the same version" (at most every 5 minutes per host).
 - **Wire format** (`outpost/protocol.py`): 15-byte cleartext header
   (version, type, channel id, sender id, sequence number) + encrypted
   payload (+16-byte Poly1305 tag). Total overhead is small relative to a
@@ -609,7 +645,12 @@ pytest tests/ -v
    cached in a sibling `outpost.yaml.identity` file so it stays stable
    across restarts (don't copy *that* file between nodes - it's the one
    thing that makes each node unique; set `sender_id` explicitly in the
-   YAML instead if you need a reproducible value). Peers on the same LAN
+   YAML instead if you need a reproducible value, and never give two nodes
+   the same one). The file also records which hardware it was created on,
+   so if it's copied to another machine anyway (e.g. an SD card image of an
+   already-set-up Pi), that machine logs a warning and picks a new ID
+   automatically. Running nodes also log an error if they hear another node
+   using their ID - two nodes sharing one weakens the encryption for both. Peers on the same LAN
    find each other automatically via mDNS; across a VPN or mesh radio link
    (where mDNS/multicast usually can't reach), either give each device at
    least one `peers:` bootstrap entry pointing at any already-reachable

@@ -15,7 +15,7 @@ from __future__ import annotations
 from outpost.client import OutpostClient
 from outpost.config import OutpostConfig, Channel
 from outpost.crypto import ChannelCipher, generate_channel_key
-from outpost.protocol import Header, VERSION, TYPE_AUDIO
+from outpost.protocol import Header, VERSION, TYPE_AUDIO, pad_audio
 
 
 def _make_client(**overrides) -> tuple[OutpostClient, bytes]:
@@ -36,8 +36,8 @@ def _deliver_audio(client, key, sender_id=2, seq=0):
     silence = b"\x00" * (client.codec.frame_size * 2)
     opus_bytes = client.codec.encode(silence)
     cipher = ChannelCipher(key)
-    ciphertext = cipher.encrypt(sender_id, seq, opus_bytes)
     header = Header(VERSION, TYPE_AUDIO, channel_id=1, sender_id=sender_id, seq=seq)
+    ciphertext = cipher.encrypt(header, pad_audio(opus_bytes, None))
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
 
 

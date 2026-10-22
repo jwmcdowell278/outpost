@@ -50,19 +50,20 @@ def test_crypto_roundtrip_and_tamper_detection():
     cipher = ChannelCipher(key)
 
     plaintext = b"hello-opus-frame"
-    ciphertext = cipher.encrypt(sender_id=1, seq=0, plaintext=plaintext)
-    assert cipher.decrypt(sender_id=1, seq=0, ciphertext=ciphertext) == plaintext
+    header = Header(VERSION, TYPE_AUDIO, channel_id=1, sender_id=1, seq=0)
+    ciphertext = cipher.encrypt(header, plaintext)
+    assert cipher.decrypt(header, ciphertext) == plaintext
 
     # wrong channel key must fail to decrypt
     other_cipher = ChannelCipher(generate_channel_key())
     with pytest.raises(ValueError):
-        other_cipher.decrypt(sender_id=1, seq=0, ciphertext=ciphertext)
+        other_cipher.decrypt(header, ciphertext)
 
     # tampered ciphertext must fail auth
     tampered = bytearray(ciphertext)
     tampered[0] ^= 0xFF
     with pytest.raises(ValueError):
-        cipher.decrypt(sender_id=1, seq=0, ciphertext=bytes(tampered))
+        cipher.decrypt(header, bytes(tampered))
 
 
 def test_two_clients_exchange_encrypted_audio_over_real_udp():
@@ -80,7 +81,7 @@ async def _two_clients_exchange_encrypted_audio_over_real_udp():
     received: list[bytes] = []
 
     def on_packet_b(header, ciphertext, addr):
-        pcm = codec_b.decode(cipher.decrypt(header.sender_id, header.seq, ciphertext))
+        pcm = codec_b.decode(cipher.decrypt(header, ciphertext))
         received.append(pcm)
 
     transport_b = MeshTransport(sender_id=2, peers=[], on_packet=on_packet_b)
@@ -93,9 +94,7 @@ async def _two_clients_exchange_encrypted_audio_over_real_udp():
     try:
         pcm_in = make_sine_frame(codec_a.frame_size, codec_a.sample_rate)
         opus_bytes = codec_a.encode(pcm_in)
-        seq = transport_a.next_seq()
-        ciphertext = cipher.encrypt(sender_id=1, seq=seq, plaintext=opus_bytes)
-        transport_a.send(channel_id=1, seq=seq, ciphertext=ciphertext)
+        transport_a.send_encrypted(cipher, 1, TYPE_AUDIO, opus_bytes)
 
         for _ in range(50):
             if received:

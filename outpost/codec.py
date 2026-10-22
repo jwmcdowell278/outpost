@@ -8,6 +8,7 @@ bandwidth.
 from __future__ import annotations
 import logging
 import opuslib
+import opuslib.api.encoder
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +61,14 @@ class OpusCodec:
             )
         self._decoder = opuslib.Decoder(sample_rate, channels)
 
-    def encode(self, pcm_bytes: bytes) -> bytes:
-        return self._encoder.encode(pcm_bytes, self.frame_size)
+    def encode(self, pcm_bytes: bytes, max_bytes: int | None = None) -> bytes:
+        """Opus-encodes one frame. `max_bytes` hard-caps the encoded size -
+        libopus lowers quality to fit rather than exceeding it. Unlike the
+        bitrate setting above, this is a plain argument to opus_encode()
+        rather than an encoder_ctl() call, so it's honoured even on builds
+        where the ctl calls fail."""
+        limit = len(pcm_bytes) if max_bytes is None else max_bytes
+        return opuslib.api.encoder.encode(self._encoder.encoder_state, pcm_bytes, self.frame_size, limit)
 
     def decode(self, opus_bytes: bytes) -> bytes:
         return self._decoder.decode(opus_bytes, self.frame_size)

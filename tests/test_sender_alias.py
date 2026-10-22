@@ -8,7 +8,7 @@ from __future__ import annotations
 from outpost.client import OutpostClient
 from outpost.config import OutpostConfig, Channel
 from outpost.crypto import ChannelCipher, generate_channel_key
-from outpost.protocol import Header, VERSION, TYPE_AUDIO, TYPE_START, TYPE_STOP
+from outpost.protocol import Header, VERSION, TYPE_AUDIO, TYPE_START, TYPE_STOP, pad_audio
 
 
 def _make_client(**overrides) -> tuple[OutpostClient, bytes]:
@@ -28,8 +28,8 @@ def _make_client(**overrides) -> tuple[OutpostClient, bytes]:
 def _deliver_start(client, key, sender_id=2, seq=0, alias: str | None = "Basecamp"):
     cipher = ChannelCipher(key)
     payload = alias.encode("utf-8") if alias else b""
-    ciphertext = cipher.encrypt(sender_id, seq, payload)
     header = Header(VERSION, TYPE_START, channel_id=1, sender_id=sender_id, seq=seq)
+    ciphertext = cipher.encrypt(header, payload)
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
 
 
@@ -37,15 +37,15 @@ def _deliver_audio(client, key, sender_id=2, seq=0):
     silence = b"\x00" * (client.codec.frame_size * 2)
     opus_bytes = client.codec.encode(silence)
     cipher = ChannelCipher(key)
-    ciphertext = cipher.encrypt(sender_id, seq, opus_bytes)
     header = Header(VERSION, TYPE_AUDIO, channel_id=1, sender_id=sender_id, seq=seq)
+    ciphertext = cipher.encrypt(header, pad_audio(opus_bytes, None))
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
 
 
 def _deliver_stop(client, key, sender_id=2, seq=1):
     cipher = ChannelCipher(key)
-    ciphertext = cipher.encrypt(sender_id, seq, b"")
     header = Header(VERSION, TYPE_STOP, channel_id=1, sender_id=sender_id, seq=seq)
+    ciphertext = cipher.encrypt(header, b"")
     client._on_packet(header, ciphertext, ("127.0.0.1", 9999))
 
 
@@ -66,7 +66,7 @@ def test_ptt_press_sends_start_packet_with_alias():
     channel_id, seq, ciphertext = args[0], args[1], args[2]
     assert kwargs["ptype"] == TYPE_START
     cipher = ChannelCipher(ops_key)
-    payload = cipher.decrypt(client.config.sender_id, seq, ciphertext)
+    payload = cipher.decrypt(Header(VERSION, TYPE_START, args[0], client.config.sender_id, seq), ciphertext)
     assert payload == b"Basecamp"
 
 
@@ -81,7 +81,7 @@ def test_ptt_press_sends_empty_start_payload_when_no_alias_set():
     seq, ciphertext = args[1], args[2]
     assert kwargs["ptype"] == TYPE_START
     cipher = ChannelCipher(ops_key)
-    payload = cipher.decrypt(client.config.sender_id, seq, ciphertext)
+    payload = cipher.decrypt(Header(VERSION, TYPE_START, args[0], client.config.sender_id, seq), ciphertext)
     assert payload == b""
 
 

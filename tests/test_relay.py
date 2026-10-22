@@ -9,7 +9,7 @@ import asyncio
 from outpost.client import OutpostClient
 from outpost.config import OutpostConfig, Channel, Peer
 from outpost.crypto import generate_channel_key
-from outpost.protocol import TYPE_AUDIO, TYPE_PEX
+from outpost.protocol import Header, VERSION, TYPE_AUDIO, TYPE_PEX
 
 
 def _make_client(sender_id: int, channel_key: bytes, active_channel_name: str = "ops",
@@ -68,10 +68,8 @@ async def _relay_bridges_two_peers_that_do_not_know_each_other():
         relay.transport.add_peer("c", Peer(host="127.0.0.1", port=_port_of(client_c)))
 
         cipher_a = client_a.ciphers[1]
-        seq = client_a.transport.next_seq()
-        ciphertext = cipher_a.encrypt(1, seq, b"opus-frame")
-        client_a.transport.send(1, seq, ciphertext, ptype=TYPE_AUDIO,
-                                 targets=[Peer(host="127.0.0.1", port=_port_of(relay))])
+        client_a.transport.send_encrypted(cipher_a, 1, TYPE_AUDIO, b"opus-frame",
+                                           targets=[Peer(host="127.0.0.1", port=_port_of(relay))])
 
         await asyncio.sleep(0.3)
         assert TYPE_AUDIO in received_by_c
@@ -100,10 +98,8 @@ async def _relay_disabled_by_default_does_not_forward():
         non_relay.transport.add_peer("c", Peer(host="127.0.0.1", port=_port_of(client_c)))
 
         cipher_a = client_a.ciphers[1]
-        seq = client_a.transport.next_seq()
-        ciphertext = cipher_a.encrypt(1, seq, b"opus-frame")
-        client_a.transport.send(1, seq, ciphertext, ptype=TYPE_AUDIO,
-                                 targets=[Peer(host="127.0.0.1", port=_port_of(non_relay))])
+        client_a.transport.send_encrypted(cipher_a, 1, TYPE_AUDIO, b"opus-frame",
+                                           targets=[Peer(host="127.0.0.1", port=_port_of(non_relay))])
 
         await asyncio.sleep(0.3)
         assert TYPE_AUDIO not in received_by_c
@@ -163,7 +159,8 @@ async def _relay_deduplicates_repeated_sequence_numbers():
 
         cipher_a = client_a.ciphers[1]
         seq = client_a.transport.next_seq()
-        ciphertext = cipher_a.encrypt(1, seq, b"opus-frame")
+        header = Header(VERSION, TYPE_AUDIO, 1, client_a.config.sender_id, seq)
+        ciphertext = cipher_a.encrypt(header, b"opus-frame")
         for _ in range(3):  # same (sender_id, seq) resent repeatedly
             client_a.transport.send(1, seq, ciphertext, ptype=TYPE_AUDIO,
                                      targets=[Peer(host="127.0.0.1", port=_port_of(relay))])
