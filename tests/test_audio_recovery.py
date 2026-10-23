@@ -188,3 +188,51 @@ def test_watchdog_switches_back_when_configured_device_returns(fake_sd, monkeypa
     asyncio.run(run())
 
     assert client.mic.device_name == "John's Buds FE" and not client.mic.on_fallback
+
+
+def test_watchdog_backs_off_while_audio_never_returns(fake_sd, monkeypatch, caplog):
+    """Like a Mac asleep with the lid closed: reopening succeeds but no audio
+    ever flows. Retries must slow down instead of toggling the mic every few
+    seconds all night, and the outage is logged once, not per retry."""
+    monkeypatch.setattr(client_mod, "_AUDIO_WATCHDOG_INTERVAL_S", 0.005)
+    monkeypatch.setattr(client_mod, "_AUDIO_RETRY_MIN_S", 0.05)
+    monkeypatch.setattr(client_mod, "_AUDIO_RETRY_MAX_S", 0.2)
+    monkeypatch.setattr(audio, "STALL_TIMEOUT_S", 0.01)
+    client = _make_client()
+    client.mic.start()
+    client.speaker.start()
+    opened_at_start = len(fake_sd.opened)
+
+    async def run():
+        task = asyncio.create_task(client._audio_watchdog_loop())
+        await asyncio.sleep(1.0)
+        task.cancel()
+    asyncio.run(run())
+
+    reopens = (len(fake_sd.opened) - opened_at_start) // 2
+    # 0.05, 0.1, 0.2, 0.2, ... within 1s is about 6; retrying on every stall
+    # without backoff would be dozens.
+    assert 2 <= reopens <= 9
+    assert caplog.text.count("reopening audio devices") == 1
+    assert caplog.text.count("retrying less often") == 1
+
+
+def test_watchdog_backoff_resets_once_audio_flows(fake_sd, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="outpost.client")
+    monkeypatch.setattr(client_mod, "_AUDIO_WATCHDOG_INTERVAL_S", 0.005)
+    monkeypatch.setattr(client_mod, "_AUDIO_RETRY_MIN_S", 0.05)
+    monkeypatch.setattr(audio, "STALL_TIMEOUT_S", 0.01)
+    client = _make_client()
+    client.mic.start()
+    client.speaker.start()
+
+    async def run():
+        task = asyncio.create_task(client._audio_watchdog_loop())
+        await asyncio.sleep(0.3)  # outage: retries back off
+        for _ in range(20):       # computer wakes: callbacks resume
+            client.mic.last_callback = client.speaker.last_callback = audio.time.monotonic()
+            await asyncio.sleep(0.01)
+        task.cancel()
+    asyncio.run(run())
+
+    assert "audio is flowing again" in caplog.text

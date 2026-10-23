@@ -48,6 +48,14 @@ log = logging.getLogger(__name__)
 # look for it coming back.
 _AUDIO_WATCHDOG_INTERVAL_S = 1.0
 _AUDIO_DEVICE_RECHECK_S = 15.0
+# When reopening doesn't bring audio back, wait longer before each further
+# try, from _MIN up to _MAX. macOS doesn't run audio at all while it's
+# asleep with the lid closed (including its periodic background wakes), and
+# retrying every few seconds for hours toggled the mic on and off tens of
+# thousands of times overnight - enough to wedge the menu bar's mic
+# indicator.
+_AUDIO_RETRY_MIN_S = 3.0
+_AUDIO_RETRY_MAX_S = 300.0
 
 # Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
 # not to be mistaken for an incoming transmission.
@@ -761,20 +769,36 @@ class OutpostClient:
         TYPE_START (so peers see who's "speaking") but _tx_loop never gets a
         frame, so no audio goes out. While a configured device is missing
         the system default stands in, and the configured one is switched
-        back to once it reappears."""
+        back to once it reappears. Retries back off (see _AUDIO_RETRY_*)
+        while reopening doesn't help, e.g. for as long as the computer is
+        asleep."""
         loop = asyncio.get_running_loop()
         streams = (self.mic, self.speaker)
         last_device_check = time.monotonic()
-        failing = False
+        failing = False        # an outage has been logged and not yet recovered
+        retry_delay = 0.0
+        next_retry = 0.0
+        reopened_at: float | None = None
         while True:
             await asyncio.sleep(_AUDIO_WATCHDOG_INTERVAL_S)
+            now = time.monotonic()
+            if reopened_at is not None and all(s.last_callback > reopened_at for s in streams):
+                # Audio has flowed since the last reopen - it worked.
+                if failing:
+                    log.info("audio is flowing again")
+                failing = False
+                retry_delay = 0.0
+                reopened_at = None
+
             reason = None
             stalled = [s.kind for s in streams if s.stalled()]
             if stalled:
+                if now < next_retry:
+                    continue
                 reason = f"{' and '.join(stalled)} stopped delivering audio"
             elif (any(s.on_fallback for s in streams)
-                  and time.monotonic() - last_device_check >= _AUDIO_DEVICE_RECHECK_S):
-                last_device_check = time.monotonic()
+                  and now - last_device_check >= _AUDIO_DEVICE_RECHECK_S):
+                last_device_check = now
                 try:
                     devices = await list_devices_fresh()
                 except Exception as exc:
@@ -788,16 +812,21 @@ class OutpostClient:
 
             if not failing:
                 log.warning("audio: %s - reopening audio devices", reason)
+            elif retry_delay == _AUDIO_RETRY_MIN_S:
+                log.warning("audio: still no audio after reopening - retrying less often (up to every %.0fs) "
+                            "until it returns; expected while the computer is asleep", _AUDIO_RETRY_MAX_S)
+            else:
+                log.debug("audio: %s - retrying (next wait up to %.0fs)", reason, retry_delay)
             try:
                 await loop.run_in_executor(None, restart_streams, *streams)
             except Exception as exc:
                 if not failing:
                     log.error("could not reopen audio devices (%s) - will keep retrying", exc)
+            reopened_at = time.monotonic()
+            if stalled:
                 failing = True
-            else:
-                if failing:
-                    log.info("audio devices reopened")
-                failing = False
+                retry_delay = min(max(retry_delay * 2, _AUDIO_RETRY_MIN_S), _AUDIO_RETRY_MAX_S)
+                next_retry = reopened_at + retry_delay
 
     # --- transmit path ----------------------------------------------------
 
