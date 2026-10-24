@@ -11,9 +11,12 @@ most distros that means being in the `input` group.
 """
 from __future__ import annotations
 import asyncio
+import ctypes
 import glob
 import logging
 import select
+import socket
+import struct
 import sys
 import threading
 import time
@@ -151,17 +154,110 @@ class EvdevInput:
                     self._close(dev)
 
 
+class HandsFreeInput:
+    """Buttons on Bluetooth headsets/speaker mics that arrive as hands-free
+    (HFP/HSP) AT commands instead of key presses - e.g. the Inrico B02PTT's
+    PTT sends AT+XEVENT=TALK,1 on press and AT+XEVENT=TALK,0 on release,
+    and a plain headset button sends AT+CKPD=200.
+
+    The audio system (PipeWire) owns that connection and rejects commands
+    it doesn't know, so they're read passively from the kernel's Bluetooth
+    monitor, like `btmon` - which needs the CAP_NET_RAW capability (see
+    README "Bluetooth headset buttons")."""
+
+    DEVICE = "Bluetooth headset"
+    # (bytes in the command, key name, values to report)
+    COMMANDS = [
+        (b"AT+XEVENT=TALK,1", "HFP_TALK", (KEY_DOWN,)),
+        (b"AT+XEVENT=TALK,0", "HFP_TALK", (KEY_UP,)),
+        (b"AT+CKPD=200", "HFP_BUTTON", (KEY_DOWN, KEY_UP)),  # one message per press
+    ]
+
+    _AF_BLUETOOTH, _BTPROTO_HCI = 31, 1
+    _HCI_DEV_NONE, _HCI_CHANNEL_MONITOR = 0xFFFF, 2
+    _OP_ACL_RX = 5  # monitor opcode for incoming data packets
+
+    def __init__(self, on_event: EventCallback):
+        self._on_event = on_event
+        self._sock: socket.socket | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def open_monitor(cls) -> socket.socket:
+        """Raises PermissionError without CAP_NET_RAW. Python's own bind()
+        can't select the monitor channel, so it goes through libc."""
+        sock = socket.socket(cls._AF_BLUETOOTH, socket.SOCK_RAW, cls._BTPROTO_HCI)
+        addr = struct.pack("<HHH", cls._AF_BLUETOOTH, cls._HCI_DEV_NONE, cls._HCI_CHANNEL_MONITOR)
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.bind(sock.fileno(), addr, len(addr)) != 0:
+            err = ctypes.get_errno()
+            sock.close()
+            raise OSError(err, "can't open the Bluetooth monitor")
+        sock.settimeout(0.5)
+        return sock
+
+    def start(self) -> None:
+        self._sock = self.open_monitor()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="hfp-buttons", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
+        if self._sock:
+            self._sock.close()
+            self._sock = None
+
+    def devices(self) -> list[str]:
+        return [self.DEVICE]
+
+    def handle_frame(self, frame: bytes) -> None:
+        if len(frame) < 6 or struct.unpack_from("<H", frame)[0] != self._OP_ACL_RX:
+            return
+        if b"AT+" not in frame:
+            return
+        for pattern, key, values in self.COMMANDS:
+            if pattern in frame:
+                for value in values:
+                    self._on_event(self.DEVICE, key, value)
+                return
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self._sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if not self._stop.is_set():
+                    log.warning("buttons: Bluetooth monitor stopped: %s", exc)
+                return
+            try:
+                self.handle_frame(frame)
+            except Exception:
+                log.exception("buttons: bad Bluetooth monitor frame")
+
+
 class ButtonController:
     """Turns key events into client actions according to the configured
     bindings, and records presses for the web UI's "press a button" setup."""
 
-    def __init__(self, client, bindings: list[ButtonBinding], input_factory=None):
+    def __init__(self, client, bindings: list[ButtonBinding], input_factory=None, handsfree_factory=None):
         self.client = client
         self.bindings = list(bindings)
         self._input_factory = input_factory
+        # None = the real HandsFreeInput (Linux only); False = don't use one.
+        self._handsfree_factory = handsfree_factory
         self._input = None
+        self._handsfree = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self.unavailable_reason: str | None = None
+        # Why Bluetooth headset (hands-free) buttons aren't being read, if not.
+        self.handsfree_note: str | None = None
         # (device, key, monotonic time) of the most recent press.
         self.last_press: tuple[str, str, float] | None = None
         self._learn_future: asyncio.Future | None = None
@@ -171,29 +267,61 @@ class ButtonController:
 
     @property
     def running(self) -> bool:
-        return self._input is not None
+        return self._input is not None or self._handsfree is not None
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._start_handsfree()
         factory = self._input_factory
         if factory is None:
             evdev, reason = _load_evdev()
             if evdev is None:
-                self.unavailable_reason = reason
-                if self.bindings:
-                    log.warning("buttons: %s - button bindings won't work", reason)
+                if self._handsfree is None:
+                    self.unavailable_reason = reason
+                    if self.bindings:
+                        log.warning("buttons: %s - button bindings won't work", reason)
                 return
             factory = lambda on_event: EvdevInput(on_event, evdev)  # noqa: E731
         self._input = factory(self._on_event_threadsafe)
         self._input.start()
 
+    def _start_handsfree(self) -> None:
+        factory = self._handsfree_factory
+        if factory is False:
+            return
+        if factory is None:
+            if not sys.platform.startswith("linux"):
+                return
+            factory = HandsFreeInput
+        try:
+            handsfree = factory(self._on_event_threadsafe)
+            handsfree.start()
+        except PermissionError:
+            self.handsfree_note = (
+                "Bluetooth headset buttons (e.g. an Inrico PTT) need permission to read Bluetooth "
+                "traffic - see README \"Bluetooth headset buttons\"")
+            log.info("buttons: %s", self.handsfree_note)
+            return
+        except OSError as exc:
+            self.handsfree_note = f"Bluetooth headset buttons unavailable: {exc}"
+            log.info("buttons: %s", self.handsfree_note)
+            return
+        self._handsfree = handsfree
+        log.info("buttons: listening for Bluetooth headset buttons")
+
     def stop(self) -> None:
         if self._input is not None:
             self._input.stop()
             self._input = None
+        if self._handsfree is not None:
+            self._handsfree.stop()
+            self._handsfree = None
 
     def devices(self) -> list[str]:
-        return self._input.devices() if self._input is not None else []
+        devices = self._input.devices() if self._input is not None else []
+        if self._handsfree is not None:
+            devices = devices + self._handsfree.devices()
+        return devices
 
     def unreadable_devices(self) -> int:
         return getattr(self._input, "unreadable", 0) if self._input is not None else 0

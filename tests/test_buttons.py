@@ -288,3 +288,73 @@ def test_buttons_page_loads():
             resp = await tc.get("/buttons")
             assert resp.status == 200 and "Press a button" in await resp.text()
     asyncio.run(run())
+
+
+# --- Bluetooth headset (hands-free AT command) buttons ------------------------------
+
+from outpost.buttons import HandsFreeInput
+
+
+def _monitor_frame(opcode: int, rfcomm: bytes) -> bytes:
+    """A Bluetooth monitor frame: opcode/index/len header, then ACL + L2CAP
+    headers and the RFCOMM bytes."""
+    acl = bytes([0x0c, 0x20]) + len(rfcomm).to_bytes(2, "little") + bytes([0x41, 0x00]) + rfcomm
+    return opcode.to_bytes(2, "little") + b"\x00\x00" + len(acl).to_bytes(2, "little") + acl
+
+
+# Captured from an Inrico B02PTT: PTT press, release, battery report.
+TALK_DOWN = bytes.fromhex("51ef23") + b"AT+XEVENT=TALK,1\r" + b"\xeb"
+TALK_UP = bytes.fromhex("51ef23") + b"AT+XEVENT=TALK,0\r" + b"\xeb"
+BATTERY = bytes.fromhex("51ef2b") + b"AT+IPHONEACCEV=1,1,7\r" + b"\xeb"
+
+
+def test_handsfree_ptt_commands_become_button_events():
+    got = []
+    hf = HandsFreeInput(lambda *e: got.append(e))
+    hf.handle_frame(_monitor_frame(5, TALK_DOWN))
+    hf.handle_frame(_monitor_frame(5, BATTERY))
+    hf.handle_frame(_monitor_frame(4, TALK_DOWN))   # outgoing data - not a button
+    hf.handle_frame(_monitor_frame(5, TALK_UP))
+    hf.handle_frame(_monitor_frame(5, b"AT+CKPD=200\r"))
+    hf.handle_frame(b"\x05\x00")                     # truncated
+    d = HandsFreeInput.DEVICE
+    assert got == [(d, "HFP_TALK", KEY_DOWN), (d, "HFP_TALK", KEY_UP),
+                   (d, "HFP_BUTTON", KEY_DOWN), (d, "HFP_BUTTON", KEY_UP)]
+
+
+def test_handsfree_ptt_drives_push_to_talk():
+    class FakeHandsFree(HandsFreeInput):
+        def start(self): pass
+        def stop(self): pass
+
+    async def run():
+        client = _client(bindings=[ButtonBinding("HFP_TALK", "ptt", HandsFreeInput.DEVICE)])
+        client.buttons._handsfree_factory = FakeHandsFree
+        client.buttons.start()
+        assert HandsFreeInput.DEVICE in client.buttons.devices()
+        hf = client.buttons._handsfree
+        hf.handle_frame(_monitor_frame(5, TALK_DOWN))
+        await asyncio.sleep(0.01)  # events hop onto the event loop
+        assert client._ptt_active
+        hf.handle_frame(_monitor_frame(5, TALK_UP))
+        await asyncio.sleep(0.01)
+        assert not client._ptt_active
+    asyncio.run(run())
+
+
+def test_handsfree_without_permission_explains_why():
+    def denied(on_event):
+        class Denied:
+            def start(self): raise PermissionError(1, "Operation not permitted")
+        return Denied()
+
+    async def run():
+        client = _client()
+        client.buttons._handsfree_factory = denied
+        client.buttons.start()
+        assert client.buttons.running  # ordinary buttons still work
+        assert "permission" in client.buttons.handsfree_note
+        async with TestClient(TestServer(WebUI(client).app)) as tc:
+            state = await (await tc.get("/api/buttons")).json()
+            assert state["notes"] == [client.buttons.handsfree_note]
+    asyncio.run(run())

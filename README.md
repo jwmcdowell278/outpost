@@ -1062,6 +1062,49 @@ Pi's system volume too.
 
 In Docker, pass the input devices through: `--device /dev/input`.
 
+### Bluetooth headset buttons (e.g. Inrico B02PTT)
+
+Some Bluetooth speaker mics and PTT buttons don't send key presses at all.
+Instead they send hands-free commands over the same connection as the
+audio - the Inrico B02PTT's PTT sends `AT+XEVENT=TALK,1` on press and
+`AT+XEVENT=TALK,0` on release, and a plain headset button sends
+`AT+CKPD=200`. Outpost reads these and shows them on the Buttons page as
+device **Bluetooth headset**, keys `HFP_TALK` (press/release, so it suits
+"Push to talk (hold)") and `HFP_BUTTON` (one press per click - use "Push to
+talk (press on, press off)").
+
+The audio system owns that connection, so Outpost reads it passively from
+the kernel's Bluetooth monitor (like `btmon`). That needs the `CAP_NET_RAW`
+permission. The narrowest way to give it is to a private copy of Python in
+Outpost's virtual environment, so nothing else on the system gets it:
+
+```bash
+cd ~/outpost/.venv/bin
+cp --remove-destination /usr/bin/python3.11 python3.11   # replaces the symlink with a copy
+sudo setcap cap_net_raw+ep python3.11
+```
+
+Use your Python version in place of 3.11. Re-run both lines after the
+system Python is updated (`apt upgrade`), since the copy doesn't update
+with it. To undo, delete the copy and run `ln -s /usr/bin/python3.11 python3.11`.
+Running Outpost as a systemd service with `AmbientCapabilities=CAP_NET_RAW`
+works too. Without the permission everything else still works, and the
+Buttons page says headset buttons need it.
+
+**The mic on a Bluetooth headset** only works in hands-free mode. By
+default the Pi connects in high-quality playback mode (A2DP), which has no
+mic - and the system's default "mic" is then a loopback of the speaker, so
+Outpost transmits silence. Switch to hands-free (mSBC is the 16 kHz
+variant, matching Outpost's audio):
+
+```bash
+pactl list cards | grep -E 'Name: bluez|headset-head-unit'   # find the card name
+pactl set-card-profile bluez_card.XX_XX_XX_XX_XX_XX headset-head-unit-msbc
+```
+
+The Pi remembers the choice for that device. In hands-free mode the
+headset's volume buttons are handled by the headset itself.
+
 ### Bluetooth page
 
 The web UI's **Bluetooth** page manages the device's Bluetooth from a

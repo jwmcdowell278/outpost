@@ -843,6 +843,9 @@ function render(data) {{
   list.innerHTML = data.devices.length
     ? data.devices.map(d => '<div>' + esc(d) + '</div>').join('')
     : 'No input devices with buttons found.';
+  for (const note of (data.notes || [])) {{
+    list.innerHTML += `<div class="error">${{esc(note)}}</div>`;
+  }}
   if (data.unreadable_devices) {{
     list.innerHTML += `<div class="error">${{data.unreadable_devices}} input device(s) can't be read - add this user to the input group (sudo usermod -aG input $USER) and restart Outpost.</div>`;
   }}
@@ -1167,6 +1170,7 @@ class WebUI:
             "bindings": button_bindings_to_raw(self.client.config.button_bindings),
             "devices": buttons.devices() if buttons is not None else [],
             "unreadable_devices": buttons.unreadable_devices() if buttons is not None else 0,
+            "notes": [buttons.handsfree_note] if buttons is not None and buttons.handsfree_note else [],
             "last_press": ({"device": last[0], "key": last[1], "age_s": round(time.monotonic() - last[2], 1)}
                            if last else None),
         }
