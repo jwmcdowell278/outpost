@@ -236,3 +236,53 @@ def test_watchdog_backoff_resets_once_audio_flows(fake_sd, monkeypatch, caplog):
     asyncio.run(run())
 
     assert "audio is flowing again" in caplog.text
+
+
+def test_startup_does_not_wait_forever_on_a_hung_audio_device(fake_sd, monkeypatch):
+    """A Bluetooth hands-free link that never comes up made opening the
+    speaker block forever, so the web UI (started after audio) never
+    appeared. Startup must carry on and leave audio to the watchdog."""
+    import threading
+    monkeypatch.setattr(client_mod, "_AUDIO_OPEN_TIMEOUT_S", 0.2)
+    release = threading.Event()
+    real_stream = fake_sd._stream
+
+    def hanging(kind):
+        cls = real_stream(kind)
+        if kind != "output":
+            return cls
+
+        class Hangs(cls):
+            def start(self):
+                release.wait(5)
+        return Hangs
+    monkeypatch.setattr(fake_sd, "_stream", hanging)
+
+    async def run():
+        client = _make_client(enable_multicast=False)
+        started = []
+        client.web_ui = type("UI", (), {"start": lambda self: _note(started), "stop": lambda self: _none()})()
+        await asyncio.wait_for(client.start(), 2)
+        assert started == [True]
+        assert client._tx_task is not None and client._audio_watchdog_task is not None
+        release.set()
+        await client.stop()
+
+    async def _note(started):
+        started.append(True)
+
+    async def _none():
+        pass
+    asyncio.run(run())
+
+
+def test_startup_survives_an_audio_device_that_fails_to_open(fake_sd, monkeypatch, caplog):
+    fake_sd.fail_open = True
+
+    async def run():
+        client = _make_client(enable_multicast=False)
+        await asyncio.wait_for(client.start(), 2)
+        assert client.mic.stalled()  # so the watchdog retries it
+        await client.stop()
+    asyncio.run(run())
+    assert "could not open the input audio device" in caplog.text

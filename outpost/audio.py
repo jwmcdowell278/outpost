@@ -200,6 +200,11 @@ class MicCapture(_AudioStream):
             callback=self._callback,
         )
 
+    def wake_reader(self) -> None:
+        """Unblocks a read_frame() call waiting on a stopped stream (e.g. the
+        client's transmit thread), so shutdown doesn't wait on it forever."""
+        self._queue.put(b"")
+
     def read_frame(self, timeout: float | None = None) -> bytes:
         # Keeps blocking across a restart_streams() - the reopened stream
         # feeds the same queue.

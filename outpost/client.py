@@ -56,6 +56,8 @@ _AUDIO_DEVICE_RECHECK_S = 15.0
 # thousands of times overnight - enough to wedge the menu bar's mic
 # indicator.
 _AUDIO_RETRY_MIN_S = 3.0
+# How long startup waits for the mic/speaker to open before carrying on.
+_AUDIO_OPEN_TIMEOUT_S = 10.0
 _AUDIO_RETRY_MAX_S = 300.0
 
 # Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
@@ -748,19 +750,37 @@ class OutpostClient:
             self.pex.start()
         if self.subnet_scan:
             self.subnet_scan.start()
-        if not self.relay_only:
-            self.mic.start()
-            self.speaker.start()
-            self._tx_task = asyncio.create_task(self._tx_loop())
-        self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
-        if self._site_networks:
-            self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
-        if not self.relay_only:
-            self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+        # The web UI comes up before audio, so it's reachable (to see and fix
+        # what's wrong) even when an audio device won't open.
         if self.buttons:
             self.buttons.start()
         if self.web_ui:
             await self.web_ui.start()
+        self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
+        if self._site_networks:
+            self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
+        if not self.relay_only:
+            await self._open_audio()
+            self._tx_task = asyncio.create_task(self._tx_loop())
+            self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+
+    async def _open_audio(self) -> None:
+        """Opens the mic and speaker without letting a bad device stop the
+        client from starting: one that fails to open, or hangs opening
+        (seen with a stuck Bluetooth hands-free link), is left to the audio
+        watchdog to keep retrying."""
+        def open_streams():
+            for stream in (self.mic, self.speaker):
+                try:
+                    stream.start()
+                except Exception as exc:
+                    log.error("could not open the %s audio device (%s) - will keep retrying", stream.kind, exc)
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, open_streams), _AUDIO_OPEN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.error("audio devices didn't open within %.0fs (a Bluetooth audio link may be stuck) - "
+                      "starting without them and retrying", _AUDIO_OPEN_TIMEOUT_S)
 
     async def stop(self) -> None:
         if self._tx_task:
@@ -787,6 +807,7 @@ class OutpostClient:
             self.discovery.stop()
         if self.mic:
             self.mic.stop()
+            self.mic.wake_reader()
         if self.speaker:
             self.speaker.stop()
         self.transport.stop()
