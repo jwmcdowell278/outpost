@@ -4,3 +4,4 @@
 hidapi>=0.14.0      # USB HID PTT devices (footswitches, buttons) - needs system hidapi lib (brew/apt install hidapi)
 pyserial>=3.5       # Serial/RS-232 PTT interfaces (e.g. radio interface boxes)
 gpiozero>=2.0       # GPIO PTT buttons on embedded boards (Raspberry Pi etc.)
+evdev>=1.6; sys_platform == "linux"  # Bluetooth/USB buttons bound from the web UI's Buttons page

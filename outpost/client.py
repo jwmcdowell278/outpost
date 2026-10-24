@@ -25,6 +25,7 @@ except OSError as _audio_import_error:
     _AUDIO_IMPORT_ERROR: OSError | None = _audio_import_error
 else:
     _AUDIO_IMPORT_ERROR = None
+from .buttons import ButtonController
 from .codec import OpusCodec, OpusDecoder
 from .mixer import Mixer
 from .crypto import ChannelCipher
@@ -312,6 +313,14 @@ class OutpostClient:
             if config.enable_subnet_scan and self.pex is not None
             else None
         )
+        # Hardware buttons (PTT, volume, channel) - see buttons.py. Only read
+        # input devices when there's something to do with them: bindings to
+        # act on, or the web UI's Buttons page to set them up from.
+        self.buttons = (
+            ButtonController(self, config.button_bindings)
+            if not self.relay_only and (config.button_bindings or config.enable_web_ui)
+            else None
+        )
         self.web_ui = (
             WebUI(self, host=config.web_ui_host, port=config.web_ui_port, token=config.web_ui_token)
             if config.enable_web_ui
@@ -495,6 +504,24 @@ class OutpostClient:
             self._listening_changed({previous.id, self.active_channel.id})
         if self.channel_announcer is not None:
             self.channel_announcer.announce(f"Channel {name}")
+
+    def step_channel(self, delta: int) -> None:
+        """Make the next (+1) or previous (-1) channel, by id, the active
+        one - wrapping around at either end."""
+        if self.active_channel is None or not self.config.channels:
+            return
+        ids = sorted(self.config.channels)
+        index = ids.index(self.active_channel.id) if self.active_channel.id in ids else 0
+        self.set_active_channel(self.config.channels[ids[(index + delta) % len(ids)]].name)
+
+    def adjust_volume(self, delta: float) -> float:
+        """Raise/lower the active channel's volume by `delta`, kept within
+        0.0-1.0. Returns the new volume."""
+        if self.active_channel is None:
+            return 0.0
+        volume = round(min(1.0, max(0.0, self.channel_volume(self.active_channel.id) + delta)), 2)
+        self.set_channel_volume(self.active_channel.name, volume)
+        return volume
 
     def listening_channel_ids(self) -> set[int]:
         active = {self.active_channel.id} if self.active_channel else set()
@@ -730,6 +757,8 @@ class OutpostClient:
             self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
         if not self.relay_only:
             self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+        if self.buttons:
+            self.buttons.start()
         if self.web_ui:
             await self.web_ui.start()
 
@@ -748,6 +777,8 @@ class OutpostClient:
             self._bridge_hello_task = None
         if self.web_ui:
             await self.web_ui.stop()
+        if self.buttons:
+            self.buttons.stop()
         if self.pex:
             self.pex.stop()
         if self.subnet_scan:

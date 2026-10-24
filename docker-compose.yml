@@ -17,6 +17,7 @@ services:
     #   - /dev/gpiomem:/dev/gpiomem        # --ptt gpio (Raspberry Pi)
     #   - /dev/ttyUSB0:/dev/ttyUSB0        # --ptt serial
     #   - /dev/bus/usb:/dev/bus/usb        # --ptt hid
+    #   - /dev/input:/dev/input            # buttons bound on the web UI's Buttons page
     command:
       - --config=/config/outpost.yaml
       - --channel=ops

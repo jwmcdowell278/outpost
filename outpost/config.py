@@ -28,6 +28,29 @@ class Peer:
     port: int
 
 
+# Things a hardware button can be bound to (see ButtonBinding) -> label
+# shown in the web UI.
+BUTTON_ACTIONS: dict[str, str] = {
+    "ptt": "Push to talk (hold)",
+    "ptt_toggle": "Push to talk (press on, press off)",
+    "volume_up": "Volume up",
+    "volume_down": "Volume down",
+    "channel_up": "Next channel",
+    "channel_down": "Previous channel",
+}
+
+
+@dataclass(frozen=True)
+class ButtonBinding:
+    """A key on an input device (a Bluetooth PTT button, USB footswitch,
+    keyboard...) and what it does - see outpost/buttons.py. `key` is the
+    Linux input key name (e.g. "KEY_F13", "BTN_0"); `device` is the input
+    device's name, or None for that key on any device."""
+    key: str
+    action: str
+    device: str | None = None
+
+
 @dataclass(frozen=True)
 class OutpostConfig:
     sender_id: int
@@ -241,6 +264,11 @@ class OutpostConfig:
     channel_volumes: dict[str, float] = field(default_factory=dict)
     duck_monitored_channels: bool = True
 
+    # Hardware buttons bound to actions (PTT, volume, channel up/down) -
+    # set up from the web UI's Buttons page, which saves them here. Linux
+    # only (reads /dev/input via evdev). See README "Hardware buttons".
+    button_bindings: list[ButtonBinding] = field(default_factory=list)
+
     # Which microphone / speaker to use when a node has more than one (e.g.
     # a USB headset plus a built-in mic). Either a case-insensitive
     # substring of the device name (preferred - indices can change when USB
@@ -389,6 +417,34 @@ def _validate_volume(v):
     if not 0.0 <= v <= 1.0:
         raise ValueError("volume must be between 0.0 and 1.0")
     return v
+
+
+def load_button_bindings(raw_value) -> list[ButtonBinding]:
+    """Parses/validates button_bindings (a list of {key, action, device?}
+    mappings) - raises ValueError on anything malformed."""
+    if raw_value is None:
+        return []
+    if not isinstance(raw_value, list):
+        raise ValueError("button_bindings must be a list")
+    bindings = []
+    for entry in raw_value:
+        if not isinstance(entry, dict):
+            raise ValueError("each button_bindings entry must be a mapping with key and action")
+        key, action, device = entry.get("key"), entry.get("action"), entry.get("device")
+        if not isinstance(key, str) or not key or len(key) > 64:
+            raise ValueError("button_bindings: 'key' must be a key name like KEY_F13")
+        if action not in BUTTON_ACTIONS:
+            raise ValueError(f"button_bindings: unknown action {action!r} "
+                             f"(one of {', '.join(BUTTON_ACTIONS)})")
+        if device is not None and (not isinstance(device, str) or len(device) > _MAX_DEVICE_LEN):
+            raise ValueError("button_bindings: 'device' must be a device name")
+        bindings.append(ButtonBinding(key=key, action=action, device=device or None))
+    return bindings
+
+
+def button_bindings_to_raw(bindings: list[ButtonBinding]) -> list[dict]:
+    """The YAML form of `bindings` - the inverse of load_button_bindings."""
+    return [{"key": b.key, "action": b.action, "device": b.device} for b in bindings]
 
 
 def _load_monitor_channels(raw_value, channels: dict) -> list[str]:
@@ -592,6 +648,7 @@ def validate_config_yaml(text: str) -> None:
     for entry in raw.get("peers", []) or []:
         if not isinstance(entry, dict) or not {"host", "port"} <= entry.keys():
             raise ValueError("each peers entry needs host and port")
+    load_button_bindings(raw.get("button_bindings"))
 
 
 def write_config_text(path: str, text: str) -> None:
@@ -750,6 +807,7 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         multicast_min_listeners=_validate_positive_int(raw.get("multicast_min_listeners", 5)),
         monitor_channels=_load_monitor_channels(raw.get("monitor_channels"), channels),
         channel_volumes=_load_channel_volumes(raw.get("channel_volumes")),
+        button_bindings=load_button_bindings(raw.get("button_bindings")),
         duck_monitored_channels=raw.get("duck_monitored_channels", True),
         input_device=_validate_audio_device(raw.get("input_device")),
         output_device=_validate_audio_device(raw.get("output_device")),

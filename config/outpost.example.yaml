@@ -185,6 +185,16 @@ multicast_min_listeners: 5
 # also be changed live from the web UI's Status page.
 # monitor_channels: [main]
 # channel_volumes: {main: 0.6}
+
+# Hardware buttons (Bluetooth PTT buttons, USB footswitches, media keys...)
+# and what they do: ptt, ptt_toggle, volume_up, volume_down, channel_up,
+# channel_down. Easiest to set up from the web UI's Buttons page (press the
+# button and it's recorded). Linux only. device is the input device's name;
+# leave it out to accept that key from any device. See README "Hardware
+# buttons".
+# button_bindings:
+#   - {key: KEY_F13, action: ptt, device: INRICO B01}
+#   - {key: KEY_VOLUMEUP, action: volume_up}
 duck_monitored_channels: true
 
 # Which microphone / speaker to use when this node has more than one (e.g. a

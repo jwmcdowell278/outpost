@@ -11,7 +11,9 @@ responses never include channel or mesh keys.
 """
 from __future__ import annotations
 import base64
+import html
 import logging
+import time
 from dataclasses import replace
 
 try:
@@ -19,6 +21,7 @@ try:
 except ImportError:
     web = None
 
+from .bluetooth import BluetoothManager, BluetoothError
 from .crypto import generate_channel_key, KEY_SIZE
 from .config import (
     EDITABLE_FIELDS,
@@ -33,6 +36,9 @@ from .config import (
     add_peer_to_file,
     remove_peer_from_file,
     _validate_volume,
+    BUTTON_ACTIONS,
+    load_button_bindings,
+    button_bindings_to_raw,
 )
 
 log = logging.getLogger(__name__)
@@ -70,7 +76,7 @@ _STYLE = """
   h1 { font-size: 1.35rem; margin: 1rem 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; letter-spacing: 0.02em; }
   h1 img.brand { height: 1.5em; width: 1.5em; }
   h2 { font-size: 0.95rem; margin: 0 0 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  nav.tabs { display: flex; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0 0 0.2rem; }
+  nav.tabs { display: flex; flex-wrap: wrap; gap: 0.3rem; border-bottom: 1px solid var(--border); margin: 0 0 0.2rem; }
   nav.tabs a {
     padding: 0.5rem 0.9rem; font-size: 0.9rem; font-weight: 600; text-decoration: none;
     color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
@@ -95,10 +101,13 @@ _STYLE = """
   th { color: var(--muted); font-weight: 500; }
   .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 1rem; font-size: 0.72rem; background: var(--border); }
   .pill.live { background: var(--accent); color: var(--accent-text); }
+  .pill.low { background: var(--danger); color: white; }
   .field-row { justify-content: space-between; }
   .field-row .name { font-size: 0.88rem; }
   .muted { color: var(--muted); font-size: 0.8rem; }
   #saveMsg { font-size: 0.82rem; min-height: 1.1rem; }
+  .error { color: var(--danger); }
+  .ok { color: var(--accent); }
   #saveMsg.error { color: var(--danger); }
   #saveMsg.ok { color: var(--accent); }
 </style>
@@ -133,6 +142,8 @@ def _nav(active: str) -> str:
   <a href="/"{cls('status')}>Status</a>
   <a href="/channels"{cls('channels')}>Channels</a>
   <a href="/peers"{cls('peers')}>Peers</a>
+  <a href="/buttons"{cls('buttons')}>Buttons</a>
+  <a href="/bluetooth"{cls('bluetooth')}>Bluetooth</a>
   <a href="/settings"{cls('settings')}>Settings</a>
 </nav>"""
 
@@ -735,6 +746,319 @@ loadPeers();
 </html>
 """
 
+_BUTTON_ACTION_OPTIONS = "".join(
+    f'<option value="{name}">{html.escape(label)}</option>' for name, label in BUTTON_ACTIONS.items())
+
+_BUTTONS_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Buttons</title>
+{_FAVICON_LINK}
+{_STYLE}
+</head>
+<body>
+{_BRAND_H1}
+{_nav('buttons')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div class="card">
+  <h2>Button bindings</h2>
+  <div id="availability" class="muted"></div>
+  <table id="bindingTable">
+    <thead><tr><th>Button</th><th>Device</th><th>Action</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="muted" id="noBindings">No buttons set up yet.</div>
+  <div class="muted" id="lastPress"></div>
+</div>
+
+<div class="card" id="addCard">
+  <h2>Add a button</h2>
+  <div class="row">
+    <label>Action <select id="action">{_BUTTON_ACTION_OPTIONS}</select></label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="anyDevice"> Work from any device, not just the one I press it on</label>
+  </div>
+  <div class="row">
+    <button id="learn" type="button">Press a button&hellip;</button>
+    <span id="learnMsg"></span>
+  </div>
+  <div class="muted">Click, then press the button on your PTT device, footswitch or keyboard within 15 seconds. Changes apply immediately and are saved to the config file.</div>
+</div>
+
+<div class="card">
+  <h2>Input devices</h2>
+  <div id="deviceList" class="muted">loading...</div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+let actions = {{}};
+let bindings = [];
+let learning = false;
+
+function esc(s) {{
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}}
+
+function setMsg(text, cls) {{
+  const m = document.getElementById('learnMsg');
+  m.className = cls || ''; m.textContent = text;
+}}
+
+function render(data) {{
+  actions = data.actions;
+  bindings = data.bindings;
+  const avail = document.getElementById('availability');
+  avail.className = data.available ? 'muted' : 'error';
+  avail.textContent = data.available ? '' : ('Buttons unavailable: ' + data.reason);
+  document.getElementById('learn').disabled = learning || !data.available || !data.can_save;
+  if (data.available && !data.can_save) setMsg('no config file - bindings can\\'t be saved', 'error');
+
+  const tbody = document.querySelector('#bindingTable tbody');
+  tbody.textContent = '';
+  bindings.forEach((b, i) => {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{esc(b.key)}}</td><td>${{b.device ? esc(b.device) : '<span class="pill">any</span>'}}</td>` +
+      `<td>${{esc(actions[b.action] || b.action)}}</td><td><button type="button" data-i="${{i}}" class="removeBtn">Remove</button></td>`;
+    tbody.appendChild(tr);
+  }});
+  document.getElementById('noBindings').style.display = bindings.length ? 'none' : '';
+
+  const lp = data.last_press;
+  document.getElementById('lastPress').textContent = lp
+    ? `Last press: ${{lp.key}} on ${{lp.device}} (${{lp.age_s < 60 ? lp.age_s.toFixed(0) + 's' : Math.round(lp.age_s / 60) + 'm'}} ago)` : '';
+
+  const list = document.getElementById('deviceList');
+  list.innerHTML = data.devices.length
+    ? data.devices.map(d => '<div>' + esc(d) + '</div>').join('')
+    : 'No input devices with buttons found.';
+  if (data.unreadable_devices) {{
+    list.innerHTML += `<div class="error">${{data.unreadable_devices}} input device(s) can't be read - add this user to the input group (sudo usermod -aG input $USER) and restart Outpost.</div>`;
+  }}
+}}
+
+async function refresh() {{
+  try {{ render(await api('/api/buttons')); }}
+  catch (e) {{ document.getElementById('availability').textContent = 'error: ' + e.message; }}
+}}
+
+async function saveBindings(next) {{
+  const data = await api('/api/buttons/bindings', {{
+    method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ bindings: next }}),
+  }});
+  render(data);
+}}
+
+document.getElementById('learn').addEventListener('click', async () => {{
+  const btn = document.getElementById('learn');
+  btn.disabled = true;
+  learning = true;
+  setMsg('Press the button now...', 'ok');
+  try {{
+    const pressed = await api('/api/buttons/learn', {{ method: 'POST' }});
+    const binding = {{
+      key: pressed.key,
+      device: document.getElementById('anyDevice').checked ? null : pressed.device,
+      action: document.getElementById('action').value,
+    }};
+    const dup = bindings.some(b => b.key === binding.key && b.device === binding.device && b.action === binding.action);
+    if (!dup) await saveBindings([...bindings, binding]);
+    setMsg(`${{pressed.key}} on ${{pressed.device}} → ${{actions[binding.action]}}`, 'ok');
+  }} catch (e) {{
+    setMsg(e.message, 'error');
+  }} finally {{
+    learning = false;
+    btn.disabled = false;
+  }}
+}});
+
+document.getElementById('bindingTable').addEventListener('click', async (e) => {{
+  if (!e.target.classList.contains('removeBtn')) return;
+  const i = Number(e.target.dataset.i);
+  try {{ await saveBindings(bindings.filter((_, j) => j !== i)); }}
+  catch (err) {{ setMsg(err.message, 'error'); }}
+}});
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
+"""
+
+
+_BLUETOOTH_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Bluetooth</title>
+{_FAVICON_LINK}
+{_STYLE}
+</head>
+<body>
+{_BRAND_H1}
+{_nav('bluetooth')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div class="card">
+  <h2>Bluetooth</h2>
+  <div class="row field-row">
+    <span id="adapterLine" class="name">loading...</span>
+    <button id="powerBtn" type="button" disabled>&hellip;</button>
+  </div>
+  <div class="row">
+    <button id="scanBtn" type="button" disabled>Scan for devices</button>
+  </div>
+  <div id="btMsg"></div>
+</div>
+
+<div class="card">
+  <h2>My devices</h2>
+  <table id="pairedTable">
+    <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="muted" id="noPaired">No paired devices.</div>
+</div>
+
+<div class="card">
+  <h2>Nearby devices</h2>
+  <table id="nearbyTable">
+    <thead><tr><th>Device</th><th>Signal</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="muted" id="noNearby">None found - put your device in pairing mode and click Scan for devices.</div>
+  <div class="muted">Pairing also trusts the device, so it reconnects by itself after a restart or after going out of range. Devices that need a PIN typed in or a code confirmed have to be paired with bluetoothctl on the device itself.</div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+let busy = false;
+let lastState = null;
+
+function esc(s) {{
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}}
+
+function setMsg(text, cls) {{
+  const m = document.getElementById('btMsg');
+  m.className = cls || 'muted'; m.textContent = text;
+}}
+
+function battery(b) {{
+  if (b == null) return '<span class="muted">-</span>';
+  return `<span class="pill${{b < 20 ? ' low' : ''}}">${{b}}%</span>`;
+}}
+
+function render(s) {{
+  lastState = s;
+  const power = document.getElementById('powerBtn');
+  const scan = document.getElementById('scanBtn');
+  const line = document.getElementById('adapterLine');
+  if (!s.available || s.error) {{
+    line.textContent = s.reason || s.error;
+    line.className = 'name error';
+    power.disabled = scan.disabled = true;
+    return;
+  }}
+  line.className = 'name';
+  line.textContent = `${{s.adapter || 'Adapter'}} · ${{s.powered ? 'On' : 'Off'}}`;
+  power.textContent = s.powered ? 'Turn off' : 'Turn on';
+  power.disabled = busy;
+  scan.disabled = busy || !s.powered || s.scanning;
+  scan.textContent = s.scanning ? 'Scanning...' : 'Scan for devices';
+
+  const paired = s.devices.filter(d => d.paired);
+  const nearby = s.devices.filter(d => !d.paired);
+  const pt = document.querySelector('#pairedTable tbody');
+  pt.textContent = '';
+  for (const d of paired) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{esc(d.name)}}<div class="muted">${{esc(d.address)}}</div></td>` +
+      `<td>${{d.connected ? '<span class="pill live">connected</span>' : '<span class="pill">not connected</span>'}}</td>` +
+      `<td>${{battery(d.battery)}}</td>` +
+      `<td><button type="button" data-a="${{d.address}}" data-act="${{d.connected ? 'disconnect' : 'connect'}}">${{d.connected ? 'Disconnect' : 'Connect'}}</button> ` +
+      `<button type="button" data-a="${{d.address}}" data-act="unpair">Unpair</button></td>`;
+    pt.appendChild(tr);
+  }}
+  document.getElementById('noPaired').style.display = paired.length ? 'none' : '';
+  const nt = document.querySelector('#nearbyTable tbody');
+  nt.textContent = '';
+  for (const d of nearby) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{esc(d.name)}}<div class="muted">${{esc(d.address)}}</div></td>` +
+      `<td>${{d.rssi != null ? d.rssi + ' dBm' : '<span class="muted">-</span>'}}</td>` +
+      `<td><button type="button" data-a="${{d.address}}" data-act="pair">Pair</button></td>`;
+    nt.appendChild(tr);
+  }}
+  document.getElementById('noNearby').style.display = nearby.length ? 'none' : '';
+  document.querySelectorAll('button[data-act]').forEach(b => {{ b.disabled = busy || !s.powered; }});
+}}
+
+async function refresh() {{
+  try {{ render(await api('/api/bluetooth')); }}
+  catch (e) {{ setMsg('error: ' + e.message, 'error'); }}
+}}
+
+async function run(label, path, body) {{
+  busy = true;
+  if (lastState) render(lastState);
+  setMsg(label + '...');
+  try {{
+    const r = await api(path, {{
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body || {{}}),
+    }});
+    setMsg(r.message || '', 'ok');
+  }} catch (e) {{
+    setMsg(e.message, 'error');
+  }} finally {{
+    busy = false;
+    refresh();
+  }}
+}}
+
+document.getElementById('powerBtn').addEventListener('click', () => {{
+  const on = !(lastState && lastState.powered);
+  run(on ? 'Turning Bluetooth on' : 'Turning Bluetooth off', '/api/bluetooth/power', {{ on }});
+}});
+document.getElementById('scanBtn').addEventListener('click', () => run('Starting scan', '/api/bluetooth/scan'));
+
+document.body.addEventListener('click', (e) => {{
+  const act = e.target.dataset && e.target.dataset.act;
+  if (!act) return;
+  const address = e.target.dataset.a;
+  if (act === 'unpair' && !confirm('Unpair this device? You\\'ll need to put it in pairing mode to pair it again.')) return;
+  const labels = {{ pair: 'Pairing (can take up to 30 seconds)', unpair: 'Unpairing', connect: 'Connecting', disconnect: 'Disconnecting' }};
+  run(labels[act], '/api/bluetooth/device', {{ address, action: act }});
+}});
+
+refresh();
+setInterval(() => {{ if (!busy) refresh(); }}, 3000);
+</script>
+</body>
+</html>
+"""
+
 
 class WebUI:
     def __init__(self, client, host: str = "127.0.0.1", port: int = 8765, token: str | None = None):
@@ -747,6 +1071,7 @@ class WebUI:
         self.port = port
         self.token = token
         self._runner: web.AppRunner | None = None
+        self.bluetooth = BluetoothManager()
 
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([
@@ -755,6 +1080,15 @@ class WebUI:
             web.get("/settings", self._handle_settings_page),
             web.get("/channels", self._handle_channels_page),
             web.get("/peers", self._handle_peers_page),
+            web.get("/buttons", self._handle_buttons_page),
+            web.get("/bluetooth", self._handle_bluetooth_page),
+            web.get("/api/bluetooth", self._handle_get_bluetooth),
+            web.post("/api/bluetooth/power", self._handle_bluetooth_power),
+            web.post("/api/bluetooth/scan", self._handle_bluetooth_scan),
+            web.post("/api/bluetooth/device", self._handle_bluetooth_device),
+            web.get("/api/buttons", self._handle_get_buttons),
+            web.post("/api/buttons/learn", self._handle_learn_button),
+            web.post("/api/buttons/bindings", self._handle_set_button_bindings),
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
@@ -779,7 +1113,7 @@ class WebUI:
     # Authorization header (a plain browser navigation can never send one) -
     # every api/* route stays behind the token below, so viewing live status
     # and every settings/channel/peer/PTT change still requires it.
-    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/favicon.svg"})
+    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/buttons", "/bluetooth", "/favicon.svg"})
 
     def _make_auth_middleware(self):
         # A plain closure, not a bound method - aiohttp's `middleware`
@@ -809,6 +1143,111 @@ class WebUI:
 
     async def _handle_peers_page(self, request) -> web.Response:
         return web.Response(text=_PEERS_HTML, content_type="text/html")
+
+    async def _handle_buttons_page(self, request) -> web.Response:
+        return web.Response(text=_BUTTONS_HTML, content_type="text/html")
+
+    # How long the Buttons page's "Press a button" waits for a press.
+    LEARN_TIMEOUT_S = 15.0
+
+    def _buttons_state(self) -> dict:
+        buttons = self.client.buttons
+        if buttons is None:
+            available, reason = False, "not available on a relay-only node"
+        elif not buttons.running:
+            available, reason = False, buttons.unavailable_reason or "button input isn't running"
+        else:
+            available, reason = True, None
+        last = buttons.last_press if buttons is not None else None
+        return {
+            "available": available,
+            "reason": reason,
+            "can_save": self.client.config_path is not None,
+            "actions": BUTTON_ACTIONS,
+            "bindings": button_bindings_to_raw(self.client.config.button_bindings),
+            "devices": buttons.devices() if buttons is not None else [],
+            "unreadable_devices": buttons.unreadable_devices() if buttons is not None else 0,
+            "last_press": ({"device": last[0], "key": last[1], "age_s": round(time.monotonic() - last[2], 1)}
+                           if last else None),
+        }
+
+    async def _handle_get_buttons(self, request) -> web.Response:
+        return web.json_response(self._buttons_state())
+
+    async def _handle_learn_button(self, request) -> web.Response:
+        """Waits for the next button press and returns {"device", "key"} -
+        the page then saves it as a binding."""
+        buttons = self.client.buttons
+        if buttons is None or not buttons.running:
+            raise web.HTTPConflict(text=self._buttons_state()["reason"])
+        pressed = await buttons.learn(self.LEARN_TIMEOUT_S)
+        if pressed is None:
+            raise web.HTTPRequestTimeout(text="no button was pressed - try again")
+        return web.json_response(pressed)
+
+    async def _handle_set_button_bindings(self, request) -> web.Response:
+        """{"bindings": [{key, action, device?}, ...]} - replaces every
+        binding. Applies live and is saved to the config file."""
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        if self.client.buttons is None:
+            raise web.HTTPConflict(text=self._buttons_state()["reason"])
+        data = await request.json()
+        try:
+            bindings = load_button_bindings(data.get("bindings") if isinstance(data, dict) else None)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        save_config_fields(self.client.config_path, {"button_bindings": button_bindings_to_raw(bindings)})
+        self.client.config = replace(self.client.config, button_bindings=bindings)
+        self.client.buttons.bindings = list(bindings)
+        return web.json_response(self._buttons_state())
+
+    async def _handle_bluetooth_page(self, request) -> web.Response:
+        return web.Response(text=_BLUETOOTH_HTML, content_type="text/html")
+
+    def _require_bluetooth(self) -> None:
+        reason = self.bluetooth.unavailable_reason()
+        if reason:
+            raise web.HTTPConflict(text=reason)
+
+    async def _handle_get_bluetooth(self, request) -> web.Response:
+        reason = self.bluetooth.unavailable_reason()
+        if reason:
+            return web.json_response({"available": False, "reason": reason, "devices": []})
+        try:
+            state = await self.bluetooth.state()
+        except BluetoothError as exc:
+            return web.json_response({"available": True, "error": str(exc), "devices": []})
+        return web.json_response({"available": True, **state})
+
+    async def _handle_bluetooth_power(self, request) -> web.Response:
+        self._require_bluetooth()
+        data = await request.json()
+        on = data.get("on") if isinstance(data, dict) else None
+        if not isinstance(on, bool):
+            raise web.HTTPBadRequest(text="'on' must be true or false")
+        try:
+            await self.bluetooth.set_power(on)
+        except BluetoothError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response({"message": f"Bluetooth turned {'on' if on else 'off'}"})
+
+    async def _handle_bluetooth_scan(self, request) -> web.Response:
+        self._require_bluetooth()
+        self.bluetooth.start_scan()
+        return web.json_response({"message": "scanning for nearby devices..."})
+
+    async def _handle_bluetooth_device(self, request) -> web.Response:
+        """{"address", "action": pair|unpair|connect|disconnect}"""
+        self._require_bluetooth()
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        try:
+            message = await self.bluetooth.device_action(data.get("address"), data.get("action"))
+        except BluetoothError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response({"message": message})
 
     async def _handle_status(self, request) -> web.Response:
         c = self.client
@@ -1138,6 +1577,7 @@ class WebUI:
         log.info("web UI listening on http://%s:%s", self.host, self.port)
 
     async def stop(self) -> None:
+        self.bluetooth.stop()
         if self._runner:
             await self._runner.cleanup()
             self._runner = None

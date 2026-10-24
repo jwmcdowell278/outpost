@@ -2,7 +2,8 @@
 
 Encrypted, low-bitrate, multi-channel push-to-talk voice over IP. Peer-to-peer
 mesh (no central relay server) - targets desktop and embedded (Raspberry Pi)
-clients, and real push-to-talk hardware (USB HID, GPIO, serial/RS-232).
+clients, and real push-to-talk hardware (USB HID, GPIO, serial/RS-232, and Bluetooth/USB
+buttons bound from the web UI).
 
 ## Design
 
@@ -247,8 +248,8 @@ flowchart LR
     mic/environment (too high clips quiet speech, too low doesn't gate
     anything).
 - **Web UI** (`outpost/webui.py`, `enable_web_ui`, off by default): a
-  lightweight local control panel - four static HTML pages (Status,
-  Channels, Peers, Settings, switchable via a tab bar at the top), no build
+  lightweight local control panel - six static HTML pages (Status,
+  Channels, Peers, Buttons, Bluetooth, Settings, switchable via a tab bar at the top), no build
   step or frontend framework, served by a small `aiohttp` app. The **Status**
   page views live status (active channel, PTT state, peer table with
   per-peer address/candidate-count/last-seen age, confirmed channel
@@ -263,6 +264,10 @@ flowchart LR
   rotated key is shown once in the page so you can copy it into every
   other peer's config that should share that channel - rotating a key
   breaks that channel for anyone you haven't given the new key to yet.
+  The **Buttons** page (`/api/buttons`) binds hardware buttons to PTT,
+  volume and channel up/down, and the **Bluetooth** page
+  (`/api/bluetooth`) turns Bluetooth on/off, pairs/unpairs devices and
+  shows their status and battery - see "Hardware buttons".
   The **Peers** page (`/api/peers`) lists the static bootstrap `peers:`
   entries and lets you add or remove one by host/port - both apply
   immediately on the running client (no restart needed - see
@@ -1000,6 +1005,89 @@ pytest tests/ -v
    UI" above. When run via `scripts/run_client.py --config ...`, its
    Settings panel can also persist non-secret config changes straight back
    into that same `outpost.yaml`.
+
+## Hardware buttons (Bluetooth PTT, footswitches, media keys)
+
+Any button Linux sees as a keyboard-like input device can be bound to an
+action from the web UI's **Buttons** page: Bluetooth PTT buttons (e.g.
+Inrico), USB footswitches, media remotes, or keys on a keyboard. Actions:
+
+| Action | What it does |
+|---|---|
+| Push to talk (hold) | transmits while held |
+| Push to talk (press on, press off) | first press starts transmitting, next press stops |
+| Volume up / down | changes the active channel's volume by 10% per press (holding repeats) |
+| Next / previous channel | switches the active channel, in channel-id order, wrapping around |
+
+To bind a button, open **Buttons**, pick the action, click **Press a
+button…** and press it within 15 seconds. It applies straight away and is
+saved to the config file (`button_bindings`). By default a binding only
+reacts to the device you pressed it on. Tick "any device" for a key that
+should work from anything, such as a keyboard's volume keys. Several
+buttons can share an action, and one button can have several actions.
+
+The page also shows the last button pressed and which input devices
+Outpost can see, which helps when a button doesn't do what you expect.
+
+Setup on a Raspberry Pi (Linux only):
+
+```bash
+pip install -e '.[hardware]'            # includes evdev; or: sudo apt install python3-evdev
+sudo usermod -aG input $USER            # let Outpost read input devices, then log out and back in
+```
+
+**Bluetooth buttons** need pairing once - from the web UI's **Bluetooth**
+page (see below), or from the command line:
+
+```
+bluetoothctl
+power on
+agent NoInputNoOutput
+default-agent
+scan on                       # put the button in pairing mode, note its address
+pair XX:XX:XX:XX:XX:XX
+trust XX:XX:XX:XX:XX:XX       # reconnects by itself after reboots / going out of range
+connect XX:XX:XX:XX:XX:XX
+```
+
+It should then appear under **Input devices** on the Buttons page. Outpost
+picks devices up when they connect, so a button that reconnects keeps
+working without a restart. If a paired button never appears there, it
+probably doesn't present itself as a standard input device (its `info` in
+`bluetoothctl` lists no "Human Interface Device") and can't be used.
+
+Outpost doesn't take exclusive control of a device, so its keys still also
+reach the rest of the system. A volume key bound here can still change the
+Pi's system volume too.
+
+In Docker, pass the input devices through: `--device /dev/input`.
+
+### Bluetooth page
+
+The web UI's **Bluetooth** page manages the device's Bluetooth from a
+browser (Linux only):
+
+- turn Bluetooth on or off;
+- **Scan for devices** (20 seconds), then **Pair** one - pairing also
+  trusts and connects it, so it reconnects by itself after a restart or
+  after going out of range;
+- see each paired device's status (connected or not) and battery level,
+  for devices that report one (battery below 20% is shown in red);
+- connect, disconnect or unpair paired devices.
+
+It uses BlueZ's `bluetoothctl` (`sudo apt install bluez`; already on
+Raspberry Pi OS). Pairing works for devices that pair without a PIN or
+confirmation code, which covers PTT buttons, speaker mics and most
+headsets; anything else has to be paired with `bluetoothctl` directly. If
+turning Bluetooth on fails with "Blocked", it's switched off at a lower
+level: `sudo rfkill unblock bluetooth`. A user that can't control
+Bluetooth (e.g. a dedicated service account) needs to be in the
+`bluetooth` group. Not available inside the Docker image, which doesn't
+include BlueZ.
+
+A paired Bluetooth headset or speaker mic can be used for audio too:
+select it under `input_device` / `output_device` (see "Choosing the
+microphone and speaker").
 
 ## Choosing the microphone and speaker
 

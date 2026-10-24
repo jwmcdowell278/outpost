@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hardware = ["hidapi>=0.14.0", "pyserial>=3.5", "gpiozero>=2.0"]
+hardware = ["hidapi>=0.14.0", "pyserial>=3.5", "gpiozero>=2.0", "evdev>=1.6; sys_platform == 'linux'"]
 dev = ["pytest>=8.0", "aiohttp>=3.9"]
 # Needed only for the optional local web UI (outpost/webui.py) - status view
 # and remote channel/PTT control. Not required otherwise.
