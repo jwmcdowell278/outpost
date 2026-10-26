@@ -209,6 +209,9 @@ class BluetoothManager:
         self._state_cache = None
         async with self._lock:
             if action == "pair":
+                # Without "pairable", BlueZ pairs but doesn't keep the keys,
+                # so the pairing is lost as soon as the device disconnects.
+                await self._run(["pairable", "on"])
                 out = await self._run(["--agent", "NoInputNoOutput", "pair", address], _PAIR_TIMEOUT_S)
                 err = _failure(out)
                 if err and "AlreadyExists" not in err:

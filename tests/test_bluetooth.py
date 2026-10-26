@@ -78,7 +78,7 @@ class FakeBluetoothctl:
             return 0, f"Changing power {args[-1]} succeeded\n"
         if cmd == "pair":
             return 0, "Attempting to pair with 12:34:56:78:9A:BC\nPairing successful\n"
-        if cmd in ("trust", "connect", "disconnect", "remove"):
+        if cmd in ("trust", "connect", "disconnect", "remove", "pairable"):
             return 0, f"{cmd} succeeded\n"
         if cmd == "scan":
             await asyncio.sleep(0.05)
@@ -119,7 +119,8 @@ def test_pair_also_trusts_and_connects():
         fake = FakeBluetoothctl()
         msg = await BluetoothManager(fake).device_action(INRICO.lower(), "pair")
         assert msg == "paired and connected"
-        assert fake.calls == [["--agent", "NoInputNoOutput", "pair", INRICO], ["trust", INRICO], ["connect", INRICO]]
+        assert fake.calls == [["pairable", "on"], ["--agent", "NoInputNoOutput", "pair", INRICO],
+                              ["trust", INRICO], ["connect", INRICO]]
     asyncio.run(run())
 
 
