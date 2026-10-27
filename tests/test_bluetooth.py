@@ -213,3 +213,48 @@ def test_web_ui_reports_unavailable(monkeypatch):
             assert state["available"] is False and "Linux" in state["reason"]
             assert (await tc.post("/api/bluetooth/scan")).status == 409
     asyncio.run(run())
+
+
+def test_reconnect_connects_paired_trusted_devices_that_are_not_connected():
+    async def run():
+        fake = FakeBluetoothctl()
+        m = BluetoothManager(fake)
+        # Inrico: connected already. Headset: paired, trusted, disconnected.
+        # Stranger: not paired. Only the headset gets connected.
+        assert await m.reconnect_once() == ["Headset"]
+        assert [c for c in fake.calls if c[0] == "connect"] == [["connect", HEADSET]]
+    asyncio.run(run())
+
+
+def test_reconnect_leaves_devices_disconnected_on_purpose():
+    async def run():
+        fake = FakeBluetoothctl()
+        m = BluetoothManager(fake)
+        await m.device_action(HEADSET, "disconnect")
+        assert await m.reconnect_once() == []
+        await m.device_action(HEADSET, "connect")       # user connects it again...
+        fake.calls.clear()
+        await m.reconnect_once()                         # ...so it's looked after again
+        assert ["connect", HEADSET] in fake.calls
+    asyncio.run(run())
+
+
+def test_reconnect_does_nothing_while_powered_off_or_scanning():
+    async def run():
+        fake = FakeBluetoothctl()
+        fake.powered = False
+        m = BluetoothManager(fake)
+        assert await m.reconnect_once() == []
+        fake.powered = True
+        m.start_scan(seconds=5)
+        assert await m.reconnect_once() == []
+        assert not [c for c in fake.calls if c[0] == "connect"]
+    asyncio.run(run())
+
+
+def test_reconnect_failure_is_quiet():
+    async def run():
+        fake = FakeBluetoothctl()
+        fake.replies["connect"] = "Failed to connect: org.bluez.Error.Failed br-connection-page-timeout\n"
+        assert await BluetoothManager(fake).reconnect_once() == []
+    asyncio.run(run())

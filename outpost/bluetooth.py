@@ -33,6 +33,8 @@ _COMMAND_TIMEOUT_S = 10.0
 # the page polls (or several pages are open).
 _STATE_CACHE_S = 2.0
 _PAIR_TIMEOUT_S = 30.0
+# How often to look for paired devices that should be connected but aren't.
+RECONNECT_INTERVAL_S = 15.0
 
 
 def valid_address(address) -> bool:
@@ -119,6 +121,9 @@ class BluetoothManager:
         self._scan_task: asyncio.Task | None = None
         self.scan_until = 0.0
         self._state_cache: tuple[float, dict] | None = None
+        # Devices disconnected or unpaired on purpose - auto-reconnect leaves
+        # them alone until they're connected again.
+        self._hold_off: set[str] = set()
 
     def unavailable_reason(self) -> str | None:
         if self._runner is not _run_bluetoothctl:
@@ -207,6 +212,10 @@ class BluetoothManager:
             raise BluetoothError("invalid device address")
         address = address.upper()
         self._state_cache = None
+        if action in ("disconnect", "unpair"):
+            self._hold_off.add(address)
+        elif action in ("connect", "pair"):
+            self._hold_off.discard(address)
         async with self._lock:
             if action == "pair":
                 # Without "pairable", BlueZ pairs but doesn't keep the keys,
@@ -230,6 +239,42 @@ class BluetoothManager:
         if err:
             raise BluetoothError(err)
         return {"unpair": "unpaired", "connect": "connected", "disconnect": "disconnected"}[action]
+
+    async def reconnect_once(self) -> list[str]:
+        """Connects paired, trusted devices that aren't connected (and weren't
+        disconnected on purpose). Returns the names of those reconnected.
+
+        Some devices (e.g. the Inrico B02PTT) can't reconnect by themselves
+        - their incoming connection gives up - while the Pi connecting out
+        to them works, so this covers a device switched back on or coming
+        back into range."""
+        out = await self._run(["show"])
+        if _failure(out) or parse_fields(out).get("Powered") != "yes" or self.scanning:
+            return []
+        reconnected = []
+        for address, name in parse_devices(await self._run(["devices", "Paired"])):
+            if address in self._hold_off:
+                continue
+            info = parse_device_info(address, name, await self._run(["info", address]))
+            if not info["paired"] or not info["trusted"] or info["connected"]:
+                continue
+            async with self._lock:
+                result = await self._run(["connect", address], _PAIR_TIMEOUT_S)
+            if _failure(result) is None:
+                self._state_cache = None
+                log.info("bluetooth: reconnected %s", info["name"])
+                reconnected.append(info["name"])
+            else:
+                log.debug("bluetooth: %s not reachable: %s", info["name"], _failure(result))
+        return reconnected
+
+    async def reconnect_loop(self, interval: float = RECONNECT_INTERVAL_S) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.reconnect_once()
+            except BluetoothError as exc:
+                log.debug("bluetooth: reconnect check failed: %s", exc)
 
     def stop(self) -> None:
         if self._scan_task is not None:

@@ -1074,7 +1074,7 @@ class WebUI:
         self.port = port
         self.token = token
         self._runner: web.AppRunner | None = None
-        self.bluetooth = BluetoothManager()
+        self.bluetooth = getattr(client, "bluetooth", None) or BluetoothManager()
 
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([

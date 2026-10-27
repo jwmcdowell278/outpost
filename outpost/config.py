@@ -269,6 +269,12 @@ class OutpostConfig:
     # only (reads /dev/input via evdev). See README "Hardware buttons".
     button_bindings: list[ButtonBinding] = field(default_factory=list)
 
+    # Reconnect paired, trusted Bluetooth devices (headsets, PTT buttons)
+    # that aren't connected, every 15 seconds - for devices that don't
+    # reconnect by themselves when switched on or back in range. Linux only;
+    # devices disconnected on the web UI's Bluetooth page are left alone.
+    bluetooth_auto_reconnect: bool = True
+
     # Which microphone / speaker to use when a node has more than one (e.g.
     # a USB headset plus a built-in mic). Either a case-insensitive
     # substring of the device name (preferred - indices can change when USB
@@ -498,6 +504,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "enable_agc": (_validate_bool, True),
     "agc_target_rms": (_validate_positive_float, True),
     "enable_relay": (_validate_bool, True),
+    "bluetooth_auto_reconnect": (_validate_bool, False),
     "enable_highpass": (_validate_bool, True),
     "highpass_cutoff_hz": (_validate_positive_float, True),
     "enable_squelch": (_validate_bool, True),
@@ -808,6 +815,7 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         monitor_channels=_load_monitor_channels(raw.get("monitor_channels"), channels),
         channel_volumes=_load_channel_volumes(raw.get("channel_volumes")),
         button_bindings=load_button_bindings(raw.get("button_bindings")),
+        bluetooth_auto_reconnect=_validate_bool(raw.get("bluetooth_auto_reconnect", True)),
         duck_monitored_channels=raw.get("duck_monitored_channels", True),
         input_device=_validate_audio_device(raw.get("input_device")),
         output_device=_validate_audio_device(raw.get("output_device")),

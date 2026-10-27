@@ -25,6 +25,7 @@ except OSError as _audio_import_error:
     _AUDIO_IMPORT_ERROR: OSError | None = _audio_import_error
 else:
     _AUDIO_IMPORT_ERROR = None
+from .bluetooth import BluetoothManager
 from .buttons import ButtonController
 from .codec import OpusCodec, OpusDecoder
 from .mixer import Mixer
@@ -323,6 +324,9 @@ class OutpostClient:
             if not self.relay_only and (config.button_bindings or config.enable_web_ui)
             else None
         )
+        # Shared with the web UI's Bluetooth page.
+        self.bluetooth = BluetoothManager()
+        self._bluetooth_task: asyncio.Task | None = None
         self.web_ui = (
             WebUI(self, host=config.web_ui_host, port=config.web_ui_port, token=config.web_ui_token)
             if config.enable_web_ui
@@ -754,6 +758,8 @@ class OutpostClient:
         # what's wrong) even when an audio device won't open.
         if self.buttons:
             self.buttons.start()
+        if self.config.bluetooth_auto_reconnect and self.bluetooth.unavailable_reason() is None:
+            self._bluetooth_task = asyncio.create_task(self.bluetooth.reconnect_loop())
         if self.web_ui:
             await self.web_ui.start()
         self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
@@ -799,6 +805,10 @@ class OutpostClient:
             await self.web_ui.stop()
         if self.buttons:
             self.buttons.stop()
+        if self._bluetooth_task:
+            self._bluetooth_task.cancel()
+            self._bluetooth_task = None
+        self.bluetooth.stop()
         if self.pex:
             self.pex.stop()
         if self.subnet_scan:
