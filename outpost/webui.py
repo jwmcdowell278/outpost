@@ -1519,6 +1519,8 @@ class WebUI:
             self.client.squelch.hold_frames = max(1, round(validated["squelch_hold_ms"] / self.client.config.frame_ms))
         if "enable_tx_lockout" in validated:
             self.client.enable_tx_lockout = validated["enable_tx_lockout"]
+        if "talk_permit_tone" in validated:
+            self.client.talk_permit_tone = validated["talk_permit_tone"]
         if "tx_lockout_timeout_ms" in validated:
             self.client.tx_lockout_timeout_s = validated["tx_lockout_timeout_ms"] / 1000.0
         if "enable_echo_guard" in validated:

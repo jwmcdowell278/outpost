@@ -1094,16 +1094,20 @@ Buttons page says headset buttons need it.
 **The mic on a Bluetooth headset** only works in hands-free mode. By
 default the Pi connects in high-quality playback mode (A2DP), which has no
 mic - and the system's default "mic" is then a loopback of the speaker, so
-Outpost transmits silence. Switch to hands-free (mSBC is the 16 kHz
-variant, matching Outpost's audio):
+Outpost transmits silence. Switch to hands-free:
 
 ```bash
 pactl list cards | grep -E 'Name: bluez|headset-head-unit'   # find the card name
-pactl set-card-profile bluez_card.XX_XX_XX_XX_XX_XX headset-head-unit-msbc
+pactl set-card-profile bluez_card.XX_XX_XX_XX_XX_XX headset-head-unit-msbc   # 16 kHz
+pactl set-card-profile bluez_card.XX_XX_XX_XX_XX_XX headset-head-unit-cvsd   # 8 kHz, if 16 kHz fails
 ```
 
-The Pi remembers the choice for that device. In hands-free mode the
-headset's volume buttons are handled by the headset itself.
+mSBC (16 kHz) matches Outpost's audio, but on a Raspberry Pi 3 it can fail
+one way - with a USB adapter, the mic worked but the speaker stayed silent
+(the kernel logs `corrupted SCO packet`); CVSD (8 kHz, phone quality)
+works. The Pi remembers the choice for that device. In hands-free mode the
+headset's volume buttons are handled by the headset itself. See "Raspberry
+Pi with a Bluetooth headset" below for the rest of a reliable setup.
 
 ### Bluetooth page
 
@@ -1131,6 +1135,96 @@ include BlueZ.
 A paired Bluetooth headset or speaker mic can be used for audio too:
 select it under `input_device` / `output_device` (see "Choosing the
 microphone and speaker").
+
+### Raspberry Pi with a Bluetooth headset
+
+What it took to make a Bluetooth speaker mic (Inrico B02PTT) dependable on
+a Raspberry Pi 3 running Outpost unattended:
+
+**Use a USB Bluetooth adapter.** The Pi 3's built-in Bluetooth locks up
+under two-way headset audio (the kernel logs `Frame reassembly failed` and
+`command tx timeout`, then the chip stops answering) - worse on a weak
+power supply. A cheap USB adapter (e.g. TP-Link UB500) fixes it. Turn the
+built-in one off so the adapter becomes `hci0` - BlueZ 5.66 crashes on
+audio connections when the adapter is `hci1`:
+
+```bash
+echo 'dtoverlay=disable-bt' | sudo tee -a /boot/firmware/config.txt
+sudo reboot
+```
+
+A new adapter can start blocked; `bluetoothctl power on` then fails with
+`org.bluez.Error.Failed` - unblock it (`sudo rfkill unblock bluetooth`, or
+`echo 0 | sudo tee /sys/class/rfkill/rfkillN/soft`). The choice is
+remembered.
+
+**Keep Bluetooth audio running when nobody is logged in.** WirePlumber
+(the Pi's audio session manager) only enables Bluetooth audio during an
+active login session, so a headless Pi's headset drops - and can't
+reconnect - as soon as the last SSH session ends. Turn that off:
+
+```bash
+mkdir -p ~/.config/wireplumber/bluetooth.lua.d
+echo 'bluez_monitor.properties["with-logind"] = false' > ~/.config/wireplumber/bluetooth.lua.d/80-headless.lua
+systemctl --user restart wireplumber
+```
+
+(WirePlumber 0.4 syntax, as on Raspberry Pi OS Bookworm.)
+
+**Pair from the Bluetooth page.** **Pair** also makes the adapter
+"pairable" first - without that BlueZ completes the pairing but doesn't
+keep the keys, so the device shows as unpaired after it disconnects.
+Some headsets only pair while in pairing mode (on the Inrico: hold the
+button until the light flashes).
+
+**Reconnecting.** Some headsets can't reconnect by themselves (the Inrico
+calls the Pi when switched on but gives up), while the Pi connecting to
+them always works - so Outpost does it: every 15 seconds it connects any
+paired, trusted device that isn't connected (`bluetooth_auto_reconnect`,
+on by default). A device disconnected or unpaired on the Bluetooth page is
+left alone until it's connected again from there.
+
+**Only hold the audio link open while it's used.** An open mic or speaker
+keeps a hands-free headset's audio link running all the time (and drains
+its battery). With `release_audio_when_idle: true`, Outpost opens the
+speaker only when there's something to play and the mic only while PTT is
+held, closing each after 3 seconds of quiet. Incoming audio that arrives
+while the link comes up is played from the start, slightly delayed. On the
+sending side the link takes up to a second, so turn on `talk_permit_tone:
+true` too: a short chirp once the mic is live - wait for it before
+talking. The chirp isn't transmitted.
+
+**Run Outpost as a service** so it starts at boot and restarts if it
+stops, as your user (it needs your audio session). Create
+`~/.config/systemd/user/outpost.service`:
+
+```ini
+[Unit]
+Description=Outpost push-to-talk voice client
+Wants=pipewire.service wireplumber.service pipewire-pulse.service
+After=pipewire.service wireplumber.service pipewire-pulse.service
+
+[Service]
+WorkingDirectory=%h/outpost
+ExecStart=%h/outpost/.venv/bin/python scripts/run_client.py --config config/outpost.yaml
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+sudo loginctl enable-linger $USER     # start user services at boot, without a login
+systemctl --user daemon-reload
+systemctl --user enable --now outpost
+journalctl --user -u outpost -f       # its output
+```
+
+Don't also start Outpost by hand while the service runs - both would use
+the same port. For headset PTT buttons, also see "Bluetooth headset
+buttons" above (the venv Python needs `CAP_NET_RAW`).
 
 ## Choosing the microphone and speaker
 

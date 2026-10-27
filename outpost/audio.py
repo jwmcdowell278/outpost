@@ -102,7 +102,8 @@ def restart_streams(*streams: "_AudioStream") -> None:
         stream.close()
     rescan_devices()
     for stream in streams:
-        stream.open()
+        if stream.wanted:  # leave streams that are closed on purpose closed
+            stream.open()
 
 
 # How long a running stream can go without its audio callback firing before
@@ -158,6 +159,11 @@ class _AudioStream:
             stream.close()
         except Exception as exc:
             log.debug("error closing %s stream: %s", self.kind, exc)
+
+    @property
+    def wanted(self) -> bool:
+        """Between start() and stop() - should be running."""
+        return self._wanted
 
     def start(self) -> None:
         self._wanted = True

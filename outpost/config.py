@@ -285,6 +285,20 @@ class OutpostConfig:
     input_device: str | int | None = None
     output_device: str | int | None = None
 
+    # Open the speaker only while there's something to play and the mic only
+    # while PTT is held, closing each after a few seconds of quiet. For
+    # Bluetooth headsets in hands-free mode, where an open stream keeps the
+    # headset's audio link running constantly (and drains its battery). The
+    # cost: the link takes a moment to come up, so the start of a
+    # transmission is slightly delayed. Off by default.
+    release_audio_when_idle: bool = False
+
+    # A short beep in the talker's ear once the mic is live after pressing
+    # PTT - wait for it before talking. Most useful with
+    # release_audio_when_idle, where a Bluetooth headset takes up to a
+    # second to bring its audio link up. Not transmitted. Off by default.
+    talk_permit_tone: bool = False
+
     # Rotating file logging, in addition to scripts/run_client.py's console
     # output - off by default (None). Set log_file to also archive logs to
     # disk for diagnosing intermittent issues after the fact (console
@@ -518,6 +532,8 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "channel_announce_voice": (_validate_voice, False),
     "input_device": (_validate_audio_device, False),
     "output_device": (_validate_audio_device, False),
+    "release_audio_when_idle": (_validate_bool, False),
+    "talk_permit_tone": (_validate_bool, True),
 }
 
 
@@ -819,6 +835,8 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         duck_monitored_channels=raw.get("duck_monitored_channels", True),
         input_device=_validate_audio_device(raw.get("input_device")),
         output_device=_validate_audio_device(raw.get("output_device")),
+        release_audio_when_idle=_validate_bool(raw.get("release_audio_when_idle", False)),
+        talk_permit_tone=_validate_bool(raw.get("talk_permit_tone", False)),
         log_file=raw.get("log_file"),
         log_max_bytes=raw.get("log_max_bytes", 10_000_000),
         log_backup_count=raw.get("log_backup_count", 5),

@@ -286,3 +286,109 @@ def test_startup_survives_an_audio_device_that_fails_to_open(fake_sd, monkeypatc
         await client.stop()
     asyncio.run(run())
     assert "could not open the input audio device" in caplog.text
+
+
+# --- release_audio_when_idle: open the speaker/mic only when needed -----------------
+
+def test_on_demand_audio_opens_nothing_at_startup_then_opens_when_needed(fake_sd, monkeypatch):
+    async def run():
+        client = _make_client(enable_multicast=False, release_audio_when_idle=True)
+        await client.start()
+        try:
+            assert fake_sd.opened == []
+            assert not client.mic.stalled() and not client.speaker.stalled()   # closed on purpose
+
+            client.set_ptt(True)                     # PTT opens the mic...
+            client._demand_audio("output")           # ...incoming audio opens the speaker
+            for _ in range(50):
+                if client.mic.wanted and client.speaker.wanted and not client._audio_opening:
+                    break
+                await asyncio.sleep(0.01)
+            assert sorted(k for k, _ in fake_sd.opened) == ["input", "output"]
+
+            client._demand_audio("output")           # already open: no second stream
+            await asyncio.sleep(0.05)
+            assert len(fake_sd.opened) == 2
+            client.set_ptt(False)
+        finally:
+            await client.stop()
+    asyncio.run(run())
+
+
+def test_on_demand_audio_is_released_after_idle(fake_sd, monkeypatch):
+    async def run():
+        client = _make_client(enable_multicast=False, release_audio_when_idle=True)
+        client._loop = asyncio.get_running_loop()
+        client.mic.start()
+        client.speaker.start()
+        now = audio.time.monotonic()
+        client._ptt_active = True
+        client._ptt_released_at = now
+        client.mixer.last_active = now
+        # Within the idle window, or PTT held: keep both open.
+        assert client._release_idle_audio(now + 1) == []
+        client._ptt_active = False
+        assert client._release_idle_audio(now + 1) == []
+        # Quiet for longer than the window: release both.
+        assert set(s.kind for s in client._release_idle_audio(now + 10)) == {"input", "output"}
+        # Something still to play keeps the speaker open.
+        client.mixer.play_local([b"\x00\x00" * client.codec.frame_size])
+        assert [s.kind for s in client._release_idle_audio(now + 10)] == ["input"]
+        client.mic.stop(); client.speaker.stop()
+    asyncio.run(run())
+
+
+def test_watchdog_restart_leaves_streams_closed_on_purpose_closed(fake_sd):
+    mic = audio.MicCapture(48000, 960)
+    spk = audio.SpeakerPlayback(48000, 960)
+    mic.start()
+    audio.restart_streams(mic, spk)
+    assert [k for k, _ in fake_sd.opened] == ["input", "input"]   # speaker never opened
+
+
+def test_talk_permit_tone_plays_once_the_mic_is_live_and_is_not_transmitted(fake_sd, monkeypatch):
+    """With talk_permit_tone, the chirp plays when the first mic frame after
+    a PTT press arrives (proof the mic/headset link is up), and the frames
+    sent while it plays are silence."""
+    async def run():
+        client = _make_client(enable_multicast=False, talk_permit_tone=True)
+        client._loop = asyncio.get_running_loop()
+        sent, played = [], []
+        monkeypatch.setattr(client.transport, "send_encrypted",
+                            lambda cipher, ch, ptype, payload, **kw: sent.append(ptype))
+        monkeypatch.setattr(client.mixer, "play_local", lambda frames: played.append(len(frames)))
+        encoded = []
+        monkeypatch.setattr(client.codec, "encode", lambda frame, max_bytes=None: encoded.append(frame) or b"x")
+        loud = (b"\x10\x27" * client.codec.frame_size)        # a non-silent mic frame
+        task = asyncio.create_task(client._tx_loop())
+        client.set_ptt(True)
+        assert played == []                                   # nothing until the mic delivers
+        for _ in range(3):
+            client.mic._queue.put(loud)
+        await asyncio.sleep(0.05)
+        assert played == [len(client._permit_tone_frames)]    # exactly one chirp
+        assert all(f == b"\x00" * len(loud) for f in encoded)  # chirp time sent as silence
+        client._permit_mute_until = 0
+        client.mic._queue.put(loud)
+        await asyncio.sleep(0.05)
+        assert encoded[-1] != b"\x00" * len(loud)            # then real audio
+        task.cancel()
+        client.mic.wake_reader()   # unblock the transmit loop's reader thread
+    asyncio.run(run())
+
+
+def test_no_talk_permit_tone_by_default(fake_sd, monkeypatch):
+    async def run():
+        client = _make_client(enable_multicast=False)
+        played = []
+        monkeypatch.setattr(client.mixer, "play_local", lambda frames: played.append(frames))
+        monkeypatch.setattr(client.transport, "send_encrypted", lambda *a, **kw: None)
+        monkeypatch.setattr(client.codec, "encode", lambda frame, max_bytes=None: b"x")
+        task = asyncio.create_task(client._tx_loop())
+        client.set_ptt(True)
+        client.mic._queue.put(b"\x10\x27" * client.codec.frame_size)
+        await asyncio.sleep(0.05)
+        assert played == []
+        task.cancel()
+        client.mic.wake_reader()   # unblock the transmit loop's reader thread
+    asyncio.run(run())

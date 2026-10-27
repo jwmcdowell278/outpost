@@ -208,6 +208,17 @@ duck_monitored_channels: true
 # input_device: "USB Audio"
 # output_device: "USB Audio"
 
+# Bluetooth headsets in hands-free mode (see README "Raspberry Pi with a
+# Bluetooth headset"): open the speaker only when there's something to play
+# and the mic only while PTT is held, so the headset's audio link isn't
+# running constantly. The link takes up to a second to come up when you
+# press PTT - talk_permit_tone beeps once the mic is live (not transmitted).
+# release_audio_when_idle: false
+# talk_permit_tone: false
+# Reconnect paired, trusted Bluetooth devices that aren't connected (every
+# 15 s) - for headsets that don't reconnect by themselves. Linux only.
+# bluetooth_auto_reconnect: true
+
 # Rotating file logging, in addition to scripts/run_client.py's console
 # output - off by default (unset). Set log_file to also archive logs to
 # disk for diagnosing intermittent issues after the fact (easy to lose

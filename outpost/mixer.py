@@ -207,6 +207,25 @@ class Mixer:
         with self._lock:
             self._local.extend(frames)
 
+    def has_pending(self) -> bool:
+        """True if there's anything to play: a stream mid-transmission, or a
+        queued local sound."""
+        with self._lock:
+            return bool(self._local) or any(s.state != "idle" for s in self._streams.values())
+
+    def output_started(self) -> None:
+        """The speaker was just opened (see the client's
+        release_audio_when_idle): audio that queued up while it was closed
+        is played from the start, at the cost of extra delay for the rest of
+        that transmission, instead of being skipped as excess delay."""
+        now = time.monotonic()
+        with self._lock:
+            for stream in self._streams.values():
+                if stream.state != "idle" and stream.buf and stream.next_seq is not None:
+                    ahead = max(stream.buf) - stream.next_seq + 1
+                    stream.delay = max(stream.delay, ahead)
+                    stream.started_at = now
+
     def stats(self) -> dict[tuple[int, int], dict]:
         with self._lock:
             return {k: dict(s.stats, delay_ms=round(s.delay * self.frame_s * 1000), state=s.state)

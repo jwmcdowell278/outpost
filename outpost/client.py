@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import threading
 import time
 from typing import NamedTuple
 from dataclasses import replace
@@ -59,6 +60,9 @@ _AUDIO_DEVICE_RECHECK_S = 15.0
 _AUDIO_RETRY_MIN_S = 3.0
 # How long startup waits for the mic/speaker to open before carrying on.
 _AUDIO_OPEN_TIMEOUT_S = 10.0
+# With release_audio_when_idle: how long the speaker stays open after the
+# last sound, and the mic after PTT is released.
+_AUDIO_IDLE_RELEASE_S = 3.0
 _AUDIO_RETRY_MAX_S = 300.0
 
 # Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
@@ -66,6 +70,13 @@ _AUDIO_RETRY_MAX_S = 300.0
 _LOCKOUT_TONE_HZ = 480.0
 _LOCKOUT_TONE_MS = 150.0
 _LOCKOUT_TONE_AMPLITUDE = 8000
+
+# "Talk permit" chirp (talk_permit_tone): played once the mic is actually
+# delivering audio after a PTT press - higher and shorter than the lockout
+# tone so the two can't be confused.
+_PERMIT_TONE_HZ = 1200.0
+_PERMIT_TONE_MS = 80.0
+_PERMIT_TONE_AMPLITUDE = 7000
 
 # How long a received sender stays listed as "speaking" (speaking_details)
 # after its last AUDIO/START frame with no STOP seen - a fallback for a lost
@@ -334,6 +345,13 @@ class OutpostClient:
         )
 
         self._ptt_active = False
+        # release_audio_when_idle state - see _demand_audio.
+        self._release_audio = config.release_audio_when_idle
+        self._audio_lock = threading.Lock()  # one open/close/restart at a time
+        self._audio_opening: set[str] = set()
+        self._ptt_released_at = 0.0
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._audio_idle_task: asyncio.Task | None = None
         self._tx_task: asyncio.Task | None = None
         self._channel_announce_task: asyncio.Task | None = None
         self._audio_watchdog_task: asyncio.Task | None = None
@@ -421,6 +439,15 @@ class OutpostClient:
             self.codec.frame_size, self.codec.sample_rate,
             _LOCKOUT_TONE_HZ, _LOCKOUT_TONE_MS, _LOCKOUT_TONE_AMPLITUDE,
         )
+        self.talk_permit_tone = config.talk_permit_tone
+        self._permit_tone_frames = _make_tone_frames(
+            self.codec.frame_size, self.codec.sample_rate,
+            _PERMIT_TONE_HZ, _PERMIT_TONE_MS, _PERMIT_TONE_AMPLITUDE,
+        )
+        self._awaiting_permit = False
+        # Mic frames are sent as silence until then, so the chirp itself
+        # isn't transmitted.
+        self._permit_mute_until = 0.0
 
         # Optional human-readable name sent once per PTT press (see
         # OutpostConfig.sender_alias) - mutable mirror so the web UI can
@@ -456,6 +483,7 @@ class OutpostClient:
         mixer, recording it for echo_guard."""
         self._last_own_speaker_activity = time.monotonic()
         self.mixer.play_local(frames)
+        self._demand_audio_threadsafe("output")
 
     def _own_speaker_active(self) -> bool:
         """True if this device's own speaker played something within the
@@ -470,11 +498,17 @@ class OutpostClient:
         """Call from a PTTSource callback (may run on any thread)."""
         if self.active_channel is None:
             return  # relay-only: nothing to transmit
+        if pressed:
+            self._demand_audio_threadsafe("input")
+        else:
+            self._ptt_released_at = time.monotonic()
         if pressed and self.enable_tx_lockout and self.channel_busy(self.active_channel.id):
             log.debug("PTT press ignored - channel busy (tx lockout)")
             self._play_lockout_tone()
             return
         self._ptt_active = pressed
+        if pressed and self.talk_permit_tone:
+            self._awaiting_permit = True
         cipher = self.ciphers[self.active_channel.id]
         targets, group = self._channel_delivery(self.active_channel.id)
         if pressed:
@@ -765,10 +799,83 @@ class OutpostClient:
         self._channel_announce_task = asyncio.create_task(self._channel_announce_loop())
         if self._site_networks:
             self._bridge_hello_task = asyncio.create_task(self._bridge_hello_loop())
+        self._loop = asyncio.get_running_loop()
         if not self.relay_only:
-            await self._open_audio()
+            if self._release_audio:
+                # Opened on demand - see _demand_audio.
+                self._audio_idle_task = asyncio.create_task(self._audio_idle_loop())
+            else:
+                await self._open_audio()
             self._tx_task = asyncio.create_task(self._tx_loop())
             self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+
+    # --- on-demand audio (release_audio_when_idle) ------------------------
+
+    def _demand_audio_threadsafe(self, kind: str) -> None:
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._demand_audio, kind)
+
+    def _demand_audio(self, kind: str) -> None:
+        """Make sure the speaker ("output") or mic ("input") is open, when
+        they're opened on demand. Runs on the event loop thread."""
+        if not self._release_audio or self.relay_only or self._loop is None:
+            return
+        stream = self.speaker if kind == "output" else self.mic
+        if stream.wanted or kind in self._audio_opening:
+            return
+        self._audio_opening.add(kind)
+
+        def open_stream():
+            with self._audio_lock:
+                try:
+                    stream.start()
+                except Exception as exc:
+                    log.warning("could not open the %s audio device (%s)", stream.kind, exc)
+                    return False
+            return True
+
+        future = self._loop.run_in_executor(None, open_stream)
+
+        def opened(f):
+            self._audio_opening.discard(kind)
+            if kind == "output" and not f.cancelled() and f.exception() is None and f.result():
+                self.mixer.output_started()
+        future.add_done_callback(opened)
+
+    def _locked_restart(self, streams) -> None:
+        with self._audio_lock:
+            restart_streams(*streams)
+
+    def _release_idle_audio(self, now: float | None = None) -> list[str]:
+        """Close the speaker/mic if they've been unused for
+        _AUDIO_IDLE_RELEASE_S. Returns which ones are closed (for tests)."""
+        now = time.monotonic() if now is None else now
+        to_close = []
+        if (self.speaker.wanted and "output" not in self._audio_opening and not self.mixer.has_pending()
+                and now - max(self.mixer.last_active, self._last_own_speaker_activity) > _AUDIO_IDLE_RELEASE_S):
+            to_close.append(self.speaker)
+        if (self.mic.wanted and "input" not in self._audio_opening and not self._ptt_active
+                and now - self._ptt_released_at > _AUDIO_IDLE_RELEASE_S):
+            to_close.append(self.mic)
+        return to_close
+
+    async def _audio_idle_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def close(streams):
+            with self._audio_lock:
+                for s in streams:
+                    s.stop()
+        while True:
+            await asyncio.sleep(1.0)
+            streams = self._release_idle_audio()
+            if streams:
+                log.debug("releasing idle audio: %s", ", ".join(s.kind for s in streams))
+                try:
+                    await asyncio.wait_for(loop.run_in_executor(None, close, streams), _AUDIO_OPEN_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    log.warning("closing idle audio devices is taking a long time")
 
     async def _open_audio(self) -> None:
         """Opens the mic and speaker without letting a bad device stop the
@@ -789,6 +896,9 @@ class OutpostClient:
                       "starting without them and retrying", _AUDIO_OPEN_TIMEOUT_S)
 
     async def stop(self) -> None:
+        if self._audio_idle_task:
+            self._audio_idle_task.cancel()
+            self._audio_idle_task = None
         if self._tx_task:
             self._tx_task.cancel()
             self._tx_task = None
@@ -880,7 +990,7 @@ class OutpostClient:
             else:
                 log.debug("audio: %s - retrying (next wait up to %.0fs)", reason, retry_delay)
             try:
-                await loop.run_in_executor(None, restart_streams, *streams)
+                await loop.run_in_executor(None, self._locked_restart, streams)
             except Exception as exc:
                 if not failing:
                     log.error("could not reopen audio devices (%s) - will keep retrying", exc)
@@ -898,7 +1008,15 @@ class OutpostClient:
             frame = await loop.run_in_executor(None, self.mic.read_frame)
             if not self._ptt_active:
                 continue
-            if self.enable_echo_guard and self._own_speaker_active():
+            if self._awaiting_permit:
+                # First audio since the press: the mic (and a Bluetooth
+                # headset's audio link) is live - tell the talker.
+                self._awaiting_permit = False
+                self._play_local(self._permit_tone_frames)
+                self._permit_mute_until = time.monotonic() + _PERMIT_TONE_MS / 1000 + 0.15
+            if time.monotonic() < self._permit_mute_until:
+                frame = b"\x00" * len(frame)
+            elif self.enable_echo_guard and self._own_speaker_active():
                 frame = b"\x00" * len(frame)
             else:
                 if self.highpass_enabled:
@@ -1545,3 +1663,4 @@ class OutpostClient:
 
         # Ordering, loss recovery and timing are the jitter buffer's job.
         self.mixer.push(header.channel_id, header.sender_id, header.seq, opus_bytes)
+        self._demand_audio("output")

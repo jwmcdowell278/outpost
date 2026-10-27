@@ -336,3 +336,36 @@ def test_webui_monitor_endpoint_applies_live_and_saves(tmp_path):
     reloaded = OutpostClient(load_config(str(path)), "team")
     assert reloaded.monitored_channel_ids == {2}
     assert reloaded.channel_volume(2) == 0.5
+
+
+def test_output_started_plays_audio_queued_while_speaker_was_closed(clock):
+    """With release_audio_when_idle the speaker opens only once audio
+    arrives, so a backlog builds first. It must play from the start, not be
+    skipped as excess delay."""
+    m = Mixer(FS, 20, decoder_factory=FakeDecoder)
+    for seq in range(1, 26):          # 0.5s of audio arrives, nothing pulling
+        m.push(1, 7, seq, bytes([seq]))
+        clock.t += 0.02
+    assert m.has_pending()
+    m.output_started()
+    first = [_values(m.next_frame()) for _ in range(5)]
+    assert first == [1, 2, 3, 4, 5]
+
+
+def test_without_output_started_the_backlog_is_skipped(clock):
+    m = Mixer(FS, 20, decoder_factory=FakeDecoder)
+    for seq in range(1, 26):
+        m.push(1, 7, seq, bytes([seq]))
+        clock.t += 0.02
+    assert _values(m.next_frame()) != 1   # the old behaviour this guards against
+
+
+def test_has_pending_is_false_once_a_transmission_has_played_out(clock):
+    m = Mixer(FS, 20, decoder_factory=FakeDecoder)
+    m.push(1, 7, 1, b"\x01")
+    m.stop(1, 7)
+    assert m.has_pending()
+    for _ in range(5):
+        m.next_frame()
+        clock.t += 0.02
+    assert not m.has_pending()
