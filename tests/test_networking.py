@@ -216,6 +216,9 @@ def test_access_point_setup_and_switch(tmp_path):
             await m.configure_ap("Outpost", "short")
         await m.configure_ap("Outpost", "correcthorse", channel=6)
         assert fake.ran("connection", "add") and fake.conns[AP_CONNECTION]["mode"] == "ap"
+        await m.configure_ap("Outpost", "correcthorse")          # automatic channel
+        last = fake.calls[-1]
+        assert last[last.index("802-11-wireless.channel") + 1] == ""   # nmcli rejects "0"
         await m.set_mode("ap")
         s = await m.wifi_status()
         assert s["mode"] == "ap" and s["ssid"] == "Outpost"

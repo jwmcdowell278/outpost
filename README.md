@@ -1258,7 +1258,10 @@ until `web_ui_token` is set.
 **Permissions.** Outpost runs as an ordinary user, which NetworkManager
 doesn't let change system settings when nobody is logged in at the
 console. Allow the `netdev` group (Raspberry Pi OS puts the default user
-in it) with a polkit rule, `/etc/polkit-1/rules.d/50-outpost-network.rules`:
+in it) with a polkit rule, `/etc/polkit-1/rules.d/40-outpost-network.rules`
+(it must sort before `49-polkit-pkla-compat.rules`, which applies a
+"no" for non-console users from NetworkManager's legacy `.pkla` file - with
+a `50-` name the rule is never reached):
 
 ```js
 polkit.addRule(function(action, subject) {

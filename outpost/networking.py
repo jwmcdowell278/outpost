@@ -442,7 +442,8 @@ class NetworkManager:
             raise NetworkError("2.4 GHz channel must be 1-13")
         settings = ["802-11-wireless.mode", "ap", "802-11-wireless.band", "bg",
                     "802-11-wireless.ssid", ssid,
-                    "802-11-wireless.channel", str(int(channel)) if channel else "0",
+                    # Empty means automatic; NetworkManager rejects "0".
+                    "802-11-wireless.channel", str(int(channel)) if channel else "",
                     "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.proto", "rsn",
                     "wifi-sec.pairwise", "ccmp", "wifi-sec.group", "ccmp", "wifi-sec.psk", password,
                     "ipv4.method", "shared", "ipv6.method", "disabled"]
