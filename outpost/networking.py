@@ -245,6 +245,10 @@ class NetworkManager:
             msg = out.strip().splitlines()[-1] if out.strip() else f"nmcli failed ({code})"
             if "Insufficient privileges" in out or "not authorized" in out.lower():
                 msg += " - Outpost isn't allowed to change network settings; see README \"Network settings\""
+            elif AP_CONNECTION in args and ("IP configuration could not be reserved" in out
+                                            or "ip-config-unavailable" in out):
+                msg += (" - another DNS server on this device (e.g. Pi-hole) may be using port 53; "
+                        "see README \"Network settings\"")
             raise NetworkError(msg)
         return out
 

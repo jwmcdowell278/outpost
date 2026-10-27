@@ -1280,6 +1280,19 @@ just that command with `sudo visudo -f /etc/sudoers.d/outpost-wg`:
 
 Without it everything else works; the page just can't show handshakes.
 
+**Access point next to Pi-hole (or another DNS server).** For access point
+clients NetworkManager starts its own DHCP/DNS server, whose DNS part can't
+start when something else already uses port 53 - the access point comes up
+for a second, then fails with "IP configuration could not be reserved" (the
+log says `dnsmasq: failed to create listening socket ... Address already in
+use`). Let it hand out addresses only, and send clients to the existing DNS
+server, with `/etc/NetworkManager/dnsmasq-shared.d/outpost-ap.conf`:
+
+```
+port=0
+dhcp-option=option:dns-server,10.42.0.1
+```
+
 ## Choosing the microphone and speaker
 
 If a node has more than one audio device (e.g. a USB headset plus a

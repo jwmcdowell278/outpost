@@ -381,3 +381,16 @@ def test_network_changes_need_a_token_when_exposed(tmp_path):
                                headers={"Authorization": "Bearer s3cret"})
             assert ok.status == 200
     run(go())
+
+
+def test_access_point_dns_conflict_gets_a_hint():
+    async def go():
+        fake = FakeNmcli()
+        m = NetworkManager(fake)
+        await m.configure_ap("Outpost", "correcthorse")
+        fake.fail["connection up"] = ("Error: Connection activation failed: IP configuration could not be "
+                                      "reserved (no available address, timeout, etc.).")
+        with pytest.raises(NetworkError, match="Pi-hole"):
+            await m.set_mode("ap")
+        assert fake.conns["HomeNet"]["auto"] and m.revert_at is None    # failed change undone
+    run(go())
