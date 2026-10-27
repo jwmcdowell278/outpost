@@ -1226,6 +1226,57 @@ Don't also start Outpost by hand while the service runs - both would use
 the same port. For headset PTT buttons, also see "Bluetooth headset
 buttons" above (the venv Python needs `CAP_NET_RAW`).
 
+## Network settings (Wi-Fi and WireGuard)
+
+The web UI's **Network** page manages the device's networking through
+NetworkManager (`nmcli`, standard on Raspberry Pi OS Bookworm; Linux only):
+
+- **Wi-Fi mode**: *Client* (saved networks connect automatically), *Access
+  point*, or *Off*. As a client: scan, join a network, forget saved ones.
+  As an access point: set the network name, password (WPA2) and channel;
+  devices that join get an address (the Pi is `10.42.0.1`) and internet
+  through the Pi's other connections. **A Wi-Fi change that cuts the page
+  off from the Pi is undone after 2 minutes** - the page confirms the
+  change automatically as long as it can still reach the Pi, so this only
+  kicks in when a change locked you out.
+- **WireGuard**: create, edit, import (paste a `.conf`), bring up/down and
+  delete tunnels. Keys are generated on the device and the public key shown
+  for the other end. Each peer shows its endpoint, last handshake and
+  traffic. Untick "Add routes for each peer's allowed IPs" when a routing
+  protocol (e.g. Babel, see "Bridging sites") decides routes instead.
+  Tunnels become NetworkManager connections, so they come back at boot;
+  Outpost keeps its own copy of each one's settings (owner-only files in
+  `wireguard/` next to the config file) so they can be edited later.
+  Tunnels set up some other way are shown but can't be edited until you
+  import their config.
+
+**A token is required.** These settings control the device's networking
+and the page shows WireGuard private keys, so while the web UI is reachable
+from other machines (`web_ui_host` not `127.0.0.1`) the page is read-only
+until `web_ui_token` is set.
+
+**Permissions.** Outpost runs as an ordinary user, which NetworkManager
+doesn't let change system settings when nobody is logged in at the
+console. Allow the `netdev` group (Raspberry Pi OS puts the default user
+in it) with a polkit rule, `/etc/polkit-1/rules.d/50-outpost-network.rules`:
+
+```js
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 && subject.isInGroup("netdev")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+Tunnel handshakes and traffic come from `wg show`, which needs root; allow
+just that command with `sudo visudo -f /etc/sudoers.d/outpost-wg`:
+
+```
+%netdev ALL=(root) NOPASSWD: /usr/bin/wg show all dump
+```
+
+Without it everything else works; the page just can't show handshakes.
+
 ## Choosing the microphone and speaker
 
 If a node has more than one audio device (e.g. a USB headset plus a

@@ -12,6 +12,7 @@ responses never include channel or mesh keys.
 from __future__ import annotations
 import base64
 import html
+import os
 import logging
 import time
 from dataclasses import replace
@@ -22,6 +23,8 @@ except ImportError:
     web = None
 
 from .bluetooth import BluetoothManager, BluetoothError
+from .networking import (NetworkManager, NetworkError, generate_wg_private_key, wg_public_key,
+                         parse_wg_conf)
 from .crypto import generate_channel_key, KEY_SIZE
 from .config import (
     EDITABLE_FIELDS,
@@ -144,6 +147,7 @@ def _nav(active: str) -> str:
   <a href="/peers"{cls('peers')}>Peers</a>
   <a href="/buttons"{cls('buttons')}>Buttons</a>
   <a href="/bluetooth"{cls('bluetooth')}>Bluetooth</a>
+  <a href="/network"{cls('network')}>Network</a>
   <a href="/settings"{cls('settings')}>Settings</a>
 </nav>"""
 
@@ -1063,6 +1067,372 @@ setInterval(() => {{ if (!busy) refresh(); }}, 3000);
 """
 
 
+_NETWORK_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Network</title>
+{_FAVICON_LINK}
+{_STYLE}
+<style>
+  .peer {{ border: 1px solid var(--border); border-radius: 0.4rem; padding: 0.5rem; margin: 0.5rem 0; }}
+  .peer input[type=text] {{ width: 100%; }}
+  .grid {{ display: grid; grid-template-columns: 8rem 1fr; gap: 0.35rem 0.6rem; align-items: center; }}
+  .grid input[type=text], .grid input[type=password], .grid input[type=number] {{ width: 100%; }}
+  .mono {{ font-family: ui-monospace, monospace; font-size: 0.78rem; word-break: break-all; }}
+  #revertBanner {{ display: none; border-color: var(--accent); }}
+  textarea {{ width: 100%; min-height: 8rem; font-family: ui-monospace, monospace; font-size: 0.8rem;
+              background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 0.35rem; }}
+</style>
+</head>
+<body>
+{_BRAND_H1}
+{_nav('network')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div id="unavailable" class="card error" style="display:none"></div>
+
+<div class="card" id="revertBanner">
+  <div id="revertText"></div>
+</div>
+
+<div class="card" id="wifiCard">
+  <h2>Wi-Fi</h2>
+  <div id="wifiStatus" class="name">loading...</div>
+  <div class="row" id="modeButtons">
+    <button type="button" data-mode="client">Client</button>
+    <button type="button" data-mode="ap">Access point</button>
+    <button type="button" data-mode="off">Off</button>
+  </div>
+  <div class="muted">If a change cuts this page off from the Pi, it's undone automatically after 2 minutes.</div>
+  <div id="wifiMsg"></div>
+</div>
+
+<div class="card" id="clientCard">
+  <h2>Join a network</h2>
+  <div class="row"><button type="button" id="scanBtn">Scan</button></div>
+  <table id="scanTable"><thead><tr><th>Network</th><th>Signal</th><th>Security</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="row">
+    <input id="joinSsid" type="text" size="16" placeholder="network name">
+    <input id="joinPass" type="password" size="16" placeholder="password (if any)">
+    <button type="button" id="joinBtn">Connect</button>
+  </div>
+  <h2 style="margin-top:1rem">Saved networks</h2>
+  <table id="savedTable"><thead><tr><th>Network</th><th></th><th></th></tr></thead><tbody></tbody></table>
+</div>
+
+<div class="card" id="apCard">
+  <h2>Access point</h2>
+  <div class="grid">
+    <label for="apSsid">Network name</label><input id="apSsid" type="text">
+    <label for="apPass">Password</label><input id="apPass" type="password" placeholder="8-63 characters">
+    <label for="apChan">Channel</label><input id="apChan" type="number" min="0" max="13" placeholder="auto">
+  </div>
+  <div class="row"><button type="button" id="apSave">Save access point</button></div>
+  <div class="muted">Devices that join get an address (the Pi is 10.42.0.1) and internet through the Pi's other connections. Saving doesn't switch modes - use the Access point button above.</div>
+  <div id="apMsg"></div>
+</div>
+
+<div class="card" id="wgCard">
+  <h2>WireGuard</h2>
+  <div id="wgList">loading...</div>
+  <div class="row">
+    <button type="button" id="wgNew">New tunnel</button>
+    <button type="button" id="wgImportBtn">Import config</button>
+  </div>
+  <div id="wgMsg"></div>
+</div>
+
+<div class="card" id="wgImport" style="display:none">
+  <h2>Import a WireGuard config</h2>
+  <textarea id="wgImportText" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;..."></textarea>
+  <div class="row"><input id="wgImportName" type="text" size="10" placeholder="wg0"><button type="button" id="wgImportGo">Load into editor</button></div>
+</div>
+
+<div class="card" id="wgEditor" style="display:none">
+  <h2 id="wgEditorTitle">Tunnel</h2>
+  <div class="grid">
+    <label for="wgName">Name</label><input id="wgName" type="text" placeholder="wg0">
+    <label for="wgPriv">Private key</label><div class="row" style="margin:0"><input id="wgPriv" type="password" style="flex:1"><button type="button" id="wgGen">Generate</button></div>
+    <label>Public key</label><div class="mono" id="wgPub">-</div>
+    <label for="wgAddr">Addresses</label><input id="wgAddr" type="text" placeholder="10.99.1.2/30, fe80::2/64">
+    <label for="wgPort">Listen port</label><input id="wgPort" type="number" min="1" max="65535" placeholder="none (client end)">
+  </div>
+  <div class="row"><label><input type="checkbox" id="wgRoutes" checked> Add routes for each peer's allowed IPs (turn off when Babel handles routing)</label></div>
+  <div class="row"><label><input type="checkbox" id="wgUp" checked> Bring up now and at boot</label></div>
+  <h2 style="margin-top:0.8rem">Peers</h2>
+  <div id="wgPeers"></div>
+  <div class="row"><button type="button" id="wgAddPeer">Add peer</button></div>
+  <div class="row"><button type="button" id="wgSave">Save tunnel</button><button type="button" id="wgCancel">Cancel</button></div>
+  <div id="wgEditMsg"></div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+function esc(s) {{ const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }}
+function msg(id, text, cls) {{ const m = document.getElementById(id); m.className = cls || 'muted'; m.textContent = text || ''; }}
+function post(path, body) {{
+  return api(path, {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body || {{}}) }});
+}}
+function age(s) {{ if (s == null) return 'never'; if (s < 120) return s + 's ago'; if (s < 7200) return Math.round(s/60) + 'm ago'; return Math.round(s/3600) + 'h ago'; }}
+function bytes(n) {{ if (n < 1024) return n + ' B'; if (n < 1048576) return (n/1024).toFixed(1) + ' KB'; return (n/1048576).toFixed(1) + ' MB'; }}
+
+let state = null;
+let busy = false;
+let editingExisting = false;
+
+// After a Wi-Fi change: keep confirming until the Pi answers, so the change
+// sticks if this page can still reach it - and is undone if it can't.
+async function confirmChange() {{
+  const until = Date.now() + 110000;
+  while (Date.now() < until) {{
+    try {{ await post('/api/network/confirm'); refresh(); return; }} catch (e) {{}}
+    await new Promise(r => setTimeout(r, 3000));
+  }}
+}}
+
+function renderWifi(w) {{
+  const modes = {{ client: 'Client', ap: 'Access point', off: 'Off' }};
+  let line = 'Mode: ' + modes[w.mode];
+  if (w.ssid) line += ' · ' + (w.mode === 'ap' ? 'broadcasting ' : 'connected to ') + w.ssid;
+  else if (w.mode === 'client') line += ' · not connected';
+  if (w.addresses.length) line += ' · ' + w.addresses.join(', ');
+  if (!w.device) line = 'No Wi-Fi device found';
+  document.getElementById('wifiStatus').textContent = line;
+  document.querySelectorAll('#modeButtons button').forEach(b => {{
+    b.classList.toggle('active', b.dataset.mode === w.mode);
+    b.disabled = busy || !w.device;
+  }});
+  document.getElementById('clientCard').style.display = w.mode === 'off' ? 'none' : '';
+  const banner = document.getElementById('revertBanner');
+  banner.style.display = w.revert_in_s != null ? 'block' : 'none';
+  if (w.revert_in_s != null) document.getElementById('revertText').textContent =
+    'Checking the Pi is still reachable - the last Wi-Fi change is undone in ' + w.revert_in_s + 's unless this page confirms it.';
+  const saved = document.querySelector('#savedTable tbody');
+  saved.textContent = '';
+  for (const n of w.saved) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{esc(n.ssid)}}</td><td>${{n.active ? '<span class="pill live">connected</span>' : ''}}</td>` +
+      `<td><button type="button" class="forgetBtn" data-name="${{esc(n.name)}}">Forget</button></td>`;
+    saved.appendChild(tr);
+  }}
+  if (w.ap && !document.getElementById('apSsid').value) document.getElementById('apSsid').value = w.ap.ssid;
+}}
+
+function renderPeerStatus(p) {{
+  return `<div class="muted mono">${{esc(p.public_key)}}</div>` +
+    `<div class="muted">${{p.endpoint ? esc(p.endpoint) + ' · ' : ''}}handshake ${{age(p.handshake_age_s)}} · ↓${{bytes(p.rx_bytes)}} ↑${{bytes(p.tx_bytes)}}</div>`;
+}}
+
+function renderWg(wg) {{
+  const list = document.getElementById('wgList');
+  if (!wg.tunnels.length && !wg.unmanaged.length) {{ list.textContent = 'No tunnels yet.'; return; }}
+  list.innerHTML = '';
+  for (const t of wg.tunnels) {{
+    const div = document.createElement('div');
+    div.className = 'peer';
+    div.innerHTML = `<div class="row field-row"><span class="name"><b>${{esc(t.name)}}</b> ` +
+      `${{t.up ? '<span class="pill live">up</span>' : '<span class="pill">down</span>'}} ${{esc(t.addresses)}}</span>` +
+      `<span>${{t.editable ? `<button type="button" data-wg="${{esc(t.name)}}" data-act="edit">Edit</button>` : ''}} ` +
+      `<button type="button" data-wg="${{esc(t.name)}}" data-act="${{t.up ? 'down' : 'up'}}">${{t.up ? 'Down' : 'Up'}}</button> ` +
+      `<button type="button" data-wg="${{esc(t.name)}}" data-act="delete">Delete</button></span></div>` +
+      (t.public_key ? `<div class="muted">Public key: <span class="mono">${{esc(t.public_key)}}</span></div>` : '') +
+      (t.listen_port ? `<div class="muted">Listening on port ${{esc(t.listen_port)}}</div>` : '') +
+      t.peers.map(renderPeerStatus).join('') +
+      (!t.editable ? '<div class="muted">Set up outside Outpost - import its config to edit it here.</div>' : '');
+    list.appendChild(div);
+  }}
+  for (const t of wg.unmanaged) {{
+    const div = document.createElement('div');
+    div.className = 'peer';
+    div.innerHTML = `<div class="name"><b>${{esc(t.interface)}}</b> <span class="pill">not managed here</span></div>` +
+      t.peers.map(renderPeerStatus).join('');
+    list.appendChild(div);
+  }}
+  if (!wg.live_status) list.innerHTML += '<div class="muted">Handshakes and traffic need permission to run "sudo wg show" - see README "Network settings".</div>';
+}}
+
+async function refresh() {{
+  try {{
+    state = await api('/api/network');
+  }} catch (e) {{ msg('wifiMsg', 'error: ' + e.message, 'error'); return; }}
+  const un = document.getElementById('unavailable');
+  if (!state.available) {{
+    un.style.display = 'block'; un.textContent = state.reason;
+    ['wifiCard', 'clientCard', 'apCard', 'wgCard'].forEach(id => document.getElementById(id).style.display = 'none');
+    return;
+  }}
+  if (state.error) msg('wifiMsg', state.error, 'error');
+  un.style.display = state.needs_token ? 'block' : 'none';
+  if (state.needs_token) un.textContent = 'Read-only: this web UI is reachable from other machines without a token. ' +
+    'Set web_ui_token in the config and restart Outpost to change network settings here.';
+  if (state.wifi) renderWifi(state.wifi);
+  if (state.wireguard) renderWg(state.wireguard);
+}}
+
+async function run(msgId, label, fn) {{
+  busy = true; msg(msgId, label + '...');
+  if (state && state.wifi) renderWifi(state.wifi);
+  try {{ const r = await fn(); msg(msgId, (r && r.message) || 'done', 'ok'); return r; }}
+  catch (e) {{ msg(msgId, e.message, 'error'); }}
+  finally {{ busy = false; refresh(); }}
+}}
+
+document.getElementById('modeButtons').addEventListener('click', async (e) => {{
+  const mode = e.target.dataset.mode;
+  if (!mode || (state && state.wifi.mode === mode)) return;
+  if (!confirm('Switch Wi-Fi to ' + e.target.textContent + '? If you reach this page over Wi-Fi, you may lose it until you reconnect.')) return;
+  const r = await run('wifiMsg', 'Switching', () => post('/api/network/wifi/mode', {{ mode }}));
+  if (r) confirmChange();
+}});
+
+document.getElementById('scanBtn').addEventListener('click', () => run('wifiMsg', 'Scanning', async () => {{
+  const r = await post('/api/network/wifi/scan');
+  const tbody = document.querySelector('#scanTable tbody');
+  tbody.textContent = '';
+  for (const n of r.networks) {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${{esc(n.ssid)}}${{n.in_use ? ' <span class="pill live">connected</span>' : ''}}</td><td>${{n.signal}}%</td>` +
+      `<td>${{esc(n.security || 'open')}}</td><td><button type="button" class="pickBtn" data-ssid="${{esc(n.ssid)}}">Choose</button></td>`;
+    tbody.appendChild(tr);
+  }}
+  return {{ message: r.networks.length + ' networks found' }};
+}}));
+
+document.getElementById('scanTable').addEventListener('click', (e) => {{
+  if (!e.target.classList.contains('pickBtn')) return;
+  document.getElementById('joinSsid').value = e.target.dataset.ssid;
+  document.getElementById('joinPass').focus();
+}});
+
+document.getElementById('joinBtn').addEventListener('click', async () => {{
+  const ssid = document.getElementById('joinSsid').value.trim();
+  const password = document.getElementById('joinPass').value;
+  if (!ssid) return msg('wifiMsg', 'enter a network name', 'error');
+  const r = await run('wifiMsg', 'Connecting to ' + ssid + ' (up to 45s)', () => post('/api/network/wifi/connect', {{ ssid, password }}));
+  document.getElementById('joinPass').value = '';
+  if (r) confirmChange();
+}});
+
+document.getElementById('savedTable').addEventListener('click', (e) => {{
+  if (!e.target.classList.contains('forgetBtn')) return;
+  const name = e.target.dataset.name;
+  if (!confirm('Forget ' + name + '?')) return;
+  run('wifiMsg', 'Forgetting', () => post('/api/network/wifi/forget', {{ name }}));
+}});
+
+document.getElementById('apSave').addEventListener('click', () => run('apMsg', 'Saving', () => post('/api/network/wifi/ap', {{
+  ssid: document.getElementById('apSsid').value, password: document.getElementById('apPass').value,
+  channel: document.getElementById('apChan').value || null,
+}})));
+
+// --- WireGuard editor ---
+function peerBox(p) {{
+  p = p || {{}};
+  const div = document.createElement('div');
+  div.className = 'peer';
+  div.innerHTML = `<div class="grid">
+    <label>Public key</label><input type="text" class="pPub" value="${{esc(p.public_key || '')}}">
+    <label>Endpoint</label><input type="text" class="pEnd" placeholder="host:port (blank if it connects to you)" value="${{esc(p.endpoint || '')}}">
+    <label>Allowed IPs</label><input type="text" class="pAllowed" placeholder="0.0.0.0/0, ::/0" value="${{esc(p.allowed_ips || '')}}">
+    <label>Keepalive (s)</label><input type="number" class="pKeep" placeholder="25 behind NAT/LTE" value="${{esc(p.keepalive || '')}}">
+    <label>Preshared key</label><input type="password" class="pPsk" placeholder="optional" value="${{esc(p.preshared_key || '')}}">
+  </div><div class="row"><button type="button" class="removePeer">Remove peer</button></div>`;
+  div.querySelector('.removePeer').addEventListener('click', () => div.remove());
+  return div;
+}}
+
+async function showPub() {{
+  const priv = document.getElementById('wgPriv').value.trim();
+  if (!priv) {{ document.getElementById('wgPub').textContent = '-'; return; }}
+  try {{ document.getElementById('wgPub').textContent = (await post('/api/network/wireguard/pubkey', {{ private_key: priv }})).public_key; }}
+  catch (e) {{ document.getElementById('wgPub').textContent = 'invalid private key'; }}
+}}
+
+function openEditor(name, t, existing) {{
+  editingExisting = existing;
+  document.getElementById('wgEditor').style.display = 'block';
+  document.getElementById('wgEditorTitle').textContent = existing ? 'Edit ' + name : 'New tunnel';
+  document.getElementById('wgName').value = name || '';
+  document.getElementById('wgName').disabled = existing;
+  document.getElementById('wgPriv').value = t.private_key || '';
+  document.getElementById('wgAddr').value = t.addresses || '';
+  document.getElementById('wgPort').value = t.listen_port || '';
+  document.getElementById('wgRoutes').checked = t.peer_routes !== false;
+  const peers = document.getElementById('wgPeers');
+  peers.textContent = '';
+  (t.peers && t.peers.length ? t.peers : [{{}}]).forEach(p => peers.appendChild(peerBox(p)));
+  msg('wgEditMsg', '');
+  showPub();
+  document.getElementById('wgEditor').scrollIntoView({{ behavior: 'smooth' }});
+}}
+
+document.getElementById('wgNew').addEventListener('click', () => openEditor('', {{}}, false));
+document.getElementById('wgCancel').addEventListener('click', () => {{ document.getElementById('wgEditor').style.display = 'none'; }});
+document.getElementById('wgAddPeer').addEventListener('click', () => document.getElementById('wgPeers').appendChild(peerBox()));
+document.getElementById('wgPriv').addEventListener('change', showPub);
+document.getElementById('wgGen').addEventListener('click', async () => {{
+  const r = await post('/api/network/wireguard/genkey');
+  document.getElementById('wgPriv').value = r.private_key;
+  document.getElementById('wgPub').textContent = r.public_key;
+}});
+document.getElementById('wgImportBtn').addEventListener('click', () => {{
+  const box = document.getElementById('wgImport');
+  box.style.display = box.style.display === 'none' ? 'block' : 'none';
+}});
+document.getElementById('wgImportGo').addEventListener('click', async () => {{
+  try {{
+    const t = await post('/api/network/wireguard/parse', {{ text: document.getElementById('wgImportText').value }});
+    document.getElementById('wgImport').style.display = 'none';
+    openEditor(document.getElementById('wgImportName').value.trim(), t, false);
+  }} catch (e) {{ msg('wgMsg', e.message, 'error'); }}
+}});
+
+document.getElementById('wgSave').addEventListener('click', () => run('wgEditMsg', 'Saving', async () => {{
+  const tunnel = {{
+    private_key: document.getElementById('wgPriv').value.trim(),
+    addresses: document.getElementById('wgAddr').value,
+    listen_port: document.getElementById('wgPort').value,
+    peer_routes: document.getElementById('wgRoutes').checked,
+    peers: [...document.querySelectorAll('#wgPeers .peer')].map(d => ({{
+      public_key: d.querySelector('.pPub').value.trim(), endpoint: d.querySelector('.pEnd').value.trim(),
+      allowed_ips: d.querySelector('.pAllowed').value, keepalive: d.querySelector('.pKeep').value,
+      preshared_key: d.querySelector('.pPsk').value.trim(),
+    }})),
+  }};
+  const r = await post('/api/network/wireguard/save', {{
+    name: document.getElementById('wgName').value.trim(), tunnel, up: document.getElementById('wgUp').checked,
+  }});
+  document.getElementById('wgEditor').style.display = 'none';
+  return {{ message: 'saved - give the other end this public key: ' + r.public_key }};
+}}));
+
+document.getElementById('wgList').addEventListener('click', async (e) => {{
+  const name = e.target.dataset.wg, act = e.target.dataset.act;
+  if (!name || !act) return;
+  if (act === 'edit') {{
+    try {{ openEditor(name, await api('/api/network/wireguard/' + encodeURIComponent(name)), true); }}
+    catch (err) {{ msg('wgMsg', err.message, 'error'); }}
+    return;
+  }}
+  if (act === 'delete' && !confirm('Delete tunnel ' + name + '?')) return;
+  run('wgMsg', {{ up: 'Bringing up', down: 'Taking down', delete: 'Deleting' }}[act] + ' ' + name,
+      () => post('/api/network/wireguard/action', {{ name, action: act }}));
+}});
+
+refresh();
+setInterval(() => {{ if (!busy) refresh(); }}, 5000);
+</script>
+</body>
+</html>
+"""
+
 class WebUI:
     def __init__(self, client, host: str = "127.0.0.1", port: int = 8765, token: str | None = None):
         if web is None:
@@ -1075,6 +1445,9 @@ class WebUI:
         self.token = token
         self._runner: web.AppRunner | None = None
         self.bluetooth = getattr(client, "bluetooth", None) or BluetoothManager()
+        config_path = getattr(client, "config_path", None)
+        self.network = NetworkManager(
+            tunnel_dir=os.path.join(os.path.dirname(os.path.abspath(config_path)), "wireguard") if config_path else None)
 
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([
@@ -1085,6 +1458,20 @@ class WebUI:
             web.get("/peers", self._handle_peers_page),
             web.get("/buttons", self._handle_buttons_page),
             web.get("/bluetooth", self._handle_bluetooth_page),
+            web.get("/network", self._handle_network_page),
+            web.get("/api/network", self._handle_get_network),
+            web.post("/api/network/confirm", self._handle_network_confirm),
+            web.post("/api/network/wifi/scan", self._handle_wifi_scan),
+            web.post("/api/network/wifi/mode", self._handle_wifi_mode),
+            web.post("/api/network/wifi/connect", self._handle_wifi_connect),
+            web.post("/api/network/wifi/forget", self._handle_wifi_forget),
+            web.post("/api/network/wifi/ap", self._handle_wifi_ap),
+            web.post("/api/network/wireguard/genkey", self._handle_wg_genkey),
+            web.post("/api/network/wireguard/pubkey", self._handle_wg_pubkey),
+            web.post("/api/network/wireguard/parse", self._handle_wg_parse),
+            web.post("/api/network/wireguard/save", self._handle_wg_save),
+            web.post("/api/network/wireguard/action", self._handle_wg_action),
+            web.get("/api/network/wireguard/{name}", self._handle_wg_get),
             web.get("/api/bluetooth", self._handle_get_bluetooth),
             web.post("/api/bluetooth/power", self._handle_bluetooth_power),
             web.post("/api/bluetooth/scan", self._handle_bluetooth_scan),
@@ -1116,7 +1503,7 @@ class WebUI:
     # Authorization header (a plain browser navigation can never send one) -
     # every api/* route stays behind the token below, so viewing live status
     # and every settings/channel/peer/PTT change still requires it.
-    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/buttons", "/bluetooth", "/favicon.svg"})
+    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/buttons", "/bluetooth", "/network", "/favicon.svg"})
 
     def _make_auth_middleware(self):
         # A plain closure, not a bound method - aiohttp's `middleware`
@@ -1205,6 +1592,120 @@ class WebUI:
         self.client.config = replace(self.client.config, button_bindings=bindings)
         self.client.buttons.bindings = list(bindings)
         return web.json_response(self._buttons_state())
+
+    # --- network settings (networking.py) -------------------------------------------
+
+    async def _handle_network_page(self, request) -> web.Response:
+        return web.Response(text=_NETWORK_HTML, content_type="text/html")
+
+    def _network_unprotected(self) -> bool:
+        """Reachable from other machines without a token."""
+        return not self.token and self.host not in ("127.0.0.1", "::1", "localhost")
+
+    def _require_network(self) -> None:
+        reason = self.network.unavailable_reason()
+        if reason:
+            raise web.HTTPConflict(text=reason)
+        if self._network_unprotected():
+            # Changing networking (or reading WireGuard private keys) must not
+            # be open to everyone on the network.
+            raise web.HTTPForbidden(text="set web_ui_token in the config (and enter it above) before changing "
+                                         "network settings - this web UI is reachable from other machines")
+
+    async def _network_call(self, coro):
+        try:
+            return await coro
+        except NetworkError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+    async def _json(self, request) -> dict:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        return data
+
+    async def _handle_get_network(self, request) -> web.Response:
+        reason = self.network.unavailable_reason()
+        if reason:
+            return web.json_response({"available": False, "reason": reason})
+        result = {"available": True, "error": None,
+                  "needs_token": self._network_unprotected()}
+        try:
+            result["wifi"] = await self.network.wifi_status()
+            result["wireguard"] = await self.network.wireguard_status()
+        except NetworkError as exc:
+            result["error"] = str(exc)
+        return web.json_response(result)
+
+    async def _handle_network_confirm(self, request) -> web.Response:
+        return web.json_response({"confirmed": self.network.confirm()})
+
+    async def _handle_wifi_scan(self, request) -> web.Response:
+        self._require_network()
+        return web.json_response({"networks": await self._network_call(self.network.scan())})
+
+    async def _handle_wifi_mode(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        await self._network_call(self.network.set_mode(data.get("mode")))
+        return web.json_response({"message": f"Wi-Fi switched to {data.get('mode')}"})
+
+    async def _handle_wifi_connect(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        await self._network_call(self.network.connect(data.get("ssid"), data.get("password") or None))
+        return web.json_response({"message": f"connected to {data.get('ssid')}"})
+
+    async def _handle_wifi_forget(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        await self._network_call(self.network.forget(data.get("name")))
+        return web.json_response({"message": "forgotten"})
+
+    async def _handle_wifi_ap(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        await self._network_call(self.network.configure_ap(data.get("ssid"), data.get("password"),
+                                                           data.get("channel")))
+        return web.json_response({"message": "access point saved"})
+
+    async def _handle_wg_genkey(self, request) -> web.Response:
+        self._require_network()
+        private_key = generate_wg_private_key()
+        return web.json_response({"private_key": private_key, "public_key": wg_public_key(private_key)})
+
+    async def _handle_wg_pubkey(self, request) -> web.Response:
+        data = await self._json(request)
+        try:
+            return web.json_response({"public_key": wg_public_key(data.get("private_key") or "")})
+        except (NetworkError, ValueError, TypeError) as exc:
+            raise web.HTTPBadRequest(text=f"invalid private key: {exc}")
+
+    async def _handle_wg_parse(self, request) -> web.Response:
+        data = await self._json(request)
+        text = data.get("text")
+        if not isinstance(text, str) or "[Interface]" not in text:
+            raise web.HTTPBadRequest(text="paste a WireGuard config with an [Interface] section")
+        return web.json_response(parse_wg_conf(text))
+
+    async def _handle_wg_get(self, request) -> web.Response:
+        self._require_network()
+        return web.json_response(await self._network_call(self.network.tunnel_config(request.match_info["name"])))
+
+    async def _handle_wg_save(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        tunnel = data.get("tunnel")
+        if not isinstance(tunnel, dict):
+            raise web.HTTPBadRequest(text="missing tunnel settings")
+        result = await self._network_call(self.network.save_tunnel(data.get("name"), tunnel, bool(data.get("up", True))))
+        return web.json_response(result)
+
+    async def _handle_wg_action(self, request) -> web.Response:
+        self._require_network()
+        data = await self._json(request)
+        await self._network_call(self.network.tunnel_action(data.get("name"), data.get("action")))
+        return web.json_response({"message": "done"})
 
     async def _handle_bluetooth_page(self, request) -> web.Response:
         return web.Response(text=_BLUETOOTH_HTML, content_type="text/html")
@@ -1584,6 +2085,7 @@ class WebUI:
 
     async def stop(self) -> None:
         self.bluetooth.stop()
+        self.network.stop()
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
