@@ -1,0 +1,3 @@
+# Give the HaLow radio a fixed name so it can never take wlan0 (the onboard
+# Wi-Fi that Outpost's Network page manages) depending on probe order.
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="morse_spi", NAME="halow0"

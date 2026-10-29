@@ -1,0 +1,153 @@
+#!/bin/sh
+# Brings the Heltec HT-HC01P HaLow radio up as an 802.11s mesh point (SAE,
+# no 802.11s forwarding) and puts batman-adv (bat0) on top of it.
+# Usage: halow-mesh start|stop|status       Settings: /etc/halow-mesh/halow.env
+set -eu
+
+. /etc/halow-mesh/halow.env
+IFACE=halow0          # named by /etc/udev/rules.d/70-halow.rules
+RUN=/run/halow-mesh
+CTRL=/var/run/wpa_supplicant_s1g
+
+log() { echo "halow-mesh: $*"; }
+
+gpio_set() {  # gpio_set <pin> <op dh|op dl|ip pu> - pinctrl (newer) or raspi-gpio
+    if command -v pinctrl >/dev/null; then
+        case "$2" in "op dh") pinctrl set "$1" op dh ;; "op dl") pinctrl set "$1" op dl ;; *) pinctrl set "$1" ip pu ;; esac
+    else
+        raspi-gpio set "$1" $2
+    fi
+}
+
+# The driver doesn't reset the chip before talking to it, so do it here:
+# WAKE (GPIO3) high, pulse RESET (GPIO5) low, then let the chip boot.
+reset_chip() {
+    gpio_set 3 "op dh"
+    gpio_set 5 "op dl"
+    sleep 0.3
+    gpio_set 5 "op dh"
+    sleep 3
+}
+
+# This module has no factory MAC, so the driver would pick a random one on
+# every load (and bat0's address with it). Derive a fixed per-Pi suffix from
+# /etc/machine-id instead: same on every boot, different on every node.
+node_suffix() {
+    md5sum /etc/machine-id | cut -c1-6 | sed 's/../&:/g; s/:$//'
+}
+
+load_driver() {
+    lsmod | grep -q "^morse " && { timeout 30 modprobe -r morse dot11ah 2>/dev/null || true; }
+    reset_chip
+    timeout 60 modprobe morse macaddr_suffix="$(node_suffix)" || log "modprobe morse failed or timed out - check: dmesg | grep -i morse"
+}
+
+# Load the driver (fresh chip reset each time) until halow0 appears; a load
+# occasionally fails partway through the firmware upload.
+wait_iface() {
+    tries=0
+    while [ ! -e "/sys/class/net/$IFACE" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 4 ]; then
+            log "no HaLow interface ($IFACE) after 4 driver loads - check: dmesg | grep -i morse"
+            exit 1
+        fi
+        [ "$tries" -gt 1 ] && log "driver load $((tries - 1)) didn't bring up $IFACE - retrying"
+        load_driver
+        i=0
+        while [ ! -e "/sys/class/net/$IFACE" ] && [ "$i" -lt 10 ]; do
+            sleep 1; i=$((i + 1))
+        done
+    done
+}
+
+derive_address() {
+    [ -n "${BAT_ADDRESS:-}" ] && { echo "$BAT_ADDRESS"; return; }
+    mac=$(cat "/sys/class/net/$IFACE/address")
+    x=$(printf %d "0x$(echo "$mac" | cut -d: -f5)")
+    y=$(printf %d "0x$(echo "$mac" | cut -d: -f6)")
+    [ "$y" -eq 0 ] && y=1
+    [ "$y" -eq 255 ] && y=254
+    echo "$BAT_PREFIX.$x.$y/16"
+}
+
+start() {
+    wait_iface
+    nmcli device set "$IFACE" managed no 2>/dev/null || true
+    # "Wi-Fi off" in NetworkManager soft-blocks every Wi-Fi radio, HaLow
+    # included; unblock just this one (the onboard Wi-Fi stays as it is).
+    for r in /sys/class/net/"$IFACE"/phy80211/rfkill*/soft; do
+        [ -e "$r" ] && echo 0 > "$r"
+    done
+    mkdir -p "$RUN"
+    umask 077
+    cat > "$RUN/wpa_supplicant.conf" <<EOF
+ctrl_interface=$CTRL
+country=$COUNTRY
+mesh_fwding=0
+network={
+    ssid="$MESH_ID"
+    mode=5
+    channel=$CHANNEL
+    op_class=$OP_CLASS
+    country="$COUNTRY"
+    # Morse's S1G mesh refuses to join unless DTIM is explicitly 1
+    dtim_period=1
+    beacon_int=100
+    key_mgmt=SAE
+    sae_password="$MESH_PASSWORD"
+    ieee80211w=2
+}
+EOF
+    umask 022
+    stop_supplicant
+    ip link set "$IFACE" up
+    wpa_supplicant_s1g -B -D nl80211 -i "$IFACE" -c "$RUN/wpa_supplicant.conf" \
+        -P "$RUN/wpa_supplicant.pid" -f "$RUN/wpa_supplicant.log"
+
+    modprobe batman-adv
+    if [ ! -e /sys/class/net/bat0 ]; then
+        batctl ra "$BATMAN_ALGO"
+        ip link add bat0 type batadv
+    fi
+    ip link set bat0 address "02:ba:74:$(node_suffix)"   # stable, so peers' ARP stays valid
+    # batman-adv adds 32 bytes; raise the radio MTU if the driver allows it,
+    # otherwise batman fragments (works, slightly more airtime).
+    ip link set "$IFACE" mtu 1532 2>/dev/null || log "radio MTU stays $(cat /sys/class/net/$IFACE/mtu)"
+    ip link set "$IFACE" master bat0
+    ip link set bat0 up
+    nmcli device set bat0 managed no 2>/dev/null || true
+    addr=$(derive_address)
+    ip addr replace "$addr" dev bat0
+    log "mesh '$MESH_ID' on channel $CHANNEL ($COUNTRY), bat0 = $addr"
+}
+
+stop_supplicant() {
+    if [ -f "$RUN/wpa_supplicant.pid" ]; then
+        kill "$(cat "$RUN/wpa_supplicant.pid")" 2>/dev/null || true
+        rm -f "$RUN/wpa_supplicant.pid"
+        sleep 1
+    fi
+}
+
+stop() {
+    [ -e /sys/class/net/bat0 ] && ip link del bat0 || true
+    stop_supplicant
+    [ -e "/sys/class/net/$IFACE" ] && ip link set "$IFACE" down || true
+}
+
+status() {
+    ip -br addr show bat0 2>/dev/null || echo "bat0: down"
+    iw dev "$IFACE" info 2>/dev/null | grep -E "type|channel" || true
+    echo "--- mesh peers (802.11s)"; iw dev "$IFACE" station dump 2>/dev/null | grep -E "^Station|signal:|tx bitrate" || true
+    echo "--- batman neighbours";    batctl n 2>/dev/null || true
+    echo "--- batman originators";   batctl o 2>/dev/null || true
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status) status ;;
+    *) echo "usage: $0 start|stop|restart|status" >&2; exit 2 ;;
+esac

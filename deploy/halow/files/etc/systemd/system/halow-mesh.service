@@ -1,0 +1,15 @@
+[Unit]
+Description=HaLow 802.11s mesh + batman-adv (bat0)
+# Starts after the normal network is up and blocks nothing else, so a radio
+# or driver problem can never hold up SSH, Pi-hole etc. at boot.
+After=network.target NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/halow-mesh start
+ExecStop=/usr/local/sbin/halow-mesh stop
+TimeoutStartSec=150
+
+[Install]
+WantedBy=multi-user.target

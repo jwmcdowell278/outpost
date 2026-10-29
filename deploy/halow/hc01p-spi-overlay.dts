@@ -1,0 +1,90 @@
+// Heltec HT-HC01P (Morse Micro MM6108) HaLow HAT on SPI0, for Raspberry Pi
+// 3/4 (BCM2835-family pin controller - not the Pi 5's RP1).
+//
+// Pins are Heltec's own (same as the Morse EKH01 HAT), taken from the overlay
+// in Heltec's HC01P OpenWrt image:
+//   RESET GPIO5, WAKE GPIO3, BUSY GPIO7, IRQ GPIO25, CS GPIO8 (SPI0 CE0)
+// GPIO7 is normally SPI0 CE1, so CE1 (spidev0.1) is given up, and spidev0.0
+// is disabled so the morse driver can own chip select 0.
+// GPIO3 is also I2C1 SCL - don't enable i2c_arm alongside this HAT.
+//
+// Build:  dtc -@ -I dts -O dtb -o hc01p-spi.dtbo hc01p-spi-overlay.dts
+// Use:    dtparam=spi=on + dtoverlay=hc01p-spi in config.txt
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	// Pull-ups on CS and the SPI lines, as in Heltec's own overlay. Without
+	// one, an idle MISO reads as 0x00, which the driver mistakes for a reply.
+	fragment@0 {
+		target = <&spi0_cs_pins>;
+		__overlay__ {
+			brcm,pins = <8>;
+			brcm,pull = <2>;
+		};
+	};
+
+	fragment@5 {
+		target = <&spi0_pins>;
+		__overlay__ {
+			brcm,pull = <2 2 2>;
+		};
+	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target = <&gpio>;
+		__overlay__ {
+			hc01p_pins: hc01p_pins {
+				// All inputs at boot: RESET and WAKE pulled up, so the chip
+				// is awake and out of reset (an output here would start low
+				// and hold it in reset). The driver / halow-mesh drive them
+				// as needed. BUSY pull-down (as Heltec), IRQ no pull.
+				brcm,pins = <5 3 7 25>;
+				brcm,function = <0 0 0 0>;
+				brcm,pull = <2 2 1 0>;
+			};
+		};
+	};
+
+	fragment@4 {
+		target = <&spi0>;
+		frag_spi: __overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			cs-gpios = <&gpio 8 1>;
+			status = "okay";
+
+			mm6108: mm6108@0 {
+				compatible = "morse,mm610x-spi";
+				reg = <0>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&hc01p_pins>;
+				reset-gpios = <&gpio 5 0>;
+				power-gpios = <&gpio 3 0>, <&gpio 7 0>;  // WAKE, BUSY
+				spi-irq-gpios = <&gpio 25 0>;
+				spi-max-frequency = <50000000>;
+				status = "okay";
+			};
+		};
+	};
+
+	__overrides__ {
+		speed = <&mm6108>, "spi-max-frequency:0";
+	};
+};
