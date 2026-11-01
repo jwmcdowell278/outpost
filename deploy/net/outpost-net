@@ -125,10 +125,65 @@ other_firewalls() {
             ufw route allow in on "${p%%>*}" out on "${p#*>}" comment "$TAG" >/dev/null
         done
     fi
-    if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1 && [ -n "$(allowed_pairs)" ]; then
-        say "note: firewalld is running and may block this forwarding - allow it there too"
-        say "      (firewall-cmd --zone=<zone> --add-forward --add-masquerade --permanent)"
+    if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+        firewalld_apply
     fi
+}
+
+# firewalld (Fedora, RHEL-likes, openSUSE) filters forwarded traffic per
+# zone and blocks it by default. Allow each pair with a policy
+# (outpost-net-N) from the first interface's zone to the second's (a policy
+# may have the same zone on both sides). Policies only cover interfaces
+# placed in a zone, so an interface in none is placed in the default zone -
+# whose rules it already uses, so what may reach the machine (e.g. SSH)
+# doesn't change. Those placements are undone when no longer needed.
+# Our nftables table still allows only the chosen interface pairs.
+fw_zone() {
+    local z
+    z=$(firewall-cmd --get-zone-of-interface="$1" 2>/dev/null) || z=$(firewall-cmd --get-default-zone)
+    echo "$z"
+}
+
+firewalld_apply() {
+    local bound dz i n p pol seen want z za zb
+    bound=$ETC/firewalld-placed
+    dz=$(firewall-cmd --get-default-zone)
+    for pol in $(firewall-cmd --permanent --get-policies 2>/dev/null); do
+        case "$pol" in outpost-net-*) firewall-cmd --permanent --delete-policy="$pol" >/dev/null ;; esac
+    done
+    want=$(for p in $(allowed_pairs); do echo "${p%%>*}"; echo "${p#*>}"; done | sort -u | tr '\n' ' ')
+    # Undo placements no longer needed, then place what's in no zone.
+    if [ -f "$bound" ]; then
+        while read -r i z; do
+            in_list "$i" "$want" || firewall-cmd --permanent --zone="$z" --remove-interface="$i" >/dev/null 2>&1 || true
+        done < "$bound"
+    fi
+    : > "$bound.new"
+    if [ -f "$bound" ]; then
+        while read -r i z; do in_list "$i" "$want" && echo "$i $z" >> "$bound.new"; done < "$bound"
+    fi
+    for i in $want; do
+        grep -q "^$i " "$bound.new" && continue
+        if ! firewall-cmd --get-zone-of-interface="$i" >/dev/null 2>&1 \
+                && ! firewall-cmd --permanent --get-zone-of-interface="$i" >/dev/null 2>&1; then
+            firewall-cmd --permanent --zone="$dz" --add-interface="$i" >/dev/null 2>&1 && echo "$i $dz" >> "$bound.new"
+        fi
+    done
+    mkdir -p "$ETC"; mv "$bound.new" "$bound"; [ -s "$bound" ] || rm -f "$bound"
+    n=0; seen=
+    for p in $(allowed_pairs); do
+        za=$(fw_zone "${p%%>*}"); zb=$(fw_zone "${p#*>}")
+        in_list "$za>$zb" "$seen" && continue
+        seen="$seen $za>$zb"
+        n=$((n + 1)); pol="outpost-net-$n"
+        firewall-cmd --permanent --new-policy="$pol" >/dev/null &&
+        firewall-cmd --permanent --policy="$pol" --add-ingress-zone="$za" >/dev/null &&
+        firewall-cmd --permanent --policy="$pol" --add-egress-zone="$zb" >/dev/null &&
+        firewall-cmd --permanent --policy="$pol" --set-target=ACCEPT >/dev/null ||
+            say "note: couldn't add firewalld policy $za -> $zb (needs firewalld 0.9 or newer)"
+    done
+    firewall-cmd --reload >/dev/null || say "note: firewalld didn't reload - see: firewall-cmd --state"
+    [ -z "$seen" ] || say "   firewalld: forwarding allowed for zones:$(echo "$seen" | sed 's/>/ -> /g')"
 }
 
 mesh_prefix() {
@@ -158,6 +213,7 @@ cmd_apply() {
     if [ -n "$GATEWAYS$FORWARD" ]; then
         mkdir -p "$ETC"
         [ -f "$SYSCTL" ] || cat /proc/sys/net/ipv4/ip_forward > "$ETC/ip_forward.before"
+        mkdir -p "$(dirname "$SYSCTL")"
         echo "net.ipv4.ip_forward = 1" > "$SYSCTL"
         sysctl -q -w net.ipv4.ip_forward=1
     elif [ -f "$SYSCTL" ]; then

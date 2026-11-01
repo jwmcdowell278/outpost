@@ -30,10 +30,30 @@ reset_chip() {
 }
 
 # This module has no factory MAC, so the driver would pick a random one on
-# every load (and bat0's address with it). Derive a fixed per-Pi suffix from
-# /etc/machine-id instead: same on every boot, different on every node.
+# every load (and bat0's address with it) - use node_suffix instead.
+# A fixed 3-byte suffix for this machine's radio MAC, bat0 MAC and mesh
+# address. It comes from hardware that stays with the board when an SD card
+# image is cloned (cloned cards share /etc/machine-id): the Raspberry Pi's
+# serial number, else the machine's DMI UUID, else the lowest hardware address
+# of its physical network ports (not the HaLow radio, whose address comes
+# from this). /etc/machine-id only as a last resort. halow-mesh and
+# outpost-mesh use the same rule, so a machine gets one address either way.
+node_id() {
+    for f in /sys/firmware/devicetree/base/serial-number /sys/class/dmi/id/product_uuid; do
+        [ -r "$f" ] || continue
+        v=$(tr -d '\0 \n' < "$f" 2>/dev/null)
+        [ -n "$(echo "$v" | tr -d '0-')" ] && { echo "$v"; return; }
+    done
+    for p in /sys/class/net/*; do
+        [ -e "$p/device" ] || continue
+        case "$(basename "$(readlink -f "$p/device/driver" 2>/dev/null)" 2>/dev/null)" in morse*) continue ;; esac
+        cat "$p/address" 2>/dev/null
+    done | grep -v '^00:00:00:00:00:00$' | sort | head -1 | grep . && return
+    cat /etc/machine-id
+}
+
 node_suffix() {
-    md5sum /etc/machine-id | cut -c1-6 | sed 's/../&:/g; s/:$//'
+    printf 'outpost-node:%s' "$(node_id)" | md5sum | cut -c1-6 | sed 's/../&:/g; s/:$//'
 }
 
 load_driver() {
@@ -61,11 +81,11 @@ wait_iface() {
     done
 }
 
-derive_address() {
+derive_address() {  # same as outpost-mesh: <prefix>.<suffix byte 2>.<byte 3>
     [ -n "${BAT_ADDRESS:-}" ] && { echo "$BAT_ADDRESS"; return; }
-    mac=$(cat "/sys/class/net/$IFACE/address")
-    x=$(printf %d "0x$(echo "$mac" | cut -d: -f5)")
-    y=$(printf %d "0x$(echo "$mac" | cut -d: -f6)")
+    s=$(node_suffix)
+    x=$(printf %d "0x$(echo "$s" | cut -d: -f2)")
+    y=$(printf %d "0x$(echo "$s" | cut -d: -f3)")
     [ "$y" -eq 0 ] && y=1
     [ "$y" -eq 255 ] && y=254
     echo "$BAT_PREFIX.$x.$y/16"

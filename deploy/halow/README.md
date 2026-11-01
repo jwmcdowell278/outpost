@@ -17,9 +17,10 @@ What runs on the Pi:
 - `halow-mesh.service`: resets the chip, loads the driver (retrying if the
   firmware upload fails), brings up an 802.11s mesh point (SAE, 802.11s
   forwarding off) on `halow0`, and puts batman-adv's `bat0` on top. The module
-  has no factory MAC, so the radio's MAC (and therefore the `10.42.x.y/16`
-  address on `bat0`) is derived from `/etc/machine-id`: fixed per Pi,
-  different on every node.
+  has no factory MAC, so the radio's MAC, `bat0`'s MAC and the
+  `10.42.x.y/16` address on `bat0` come from the Pi's serial number: fixed
+  per board, different on every node, and unaffected by cloning an SD card
+  (cloned cards share `/etc/machine-id`, so that's only a last resort).
 
 Board quirks (Pi 3 + HT-HC01P), all handled by the kit:
 

@@ -418,11 +418,30 @@ cmd_settings() {
 
 # ------------------------------------------------------------------ running
 
-# Fixed per-machine suffix from /etc/machine-id - same on every boot,
-# different on every node. halow-mesh uses the same one, so a machine gets
-# the same bat0 MAC and address whichever of the two creates bat0.
+# A fixed 3-byte suffix for this machine's radio MAC, bat0 MAC and mesh
+# address. It comes from hardware that stays with the board when an SD card
+# image is cloned (cloned cards share /etc/machine-id): the Raspberry Pi's
+# serial number, else the machine's DMI UUID, else the lowest hardware address
+# of its physical network ports (not the HaLow radio, whose address comes
+# from this). /etc/machine-id only as a last resort. halow-mesh and
+# outpost-mesh use the same rule, so a machine gets one address either way.
+node_id() {
+    local f p v
+    for f in /sys/firmware/devicetree/base/serial-number /sys/class/dmi/id/product_uuid; do
+        [ -r "$f" ] || continue
+        v=$(tr -d '\0 \n' < "$f" 2>/dev/null)
+        [ -n "$(echo "$v" | tr -d '0-')" ] && { echo "$v"; return; }
+    done
+    for p in /sys/class/net/*; do
+        [ -e "$p/device" ] || continue
+        case "$(basename "$(readlink -f "$p/device/driver" 2>/dev/null)" 2>/dev/null)" in morse*) continue ;; esac
+        cat "$p/address" 2>/dev/null
+    done | grep -v '^00:00:00:00:00:00$' | sort | head -1 | grep . && return
+    cat /etc/machine-id
+}
+
 node_suffix() {
-    md5sum /etc/machine-id | cut -c1-6 | sed 's/../&:/g; s/:$//'
+    printf 'outpost-node:%s' "$(node_id)" | md5sum | cut -c1-6 | sed 's/../&:/g; s/:$//'
 }
 
 derive_address() {

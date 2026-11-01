@@ -225,7 +225,14 @@ Notes:
   so they can't cut off SSH.
 - **Docker** blocks forwarding by default. Allow rules are also added to
   its `DOCKER-USER` chain. **ufw** gets matching `route allow` rules.
-  With **firewalld**, allow forwarding and masquerading there as well.
+  With **firewalld** (Fedora, RHEL-likes, openSUSE), each allowed pair gets
+  a firewalld policy (`outpost-net-1`, ...) from one interface's zone to the
+  other's. An interface in no zone is placed in the default zone, whose
+  rules it already uses, so what can reach the machine (e.g. SSH) doesn't
+  change; that's undone when no longer needed. Interfaces are never moved
+  between zones. Needs firewalld 0.9 or newer.
+- Tested as the router on Raspberry Pi OS, Debian, Ubuntu, Fedora (with and
+  without firewalld), Arch and openSUSE. Needs systemd and nftables.
 - Mesh nodes using a gateway need a DNS server too, e.g. set one with
   `nmcli` or in `/etc/resolv.conf` (the gateway's upstream DNS or a public
   one).
