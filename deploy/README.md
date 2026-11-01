@@ -11,8 +11,15 @@ It installs:
 - **On a Raspberry Pi 3/4 with 64-bit Raspberry Pi OS:** the HaLow HAT
   drivers and the batman-adv mesh (`halow/`, see `halow/README.md`). Done
   automatically on a Pi; `--no-halow` skips it.
+- **The network tools, on every machine:** `outpost-net` (the main menu:
+  status, gateways, forwarding, HaLow settings), `outpost-mesh` (which cards
+  the batman-adv mesh uses, Wi-Fi mesh settings) and `outpost-wifi` (client
+  or access point; needs NetworkManager). With no cards chosen the mesh
+  tool changes nothing. A machine whose kernel has no batman-adv skips it
+  with a note, unless you asked for mesh cards.
 - **Optionally, on any machine:** a batman-adv mesh over ordinary Wi-Fi
-  (802.11s) or Ethernet (`--mesh-wifi`, `--mesh-eth`).
+  (802.11s or ad-hoc) or Ethernet (`--mesh-select`, `--mesh-wifi`,
+  `--mesh-eth`).
 
 ## Before you start
 

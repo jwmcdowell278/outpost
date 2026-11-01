@@ -114,14 +114,17 @@ if [ "$HALOW" = 1 ] && [ ! -f "$HERE/halow/out/KERNEL_RELEASE" ]; then
     echo "!! the HaLow kit isn't built yet - see deploy/halow/README.md (Build), or use --no-halow" >&2
     exit 1
 fi
-MESH=0
-if [ -n "$MESH_WIFI$MESH_ETH$MESH_ENV" ] || [ "$MESH_SELECT" = 1 ] || [ "$MESHED" = mesh-installed ]; then MESH=1; fi
+# outpost-mesh is always installed (so every node has the full menu). It
+# only has to succeed when mesh cards were asked for, or it's already in use.
+MESH_ASKED=0
+if [ -n "$MESH_WIFI$MESH_ETH$MESH_ENV" ] || [ "$MESH_SELECT" = 1 ] || [ "$MESHED" = mesh-installed ]; then MESH_ASKED=1; fi
 if [ "$MESH_SELECT" = 1 ] && [ -n "$MESH_WIFI$MESH_ETH" ]; then
     echo "use either --mesh-select or --mesh-wifi/--mesh-eth" >&2; exit 2
 fi
 parts=Outpost
 [ "$HALOW" = 0 ] || parts="$parts, HaLow drivers + mesh"
-[ "$MESH" = 0 ] || parts="$parts, Wi-Fi/Ethernet mesh"
+parts="$parts, network tools (outpost-net, outpost-mesh, outpost-wifi)"
+[ -z "$MESH_WIFI$MESH_ETH" ] && [ "$MESH_SELECT" = 0 ] || parts="$parts, Wi-Fi/Ethernet mesh"
 echo "   installing: $parts"
 
 # bsdtar (macOS) would add Apple metadata files; GNU tar has no such flags.
@@ -151,7 +154,7 @@ cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.
 [ -z "$MESH_ENV" ] || install -m 0600 "$MESH_ENV" "$D/mesh.env"
 # Settings for remote-run.sh, quoted so names with spaces stay whole.
 {
-    printf 'HALOW=%q\nMESH=%q\nMESH_WIFI=%q\nMESH_ETH=%q\n' "$HALOW" "$MESH" "$MESH_WIFI" "$MESH_ETH"
+    printf 'HALOW=%q\nMESH_ASKED=%q\nMESH_WIFI=%q\nMESH_ETH=%q\n' "$HALOW" "$MESH_ASKED" "$MESH_WIFI" "$MESH_ETH"
     printf 'FORCE_MESH=%q\nMESH_SELECT=%q\nNODE_NAME=%q\nUSB_BT=%q\n' "$FORCE_MESH" "$MESH_SELECT" "$NAME" "$USB_BT"
     printf 'WIFI_SETUP=%q\nNET_SETUP=%q\n' "$WIFI_SETUP" "$NET_SETUP"
 } > "$D/vars.sh"

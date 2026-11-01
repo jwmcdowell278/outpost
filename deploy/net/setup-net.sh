@@ -12,7 +12,10 @@ install -m 0755 "$N/net/outpost-net" /usr/local/sbin/outpost-net
 for u in outpost-net.service outpost-net-route.service outpost-net-route.timer; do
     install -m 0644 "$N/net/$u" "/etc/systemd/system/$u"
 done
-systemctl daemon-reload
-systemctl enable outpost-net.service outpost-net-route.timer >/dev/null 2>&1
-systemctl restart outpost-net.service && systemctl start outpost-net-route.timer
-echo "== outpost-net installed (sudo outpost-net)"
+systemctl daemon-reload || true
+if systemctl enable outpost-net.service outpost-net-route.timer >/dev/null 2>&1 \
+        && systemctl restart outpost-net.service && systemctl start outpost-net-route.timer; then
+    echo "== outpost-net installed (sudo outpost-net)"
+else
+    echo "!! outpost-net installed, but its service didn't start - see: systemctl status outpost-net" >&2
+fi
