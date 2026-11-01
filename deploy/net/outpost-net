@@ -181,7 +181,7 @@ cmd_apply() {
 # (outpost-mesh, halow-mesh), so: gateway originator -> the 02:ba:74 client
 # it announces -> address.
 mesh_gateway_addr() {
-    local mac o orig x y
+    local mac orig x y
     [ -n "$MESH_GATEWAY" ] && { echo "$MESH_GATEWAY"; return; }
     orig=$(batctl gwl -H 2>/dev/null | grep -E '^\s*(\*|=>)' | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
     [ -n "$orig" ] || return 0
@@ -229,9 +229,11 @@ cmd_gateway() {
     up=${1:?usage: outpost-net gateway UPLINK IFACE...}; shift
     [ $# -gt 0 ] || die "which interfaces should use $up's internet? e.g.: outpost-net gateway $up bat0"
     valid_if "$up"
+    in_mesh "$up" && die "$up is part of the mesh - use bat0"
     served=
     for s in "$@"; do
         valid_if "$s"; [ "$s" != "$up" ] || die "$up can't serve itself"
+        in_mesh "$s" && { say "skipping $s: it's part of the mesh, which bat0 covers"; continue; }
         served="${served:+$served,}$s"
     done
     [ -e "/sys/class/net/$up" ] || say "note: $up doesn't exist right now - it's used when it appears"
@@ -239,7 +241,7 @@ cmd_gateway() {
     GATEWAYS="${GATEWAYS:+$GATEWAYS }$up:$served"
     in_list bat0 "$*" && [ "$MESH_INTERNET" = auto ] && MESH_INTERNET=off   # a gateway doesn't need one
     save; cmd_apply
-    say "$up shares its internet with: $*"
+    say "$up shares its internet with: $(echo "$served" | tr "," " ")"
 }
 
 cmd_gateway_off() {
@@ -249,13 +251,18 @@ cmd_gateway_off() {
     say "$1 is no longer a gateway"
 }
 
+in_mesh() {  # part of bat0 (the HaLow radio, mesh Wi-Fi/Ethernet)
+    [ "$(basename "$(readlink "/sys/class/net/$1/master" 2>/dev/null)" 2>/dev/null)" = bat0 ]
+}
+
 pair() { printf '%s\n%s\n' "$1" "$2" | sort | paste -sd: -; }
 
 cmd_forward() {
-    local a b p
+    local a b p x
     need_root
     a=${1:?usage: outpost-net forward IFACE1 IFACE2}; b=${2:?usage: outpost-net forward IFACE1 IFACE2}
     valid_if "$a"; valid_if "$b"; [ "$a" != "$b" ] || die "pick two different interfaces"
+    for x in "$a" "$b"; do in_mesh "$x" && die "$x is part of the mesh - use bat0"; done
     p=$(pair "$a" "$b")
     in_list "$p" "$FORWARD" || FORWARD="${FORWARD:+$FORWARD }$p"
     save; cmd_apply
@@ -309,6 +316,7 @@ ifaces() {  # every interface worth offering, with a short description
     for p in /sys/class/net/*; do
         i=${p##*/}
         [ -e "$p/type" ] || continue    # e.g. bonding_masters is a file, not an interface
+        in_mesh "$i" && continue        # its traffic shows up on bat0
         # Skip loopback, container plumbing and the kernel's unused tunnel placeholders.
         case "$i" in lo|docker*|veth*|br-*|virbr*|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ip6gre0|tunl0) continue ;; esac
         a=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4; exit}')

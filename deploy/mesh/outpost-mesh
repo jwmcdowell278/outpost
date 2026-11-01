@@ -311,7 +311,7 @@ stop_wpa() {
 }
 
 start_wifi() {
-    local country ctrl_interface frequency i ieee80211w key_mgmt mode network r sae_password ssid
+    local i n r
     i=$1
     wait_iface "$i" || return 1
     can_mesh "$i" || { log "$i can't do 802.11s mesh"; return 1; }
