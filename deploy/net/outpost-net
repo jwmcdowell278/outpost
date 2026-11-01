@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Forwarding between interfaces, and gateways that share one interface's
 # internet with others through NAT. Uses its own nftables table
 # (outpost_net), so other firewall rules are left as they are.
@@ -52,6 +52,7 @@ EOF
 
 # Pairs (from>to) that may start connections; replies are always allowed.
 allowed_pairs() {
+    local f g s up
     for g in $GATEWAYS; do
         up=${g%%:*}
         for s in $(echo "${g#*:}" | tr ',' ' '); do echo "$s>$up"; done
@@ -60,11 +61,13 @@ allowed_pairs() {
 }
 
 managed_ifaces() {
+    local f g
     { for g in $GATEWAYS; do echo "${g%%:*}"; echo "${g#*:}" | tr ',' '\n'; done
       for f in $FORWARD; do echo "${f%%:*}"; echo "${f#*:}"; done; } | sort -u | tr '\n' ' '
 }
 
 nft_rules() {
+    local g i m p set_
     echo "table inet $TABLE"
     echo "delete table inet $TABLE"
     echo "table inet $TABLE {"
@@ -96,6 +99,7 @@ nft_rules() {
 # Docker sets the forward policy to DROP; its DOCKER-USER chain is where
 # other forwarding has to be allowed. ufw needs "route allow" rules.
 other_firewalls() {
+    local old p rule
     if command -v iptables >/dev/null && iptables -n -L DOCKER-USER >/dev/null 2>&1; then
         while iptables -S DOCKER-USER | grep -q -- "--comment $TAG"; do
             rule=$(iptables -S DOCKER-USER | grep -- "--comment $TAG" | head -1 | sed 's/^-A /-D /')
@@ -126,6 +130,7 @@ other_firewalls() {
 }
 
 mesh_prefix() {
+    local f
     for f in /etc/outpost-mesh/mesh.env /etc/halow-mesh/halow.env; do
         [ -f "$f" ] && { sed -n 's/^BAT_PREFIX=//p' "$f" | head -1; return; }
     done
@@ -136,6 +141,7 @@ mesh_prefix() {
 # announces it (server); nodes that want internet from the mesh pick the
 # best one (client).
 batman_gw_mode() {
+    local g mode
     [ -e /sys/class/net/bat0 ] || return 0
     mode=off
     [ "$MESH_INTERNET" = auto ] && mode=client
@@ -144,6 +150,7 @@ batman_gw_mode() {
 }
 
 cmd_apply() {
+    local before
     need_root
     command -v nft >/dev/null || die "needs nftables (nft)"
     if [ -n "$GATEWAYS$FORWARD" ]; then
@@ -174,6 +181,7 @@ cmd_apply() {
 # (outpost-mesh, halow-mesh), so: gateway originator -> the 02:ba:74 client
 # it announces -> address.
 mesh_gateway_addr() {
+    local mac o orig x y
     [ -n "$MESH_GATEWAY" ] && { echo "$MESH_GATEWAY"; return; }
     orig=$(batctl gwl -H 2>/dev/null | grep -E '^\s*(\*|=>)' | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
     [ -n "$orig" ] || return 0
@@ -191,6 +199,7 @@ mesh_gateway_addr() {
 # Keep a default route through the mesh gateway. Its high metric means any
 # other internet connection this machine has is used first.
 cmd_route() {
+    local cur want
     [ "$(id -u)" = 0 ] || return 0
     batman_gw_mode   # again here: bat0 loses it when the mesh restarts
     cur=$(ip -4 route show default dev bat0 2>/dev/null | awk '/proto static metric 900/ {print $3; exit}')
@@ -209,11 +218,13 @@ cmd_route() {
 # ----------------------------------------------------------------- changes
 
 drop_gateway() {  # remove UPLINK's entry from GATEWAYS
+    local g keep
     keep=; for g in $GATEWAYS; do [ "${g%%:*}" = "$1" ] || keep="$keep $g"; done
     GATEWAYS=${keep# }
 }
 
 cmd_gateway() {
+    local s served up
     need_root
     up=${1:?usage: outpost-net gateway UPLINK IFACE...}; shift
     [ $# -gt 0 ] || die "which interfaces should use $up's internet? e.g.: outpost-net gateway $up bat0"
@@ -241,6 +252,7 @@ cmd_gateway_off() {
 pair() { printf '%s\n%s\n' "$1" "$2" | sort | paste -sd: -; }
 
 cmd_forward() {
+    local a b p
     need_root
     a=${1:?usage: outpost-net forward IFACE1 IFACE2}; b=${2:?usage: outpost-net forward IFACE1 IFACE2}
     valid_if "$a"; valid_if "$b"; [ "$a" != "$b" ] || die "pick two different interfaces"
@@ -252,6 +264,7 @@ cmd_forward() {
 }
 
 cmd_unforward() {
+    local f keep p
     need_root
     p=$(pair "${1:?usage: outpost-net unforward IFACE1 IFACE2}" "${2:?}")
     keep=; for f in $FORWARD; do [ "$f" = "$p" ] || keep="$keep $f"; done
@@ -261,6 +274,7 @@ cmd_unforward() {
 }
 
 cmd_mesh_internet() {
+    local a
     need_root
     case "${1:-}" in auto|off) MESH_INTERNET=$1 ;; *) die "usage: outpost-net mesh-internet auto|off" ;; esac
     save; cmd_apply
@@ -272,6 +286,7 @@ cmd_mesh_internet() {
 }
 
 cmd_status() {
+    local f g m r
     echo "Gateways (NAT):"
     [ -n "$GATEWAYS" ] || echo "  none"
     for g in $GATEWAYS; do echo "  ${g%%:*} shares its internet with: $(echo "${g#*:}" | tr ',' ' ')"; done
@@ -290,6 +305,7 @@ cmd_status() {
 # --------------------------------------------------------------------- menu
 
 ifaces() {  # every interface worth offering, with a short description
+    local a d i p
     for p in /sys/class/net/*; do
         i=${p##*/}
         [ -e "$p/type" ] || continue    # e.g. bonding_masters is a file, not an interface
@@ -310,6 +326,7 @@ use_whiptail() { command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}"
 q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
 
 menu() {  # menu PROMPT TAG LABEL... -> TAG
+    local a ans n prompt saved
     prompt=$1; shift
     if use_whiptail; then whiptail --title "Outpost network" --menu "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3; return; fi
     saved=; for a in "$@"; do saved="$saved $(q "$a")"; done
@@ -324,6 +341,7 @@ menu() {  # menu PROMPT TAG LABEL... -> TAG
 }
 
 checklist() {  # checklist PROMPT TAG LABEL ON|OFF ... -> chosen TAGs
+    local a ans b n prompt saved sel
     prompt=$1; shift
     if use_whiptail; then
         whiptail --title "Outpost network" --separate-output --checklist "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3 | tr '\n' ' '
@@ -353,6 +371,7 @@ checklist() {  # checklist PROMPT TAG LABEL ON|OFF ... -> chosen TAGs
 }
 
 iface_menu() {  # iface_menu PROMPT [EXCLUDE] -> IFACE
+    local d ex i prompt tmp
     prompt=$1; ex=${2:-}; set --
     tmp=$(ifaces)
     while IFS='|' read -r i d; do [ -n "$i" ] && ! in_list "$i" "$ex" && set -- "$@" "$i" "$d"; done <<EOF
@@ -363,6 +382,7 @@ EOF
 }
 
 cmd_menu() {
+    local a b d f g i m on p r sel tmp up what
     need_root
     while :; do
         say ""; cmd_status >&2
@@ -415,6 +435,7 @@ EOF
 }
 
 other_tool() {  # run another Outpost network tool, if it's installed
+    local t
     t=$(command -v "$1" 2>/dev/null || true)
     if [ -z "$t" ]; then
         say "$1 isn't installed on this machine - install-node.sh adds it"

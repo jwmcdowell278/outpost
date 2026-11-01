@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Sets each Wi-Fi card to join a network (client), be an access point, or
 # be off - through NetworkManager. Cards in the mesh (outpost-mesh) and the
 # HaLow radio are left alone.
@@ -32,6 +32,7 @@ need_nm() {
 }
 in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
 q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }   # shell-quote
+    local p
 
 # ---------------------------------------------------------------- what's there
 
@@ -49,11 +50,13 @@ wifi_ifaces() {  # Wi-Fi cards, not the HaLow radio
 mesh_ifaces() { ( MESH_WIFI=; [ -f "$MESH_NODE" ] && . "$MESH_NODE"; echo "${MESH_WIFI:-}" ); }
 
 can_ap() {
+    local phy
     phy=$(cat "/sys/class/net/$1/phy80211/name" 2>/dev/null) || return 1
     iw phy "$phy" info 2>/dev/null | sed -n '/Supported interface modes/,/^\s*[A-Z].*:$/p' | grep -q '\* AP$'
 }
 
 connected_ifaces() {  # default route + every SSH session's local address
+    local a
     ip -o route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p'
     command -v ss >/dev/null || return 0
     for a in $(ss -Htn state established '( sport = :ssh )' 2>/dev/null | awk '{print $3}' | sed 's/:[0-9]*$//; s/^\[//; s/\]$//; s/^::ffff://'); do
@@ -64,6 +67,7 @@ connected_ifaces() {  # default route + every SSH session's local address
 off_list() { [ -f "$OFF_CONF" ] && sed -n 's/^unmanaged-devices=//p' "$OFF_CONF" | tr ';' '\n' | sed 's/^interface-name://' | tr '\n' ' '; }
 
 write_off_list() {
+    local i list
     list=; for i in "$@"; do list="${list:+$list;}interface-name:$i"; done
     if [ -z "$list" ]; then
         rm -f "$OFF_CONF"
@@ -75,6 +79,7 @@ write_off_list() {
 }
 
 active_con() {  # name of the connection active on an interface, if any
+    local c
     c=$(nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null || true)
     [ "$c" = "--" ] && c=
     echo "$c"
@@ -85,9 +90,13 @@ ap_con() { echo "outpost-ap-$1"; }
 con_field() { nmcli -g "$2" connection show "$1" 2>/dev/null || true; }
 
 mode_of() {  # mesh | off | ap | client | idle  (+ detail on stdout line 2)
+    local addr c i ssid
     i=$1
     if in_list "$i" "$(mesh_ifaces)"; then echo mesh; echo "in the mesh (outpost-mesh)"; return; fi
     if in_list "$i" "$(off_list)"; then echo off; echo "off"; return; fi
+    if [ "$(nmcli radio wifi 2>/dev/null)" != enabled ]; then
+        echo off; echo "off (Wi-Fi is switched off in NetworkManager)"; return
+    fi
     c=$(active_con "$i")
     if [ -z "$c" ]; then echo idle; echo "not connected"; return; fi
     ssid=$(con_field "$c" 802-11-wireless.ssid)
@@ -100,6 +109,7 @@ mode_of() {  # mesh | off | ap | client | idle  (+ detail on stdout line 2)
 }
 
 describe() {
+    local conn d i
     i=$1; conn=$2
     d=$(mode_of "$i" | sed -n 2p)
     in_list "$i" "$conn" && d="$d - you're connected through this"
@@ -107,6 +117,7 @@ describe() {
 }
 
 cmd_list() {
+    local conn found i
     need_nm
     conn=$(connected_ifaces | sort -u | tr '\n' ' ')
     found=
@@ -117,6 +128,14 @@ cmd_list() {
 # ----------------------------------------------------------------- changing
 
 unoff() {
+    local i keep
+    # "Wi-Fi off" in NetworkManager blocks every Wi-Fi card. Turning it back
+    # on is harmless for the HaLow radio (halow-mesh unblocks it anyway).
+    if [ "$(nmcli radio wifi 2>/dev/null)" != enabled ]; then
+        nmcli radio wifi on
+        say "   turned Wi-Fi on in NetworkManager"
+        sleep 3
+    fi
     if in_list "$1" "$(off_list)"; then
         keep=; for i in $(off_list); do [ "$i" = "$1" ] || keep="$keep $i"; done
         # shellcheck disable=SC2086
@@ -128,6 +147,7 @@ unoff() {
 }
 
 ap_disable() {
+    local a
     a=$(ap_con "$1")
     nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$a" || return 0
     nmcli connection modify "$a" connection.autoconnect no
@@ -138,6 +158,7 @@ ap_disable() {
 # point's own DHCP/DNS server can't start and the AP fails ("IP configuration
 # could not be reserved"). Then hand out addresses only, with that server as DNS.
 dns_workaround() {
+    local addr
     addr=${1%/*}
     if ss -Hlnu 'sport = :53' 2>/dev/null | grep -q . && ! ss -Hlnup 'sport = :53' 2>/dev/null | grep -q 'dnsmasq'; then
         mkdir -p "$(dirname "$DNS_CONF")"
@@ -149,6 +170,7 @@ dns_workaround() {
 }
 
 do_client() {  # do_client IFACE SSID PASSWORD HIDDEN
+    local c hidden i pw ssid
     i=$1; ssid=$2; pw=$3; hidden=$4
     unoff "$i"
     ap_disable "$i"
@@ -163,6 +185,7 @@ do_client() {  # do_client IFACE SSID PASSWORD HIDDEN
 }
 
 do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
+    local a addr band ch i pw ssid
     i=$1; ssid=$2; pw=$3; band=$4; ch=$5; addr=$6
     can_ap "$i" || { say "$i's Wi-Fi card can't be an access point"; return 1; }
     unoff "$i"
@@ -189,6 +212,7 @@ do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
 }
 
 do_off() {
+    local i
     i=$1
     ap_disable "$i"
     nmcli device disconnect "$i" >/dev/null 2>&1 || true
@@ -201,6 +225,7 @@ do_off() {
 # Runs detached from the SSH session (systemd-run), so a change that drops
 # the connection still finishes. Arguments come in a root-only file.
 cmd_apply() {
+    local req
     req=$1
     # shellcheck disable=SC1090
     . "$req"; rm -f "$req"
@@ -213,6 +238,7 @@ cmd_apply() {
 
 # Undo to the state saved before a change (no secrets needed).
 cmd_undo() {
+    local a i prev
     i=$1; prev=$2
     say "outpost-wifi: undoing the change on $i"
     case "$prev" in
@@ -225,6 +251,7 @@ cmd_undo() {
 }
 
 snapshot() {
+    local i
     i=$1
     case "$(mode_of "$i" | head -1)" in
         off) echo off ;;
@@ -237,6 +264,7 @@ snapshot() {
 # apply ACTION IFACE [VAR=value...]: run a change, with automatic undo if it
 # touches the card this machine is reached through.
 apply() {
+    local action i kv log prev rc req risky unit
     action=$1; i=$2; shift 2
     mkdir -p "$RUN"; chmod 700 "$RUN"
     risky=0; in_list "$i" "$(connected_ifaces | sort -u | tr '\n' ' ')" && risky=1
@@ -273,6 +301,7 @@ cmd_keep() {
 }
 
 check_iface() {
+    local i
     i=$1
     [ -e "/sys/class/net/$i/phy80211" ] || die "$i isn't a Wi-Fi card (see: outpost-wifi list)"
     in_list "$i" "$(wifi_ifaces)" || die "$i is the HaLow radio - halow-mesh runs it"
@@ -284,9 +313,10 @@ check_iface() {
 
 use_whiptail() { command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}" != dumb ]; }
 
-quote_args() { r=; for a in "$@"; do r="$r $(q "$a")"; done; echo "$r"; }
+quote_args() { local a r; r=; for a in "$@"; do r="$r $(q "$a")"; done; echo "$r"; }
 
 menu() {  # menu PROMPT TAG LABEL [TAG LABEL...] -> prints the chosen TAG
+    local ans n prompt saved
     prompt=$1; shift
     if use_whiptail; then
         whiptail --title "Outpost Wi-Fi" --menu "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3
@@ -306,16 +336,19 @@ menu() {  # menu PROMPT TAG LABEL [TAG LABEL...] -> prints the chosen TAG
 }
 
 ask() {  # ask PROMPT DEFAULT
+    local a
     if use_whiptail; then whiptail --title "Outpost Wi-Fi" --inputbox "$1" 10 78 "$2" 3>&1 1>&2 2>&3; return; fi
     printf '%s [%s]: ' "$1" "$2" >&2; read -r a || return 1; echo "${a:-$2}"
 }
 
 ask_secret() {
+    local a
     if use_whiptail; then whiptail --title "Outpost Wi-Fi" --passwordbox "$1" 10 78 3>&1 1>&2 2>&3; return; fi
     printf '%s: ' "$1" >&2; stty -echo 2>/dev/null || true; read -r a || a=; stty echo 2>/dev/null || true; say ""; echo "$a"
 }
 
 yesno() {
+    local a
     if use_whiptail; then whiptail --title "Outpost Wi-Fi" --yesno "$1" 12 78; return; fi
     printf '%s Type "yes": ' "$1" >&2; read -r a || return 1; [ "$a" = yes ]
 }
@@ -327,6 +360,7 @@ scan() {  # SSID<TAB>signal<TAB>security, strongest first, one per SSID
 }
 
 menu_client() {
+    local hidden i list pw s sec sig ssid tab
     i=$1
     say "scanning on $i..."
     unoff "$i" 2>/dev/null || true
@@ -360,6 +394,7 @@ EOF
 }
 
 menu_ap() {
+    local a addr band ch cur_addr cur_ssid i made pw ssid
     i=$1
     can_ap "$i" || { say "$i's Wi-Fi card can't be an access point"; return 1; }
     a=$(ap_con "$i")
@@ -392,6 +427,7 @@ confirm_risky() {
 }
 
 after_change() {
+    local unit
     unit=outpost-wifi-undo-$1
     systemctl is-active --quiet "$unit.timer" 2>/dev/null || return 0
     printf 'Still connected? Press Enter to keep this change: ' >&2
@@ -399,6 +435,7 @@ after_change() {
 }
 
 cmd_menu() {
+    local conn i what
     need_root; need_nm
     conn=$(connected_ifaces | sort -u | tr '\n' ' ')
     set --
@@ -419,6 +456,7 @@ cmd_menu() {
 # ---------------------------------------------------------------- commands
 
 cmd_client() {
+    local i pw
     need_root; need_nm
     i=${1:?usage: outpost-wifi client IFACE [SSID]}; check_iface "$i"
     if [ -z "${2:-}" ]; then menu_client "$i"; return; fi
@@ -428,6 +466,7 @@ cmd_client() {
 }
 
 cmd_ap() {
+    local a addr band ch i made pw ssid
     need_root; need_nm
     i=${1:?usage: outpost-wifi ap IFACE [options]}; check_iface "$i"; shift
     a=$(ap_con "$i")
@@ -456,6 +495,7 @@ cmd_ap() {
 }
 
 cmd_off() {
+    local i
     need_root; need_nm
     i=${1:?usage: outpost-wifi off IFACE}; check_iface "$i"
     apply off "$i" && after_change "$i"
