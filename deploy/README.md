@@ -57,6 +57,10 @@ A laptop or mini PC, picking its mesh interfaces from a menu:
 Options:
 
 - `--name`: the name other nodes see (default: the machine's hostname).
+- `--no-autostart`: install Outpost but don't start it at boot. Start it
+  with `systemctl --user start outpost`, or turn autostart on later with
+  `systemctl --user enable --now outpost`. Without this option Outpost
+  starts at boot, with or without anyone logged in.
 - `--usb-bluetooth`: Raspberry Pi only. Turns off the built-in Bluetooth so
   a USB adapter is used (see "Raspberry Pi with a Bluetooth headset" in the
   main README).

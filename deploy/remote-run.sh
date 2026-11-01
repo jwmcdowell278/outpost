@@ -15,7 +15,7 @@ if ! sudo env MESH_WIFI="$MESH_WIFI" MESH_ETH="$MESH_ETH" FORCE_MESH="$FORCE_MES
     if [ "$MESH_ASKED" = 1 ]; then exit 1; fi
     echo "== outpost-mesh skipped (see above) - the rest of the install carries on"
 fi
-NODE_NAME="$NODE_NAME" USB_BT="$USB_BT" bash "$D/setup-outpost.sh" "$D"
+NODE_NAME="$NODE_NAME" USB_BT="$USB_BT" AUTOSTART="$AUTOSTART" bash "$D/setup-outpost.sh" "$D"
 
 # Forwarding and NAT gateways.
 sudo bash "$D/net/setup-net.sh" "$D" || echo "!! outpost-net setup failed (see above) - the rest of the install carries on"

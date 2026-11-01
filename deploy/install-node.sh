@@ -13,6 +13,8 @@
 #                      the node's name. Needed on the first install; leave it
 #                      out later to update the code and keep the config.
 #   --name NAME        node name shown to others (default: its hostname)
+#   --no-autostart     install Outpost but don't start it at boot (start it
+#                      with: systemctl --user start outpost)
 #
 #   HaLow (Raspberry Pi with a Heltec HT-HC01P; installed by default on a Pi):
 #   --env FILE         HaLow mesh settings (/etc/halow-mesh/halow.env from an
@@ -50,11 +52,12 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 HOST=${1:-}; [ -n "$HOST" ] && [ "${HOST#-}" = "$HOST" ] || usage
 shift
 CONFIG=; ENV_FILE=; MESH_ENV=; NAME=; USB_BT=0; HALOW=auto; REBOOT=0
-MESH_WIFI=; MESH_ETH=; FORCE_MESH=0; MESH_SELECT=0; WIFI_SETUP=0; NET_SETUP=0
+MESH_WIFI=; MESH_ETH=; FORCE_MESH=0; MESH_SELECT=0; WIFI_SETUP=0; NET_SETUP=0; AUTOSTART=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --config) CONFIG=${2:?}; shift ;;
         --name) NAME=${2:?}; shift ;;
+        --no-autostart) AUTOSTART=0 ;;
         --env) ENV_FILE=${2:?}; shift ;;
         --no-halow) HALOW=0 ;;
         --mesh-wifi) MESH_WIFI="$MESH_WIFI ${2:?}"; shift ;;
@@ -156,7 +159,7 @@ cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.
 {
     printf 'HALOW=%q\nMESH_ASKED=%q\nMESH_WIFI=%q\nMESH_ETH=%q\n' "$HALOW" "$MESH_ASKED" "$MESH_WIFI" "$MESH_ETH"
     printf 'FORCE_MESH=%q\nMESH_SELECT=%q\nNODE_NAME=%q\nUSB_BT=%q\n' "$FORCE_MESH" "$MESH_SELECT" "$NAME" "$USB_BT"
-    printf 'WIFI_SETUP=%q\nNET_SETUP=%q\n' "$WIFI_SETUP" "$NET_SETUP"
+    printf 'WIFI_SETUP=%q\nNET_SETUP=%q\nAUTOSTART=%q\n' "$WIFI_SETUP" "$NET_SETUP" "$AUTOSTART"
 } > "$D/vars.sh"
 tar ${TARFLAGS[@]+"${TARFLAGS[@]}"} -C "$STAGE" -czf "$STAGE/node.tgz" node
 

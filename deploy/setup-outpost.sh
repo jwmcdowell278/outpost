@@ -4,7 +4,8 @@
 #   setup-outpost.sh <node-dir>
 # node-dir holds outpost/ (the code), lib/pkg.sh and, optionally,
 # outpost.yaml (the shared config). Env: NODE_NAME (default: hostname),
-# USB_BT=1 to turn off a Raspberry Pi's built-in Bluetooth, SKIP_PACKAGES=1
+# USB_BT=1 to turn off a Raspberry Pi's built-in Bluetooth, AUTOSTART=0 to
+# not start Outpost at boot, SKIP_PACKAGES=1
 # if the system packages are already installed by hand.
 # Works on any systemd Linux with apt, dnf, pacman or zypper. Safe to run
 # again to update.
@@ -142,7 +143,19 @@ WantedBy=default.target
 EOF
 $SUDO loginctl enable-linger "$ME" || echo "!! couldn't enable lingering - Outpost would only start after a login"
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-if systemctl --user daemon-reload 2>/dev/null; then
+if [ "${AUTOSTART:-1}" = 0 ]; then
+    if systemctl --user daemon-reload 2>/dev/null; then
+        systemctl --user disable outpost.service >/dev/null 2>&1 || true
+        systemctl --user restart wireplumber.service 2>/dev/null || true
+        # Already running (by hand): restart it on the new code, but leave it off at boot.
+        if systemctl --user is-active --quiet outpost.service; then systemctl --user restart outpost.service; fi
+    else
+        rm -f "$HOME/.config/systemd/user/default.target.wants/outpost.service"
+    fi
+    echo "   outpost.service installed but NOT started at boot"
+    echo "   start it now:      systemctl --user start outpost"
+    echo "   start it at boot:  systemctl --user enable --now outpost"
+elif systemctl --user daemon-reload 2>/dev/null; then
     systemctl --user enable outpost.service >/dev/null 2>&1
     systemctl --user restart wireplumber.service 2>/dev/null || true
     systemctl --user restart outpost.service
