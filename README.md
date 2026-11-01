@@ -5,6 +5,21 @@ mesh (no central relay server) - targets desktop and embedded (Raspberry Pi)
 clients, and real push-to-talk hardware (USB HID, GPIO, serial/RS-232, and Bluetooth/USB
 buttons bound from the web UI).
 
+## Install
+
+On the machine you're setting up (e.g. a Raspberry Pi with 64-bit Raspberry
+Pi OS), logged in as your normal user:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/jwmcdowell278/outpost/main/deploy/bootstrap.sh | bash
+```
+
+It asks a few questions (node name, start a new mesh or join one, HaLow,
+Wi-Fi, ...) and installs Outpost, the HaLow drivers on a Pi, and the network
+tools (`sudo outpost-net`). To join an existing mesh, it copies the keys from
+a node you name. For options, scripted installs and installing from another
+computer over SSH, see [deploy/README.md](deploy/README.md).
+
 ## Design
 
 ```mermaid
