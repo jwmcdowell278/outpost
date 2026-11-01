@@ -3,7 +3,7 @@
 # internet with others through NAT. Uses its own nftables table
 # (outpost_net), so other firewall rules are left as they are.
 #
-#   sudo outpost-net                         menu
+#   sudo outpost-net                         menu (also opens the Wi-Fi and mesh menus)
 #   outpost-net status                       what's set up, and the mesh gateway in use
 #   sudo outpost-net gateway UPLINK IFACE... share UPLINK's internet with these (NAT)
 #   sudo outpost-net gateway-off UPLINK
@@ -18,7 +18,8 @@ set -eu
 ETC=${OUTPOST_NET_ETC:-/etc/outpost-net}    # override only for testing
 CONF=$ETC/net.env
 SYSCTL=/etc/sysctl.d/90-outpost-net.conf
-TAG=outpost-net
+TAG=outpost-net          # marks our Docker/ufw rules
+TABLE=outpost_net        # our nftables table
 SELF=$(readlink -f "$0")
 PATH=$PATH:/usr/sbin:/sbin
 
@@ -64,9 +65,9 @@ managed_ifaces() {
 }
 
 nft_rules() {
-    echo "table inet $TAG"
-    echo "delete table inet $TAG"
-    echo "table inet $TAG {"
+    echo "table inet $TABLE"
+    echo "delete table inet $TABLE"
+    echo "table inet $TABLE {"
     echo "  chain forward {"
     echo "    type filter hook forward priority -10; policy accept;"
     # The mesh's MTU is smaller than most links: keep TCP segments fitting.
@@ -159,6 +160,7 @@ cmd_apply() {
         [ -e /sys/class/net/docker0 ] && before=1
         sysctl -q -w net.ipv4.ip_forward="$before"
     fi
+    nft delete table inet outpost-net 2>/dev/null || true   # name used by an early version
     nft_rules | nft -f -
     other_firewalls
     batman_gw_mode
@@ -369,6 +371,8 @@ cmd_menu() {
             forward "Forward between two interfaces (no NAT)" \
             mesh "Use the mesh's gateway for internet (now: $MESH_INTERNET)" \
             remove "Remove a gateway or forwarding" \
+            wifi "Wi-Fi: join a network, or be an access point (outpost-wifi)" \
+            meshif "Mesh interfaces: which cards the mesh uses (outpost-mesh)" \
             "done" "Done") || return 0
         case "$what" in
             gateway)
@@ -403,9 +407,22 @@ EOF
                     g:*) cmd_gateway_off "${r#g:}" ;;
                     f:*) p=${r#f:}; cmd_unforward "${p%%:*}" "${p#*:}" ;;
                 esac ;;
+            wifi) other_tool outpost-wifi ;;
+            meshif) other_tool outpost-mesh select ;;
             *) return 0 ;;
         esac
     done
+}
+
+other_tool() {  # run another Outpost network tool, if it's installed
+    t=$(command -v "$1" 2>/dev/null || true)
+    if [ -z "$t" ]; then
+        say "$1 isn't installed on this machine - install-node.sh adds it"
+        [ "$1" = outpost-wifi ] && ! command -v nmcli >/dev/null && say "  (it needs NetworkManager, which this machine doesn't have)"
+        return 0
+    fi
+    shift
+    "$t" "$@" || true
 }
 
 case "${1:-}" in
