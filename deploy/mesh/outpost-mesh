@@ -6,6 +6,7 @@
 # bat0 as the HaLow radio, making the meshes one network.
 #
 #   outpost-mesh select            pick the mesh interfaces from a menu
+#   outpost-mesh settings          channel, country, names, password (menu)
 #   outpost-mesh use [--force] IFACE...   set them directly (none = mesh off)
 #   outpost-mesh list              network interfaces and what they can do
 #   outpost-mesh status            mesh state, peers, batman neighbours
@@ -297,6 +298,124 @@ cmd_use() {
     fi
 }
 
+# ------------------------------------------------------------ mesh settings
+
+use_whiptail() { command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}" != dumb ]; }
+q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+
+menu() {  # menu PROMPT TAG LABEL... -> TAG
+    local a ans n prompt saved
+    prompt=$1; shift
+    if use_whiptail; then whiptail --title "Outpost mesh" --menu "$prompt" 22 78 12 "$@" 3>&1 1>&2 2>&3; return; fi
+    saved=; for a in "$@"; do saved="$saved $(q "$a")"; done
+    while :; do
+        eval "set -- $saved"; echo >&2; echo "$prompt" >&2; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); printf '  %d  %-14s %s\n' "$n" "$1" "$2" >&2; shift 2; done
+        printf 'Number (Enter to cancel): ' >&2; read -r ans || return 1; [ -n "$ans" ] || return 1
+        eval "set -- $saved"; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); [ "$ans" = "$n" ] && { echo "$1"; return 0; }; shift 2; done
+        echo "  no choice $ans" >&2
+    done
+}
+
+ask() {  # ask PROMPT DEFAULT
+    local a
+    if use_whiptail; then whiptail --title "Outpost mesh" --inputbox "$1" 10 78 "$2" 3>&1 1>&2 2>&3; return; fi
+    printf '%s [%s]: ' "$1" "$2" >&2; read -r a || return 1; echo "${a:-$2}"
+}
+
+say_box() {
+    if use_whiptail; then whiptail --title "Outpost mesh" --msgbox "$1" 16 78; else printf '\n%b\n' "$1" >&2; fi
+}
+
+# Values go into mesh.env as KEY='value', which is read as shell. Keep out
+# anything that could break that (and the wpa_supplicant config).
+safe_text() { case "$1" in *[\'\"\\\$\`]*|"") return 1 ;; esac; [ "${#1}" -le "${2:-32}" ]; }
+
+set_key() {  # set_key KEY VALUE - in mesh.env
+    local f tmp
+    f=$ETC/mesh.env; tmp=$f.new
+    awk -v k="$1" -v v="$1='$2'" 'BEGIN { done = 0 }
+        $0 ~ "^" k "=" { print v; done = 1; next } { print }
+        END { if (!done) print v }' "$f" > "$tmp"
+    chmod 600 "$tmp"; mv "$tmp" "$f"
+    # shellcheck disable=SC1090
+    . "$f"
+}
+
+freq_label() {
+    case "$1" in
+        2412) echo "channel 1 (2.4 GHz)" ;; 2437) echo "channel 6 (2.4 GHz)" ;; 2462) echo "channel 11 (2.4 GHz)" ;;
+        5180) echo "channel 36 (5 GHz)" ;; 5200) echo "channel 40 (5 GHz)" ;; 5220) echo "channel 44 (5 GHz)" ;;
+        5240) echo "channel 48 (5 GHz)" ;; 5745) echo "channel 149 (5 GHz)" ;; 5765) echo "channel 153 (5 GHz)" ;;
+        5785) echo "channel 157 (5 GHz)" ;; 5805) echo "channel 161 (5 GHz)" ;; *) echo "$1 MHz" ;;
+    esac
+}
+
+cmd_settings() {
+    local c f n pw what changed
+    need_root
+    [ -f "$ETC/mesh.env" ] || die "not set up yet - install it with install-node.sh"
+    changed=
+    while :; do
+        what=$(menu "Mesh settings - every node needs the same ones" \
+            country "Country: ${COUNTRY:-?} (sets the legal channels)" \
+            channel "Channel: $(freq_label "${FREQ:-2437}")" \
+            name "802.11s mesh name: ${MESH_ID:-?}" \
+            password "802.11s password: ${MESH_PASSWORD:+set (${#MESH_PASSWORD} characters)}" \
+            adhoc "Ad-hoc cell name: ${ADHOC_ID}" \
+            copy "Copy these settings to another node..." \
+            "done" "Done") || what="done"
+        case "$what" in
+            country)
+                c=$(ask "Two-letter country code (e.g. US, GB, DE, AU)" "${COUNTRY:-US}") || continue
+                c=$(echo "$c" | tr '[:lower:]' '[:upper:]')
+                if echo "$c" | grep -Eq '^[A-Z]{2}$'; then set_key COUNTRY "$c"; changed=1
+                else say_box "\"$c\" isn't a two-letter country code."; fi ;;
+            channel)
+                f=$(menu "Channel for the Wi-Fi mesh. The Raspberry Pi's built-in Wi-Fi is 2.4 GHz only. Avoid 5 GHz channels 52-144 (radar rules stop a mesh from starting there)." \
+                    2412 "channel 1 (2.4 GHz)" 2437 "channel 6 (2.4 GHz)" 2462 "channel 11 (2.4 GHz)" \
+                    5180 "channel 36 (5 GHz)" 5200 "channel 40 (5 GHz)" 5220 "channel 44 (5 GHz)" 5240 "channel 48 (5 GHz)" \
+                    5745 "channel 149 (5 GHz)" 5765 "channel 153 (5 GHz)" 5785 "channel 157 (5 GHz)" 5805 "channel 161 (5 GHz)" \
+                    other "another frequency (MHz)") || continue
+                if [ "$f" = other ]; then f=$(ask "Frequency in MHz" "${FREQ:-2437}") || continue; fi
+                if echo "$f" | grep -Eq '^[0-9]{4}$'; then set_key FREQ "$f"; changed=1
+                else say_box "\"$f\" isn't a frequency in MHz (e.g. 2437)."; fi ;;
+            name)
+                n=$(ask "802.11s mesh name (up to 32 characters)" "${MESH_ID:-outpost-wifi-mesh}") || continue
+                if safe_text "$n" 32; then set_key MESH_ID "$n"; changed=1
+                else say_box "Use 1-32 characters, without quotes, backslashes, \$ or backticks."; fi ;;
+            password)
+                pw=$(menu "802.11s mesh password (WPA3)" new "Make up a new one" type "Type one") || continue
+                if [ "$pw" = new ]; then
+                    pw=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)
+                else
+                    pw=$(ask "Password, 8-63 characters" "") || continue
+                fi
+                if [ "${#pw}" -ge 8 ] && safe_text "$pw" 63; then
+                    set_key MESH_PASSWORD "$pw"; changed=1
+                    say_box "New 802.11s password:\n\n  $pw\n\nEvery 802.11s node needs it - use \"Copy these settings to another node\"."
+                else
+                    say_box "Use 8-63 characters, without quotes, backslashes, \$ or backticks."
+                fi ;;
+            adhoc)
+                n=$(ask "Ad-hoc cell name (up to 32 characters)" "$ADHOC_ID") || continue
+                if safe_text "$n" 32; then set_key ADHOC_ID "$n"; changed=1
+                else say_box "Use 1-32 characters, without quotes, backslashes, \$ or backticks."; fi ;;
+            copy)
+                say_box "From a computer that can reach both nodes:\n\n  ssh $(id -un 2>/dev/null)@<this-node> sudo cat $ETC/mesh.env > mesh-site.env\n  ./deploy/install-node.sh <user>@<other-node> --mesh-env mesh-site.env\n\nOr copy $ETC/mesh.env to the other node by hand and run there:\n  sudo systemctl restart outpost-mesh" ;;
+            *) break ;;
+        esac
+    done
+    if [ -n "$changed" ]; then
+        if systemctl is-active --quiet outpost-mesh.service; then
+            systemctl restart outpost-mesh.service && echo "Mesh restarted with the new settings." \
+                || echo "The mesh didn't restart - see: journalctl -u outpost-mesh" >&2
+        fi
+        echo "Remember: the other nodes need the same settings, or they lose contact."
+    fi
+}
+
 # ------------------------------------------------------------------ running
 
 # Fixed per-machine suffix from /etc/machine-id - same on every boot,
@@ -476,6 +595,7 @@ cmd_status() {
 
 case "${1:-}" in
     select) cmd_select ;;
+    settings) cmd_settings ;;
     use) shift; cmd_use "$@" ;;
     list) cmd_list ;;
     start) cmd_start ;;

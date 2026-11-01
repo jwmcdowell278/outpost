@@ -5,6 +5,7 @@
 #
 #   sudo outpost-net                         menu (also opens the Wi-Fi and mesh menus)
 #   outpost-net status                       what's set up, and the mesh gateway in use
+#   sudo outpost-net overview                everything at a glance: cards, mesh, internet
 #   sudo outpost-net gateway UPLINK IFACE... share UPLINK's internet with these (NAT)
 #   sudo outpost-net gateway-off UPLINK
 #   sudo outpost-net forward IFACE1 IFACE2   route between two interfaces, both ways (no NAT)
@@ -309,6 +310,123 @@ cmd_status() {
     m=$(batctl gw_mode 2>/dev/null | cut -d' ' -f1); [ -z "$m" ] || echo "batman-adv gateway mode: $m"
 }
 
+# ----------------------------------------------------------------- overview
+
+# Mesh address of the node behind a batman-adv originator MAC: originator ->
+# the 02:ba:74 bat0 MAC it announces -> <prefix>.<byte 5>.<byte 6>.
+orig_addr() {
+    local mac x y
+    mac=$(batctl tg -H 2>/dev/null | awk -v o="$1" '
+        { n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/) m[++n] = $i
+          if (n >= 2 && tolower(m[2]) == tolower(o) && tolower(m[1]) ~ /^02:ba:74:/) { print m[1]; exit } }')
+    [ -n "$mac" ] || { echo "?"; return; }
+    x=$(printf %d "0x$(echo "$mac" | cut -d: -f5)"); y=$(printf %d "0x$(echo "$mac" | cut -d: -f6)")
+    [ "$y" -eq 0 ] && y=1
+    [ "$y" -eq 255 ] && y=254
+    echo "$(mesh_prefix).$x.$y"
+}
+
+card_role() {  # what an interface is doing, in words
+    local i c mode ssid n sig m
+    i=$1
+    m=$(basename "$(readlink "/sys/class/net/$i/master" 2>/dev/null)" 2>/dev/null || true)
+    if [ "$m" = bat0 ]; then
+        case "$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)" in
+            morse*) echo "mesh (HaLow)"; return ;;
+        esac
+        case "$(iw dev "$i" info 2>/dev/null | awk '/type/ {print $2, $3; exit}')" in
+            "mesh point") echo "mesh (802.11s, encrypted)" ;;
+            IBSS*) echo "mesh (ad-hoc, unencrypted)" ;;
+            *) case "$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null)" in
+                   morse*) echo "mesh (HaLow)" ;; *) echo "mesh (Ethernet)" ;; esac ;;
+        esac
+        return
+    fi
+    [ "$i" = bat0 ] && { echo "the mesh"; return; }
+    if [ -e "/sys/class/net/$i/phy80211" ] && command -v nmcli >/dev/null; then
+        c=$(nmcli -g GENERAL.CONNECTION device show "$i" 2>/dev/null || true)
+        if [ -n "$c" ] && [ "$c" != "--" ]; then
+            mode=$(nmcli -g 802-11-wireless.mode connection show "$c" 2>/dev/null || true)
+            ssid=$(nmcli -g 802-11-wireless.ssid connection show "$c" 2>/dev/null || true)
+            if [ "$mode" = ap ]; then
+                n=$(iw dev "$i" station dump 2>/dev/null | grep -c '^Station' || true)
+                echo "access point \"$ssid\", $n device(s) connected"
+            else
+                sig=$(iw dev "$i" link 2>/dev/null | awk '/signal/ {print $2; exit}')
+                echo "joined \"$ssid\"${sig:+, signal $sig dBm}"
+            fi
+            return
+        fi
+        echo "Wi-Fi, not in use"; return
+    fi
+    if [ "$(cat "/sys/class/net/$i/carrier" 2>/dev/null)" = 1 ]; then echo "connected"; else echo "no cable / down"; fi
+}
+
+cmd_overview() {
+    local a dns f g gw halow i n o out p r up via
+    echo "=== Network cards"
+    up=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+    for p in /sys/class/net/*; do
+        i=${p##*/}
+        [ -e "$p/type" ] || continue
+        case "$i" in lo|docker*|veth*|br-*|virbr*|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ip6gre0|tunl0|p2p-dev-*) continue ;; esac
+        a=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4; exit}')
+        r=$(card_role "$i")
+        [ "$i" = "$up" ] && r="$r - internet goes out here"
+        printf '  %-9s %-19s %s\n' "$i" "${a:--}" "$r"
+    done
+
+    echo; echo "=== Mesh (batman-adv)"
+    if [ -e /sys/class/net/bat0 ]; then
+        echo "  this node: $(ip -4 -o addr show dev bat0 | awk '{print $4; exit}')"
+        n=$(batctl n -H 2>/dev/null | grep -c . || true)
+        echo "  neighbours (in direct radio range): $n"
+        # Best routes ("*") whose next hop is the node itself = direct neighbours.
+        batctl o -H 2>/dev/null | awk '/^ *\*/ {
+            n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^([0-9a-fA-F][0-9a-fA-F]:){5}[0-9a-fA-F][0-9a-fA-F]$/) m[++n] = $i
+            tq = 0; if (match($0, /\( *[0-9]+\)/)) { tq = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", tq) }
+            ifc = ""; if (match($0, /\[ *[^]]*\]/)) { ifc = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", ifc) }
+            if (n >= 2 && tolower(m[1]) == tolower(m[2])) print m[1], tq, ifc }' | while read -r o tq ifc; do
+            printf '    %-15s link quality %3s%%  via %s\n' "$(orig_addr "$o")" "$(( tq * 100 / 255 ))" "$ifc"
+        done
+        o=$(batctl o -H 2>/dev/null | awk '$1 == "*"' | wc -l | tr -d ' ')
+        echo "  nodes reachable through the mesh: $o"
+        gw=$(batctl gw_mode 2>/dev/null | head -1)
+        echo "  gateway mode: ${gw:-off}"
+        r=$(ip -4 route show default dev bat0 2>/dev/null | awk '{print $3; exit}')
+        [ -n "$r" ] && echo "  internet through mesh gateway: $r"
+    else
+        echo "  not running (no bat0)"
+    fi
+
+    if systemctl list-unit-files halow-mesh.service >/dev/null 2>&1 && [ -f /etc/halow-mesh/halow.env ]; then
+        echo; echo "=== HaLow"
+        halow=$(systemctl is-active halow-mesh.service 2>/dev/null || true)
+        echo "  halow-mesh: $halow"
+        for p in /sys/class/net/*; do
+            i=${p##*/}
+            case "$(basename "$(readlink -f "$p/device/driver" 2>/dev/null)" 2>/dev/null)" in morse*) ;; *) continue ;; esac
+            n=$(iw dev "$i" station dump 2>/dev/null | grep -c '^Station' || true)
+            echo "  $i: channel $(sed -n 's/^CHANNEL=//p' /etc/halow-mesh/halow.env | tr -d "'\"") ($(sed -n 's/^COUNTRY=//p' /etc/halow-mesh/halow.env | tr -d "'\"")), $n mesh peer(s)"
+        done
+    fi
+
+    echo; echo "=== Internet"
+    via=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then out="reachable"; else out="NOT reachable"; fi
+    echo "  $out${via:+ (via $via)}"
+    if getent hosts example.com >/dev/null 2>&1; then dns="working"; else dns="NOT working"; fi
+    echo "  name lookups (DNS): $dns"
+
+    echo; echo "=== Gateways and forwarding"
+    for g in $GATEWAYS; do echo "  ${g%%:*} shares its internet with: $(echo "${g#*:}" | tr ',' ' ')"; done
+    for f in $FORWARD; do echo "  forwarding: ${f%%:*} <-> ${f#*:}"; done
+    [ -n "$GATEWAYS$FORWARD" ] || echo "  none"
+
+    echo; echo "=== Outpost"
+    if pgrep -f 'scripts/run_client.py' >/dev/null 2>&1; then echo "  running"; else echo "  NOT running"; fi
+}
+
 # --------------------------------------------------------------------- menu
 
 ifaces() {  # every interface worth offering, with a short description
@@ -394,15 +512,25 @@ cmd_menu() {
     need_root
     while :; do
         say ""; cmd_status >&2
-        what=$(menu "What would you like to set up?" \
+        what=$(menu "What would you like to do?" \
+            status "Status: cards, mesh, internet at a glance" \
             gateway "Share an interface's internet with others (gateway, NAT)" \
             forward "Forward between two interfaces (no NAT)" \
             mesh "Use the mesh's gateway for internet (now: $MESH_INTERNET)" \
             remove "Remove a gateway or forwarding" \
             wifi "Wi-Fi: join a network, or be an access point (outpost-wifi)" \
             meshif "Mesh interfaces: which cards the mesh uses (outpost-mesh)" \
+            meshset "Mesh settings: channel, country, names, password (outpost-mesh)" \
             "done" "Done") || return 0
         case "$what" in
+            status)
+                if use_whiptail; then
+                    cmd_overview > "/tmp/outpost-status.$$" 2>&1
+                    whiptail --title "Outpost status" --scrolltext --textbox "/tmp/outpost-status.$$" 30 90 || true
+                    rm -f "/tmp/outpost-status.$$"
+                else
+                    say ""; cmd_overview >&2; printf '\nPress Enter to go back: ' >&2; read -r _ || true
+                fi ;;
             gateway)
                 up=$(iface_menu "Which interface has the internet to share (the uplink)?") || continue
                 set --; tmp=$(ifaces)
@@ -437,6 +565,7 @@ EOF
                 esac ;;
             wifi) other_tool outpost-wifi ;;
             meshif) other_tool outpost-mesh select ;;
+            meshset) other_tool outpost-mesh settings ;;
             *) return 0 ;;
         esac
     done
@@ -457,6 +586,7 @@ other_tool() {  # run another Outpost network tool, if it's installed
 case "${1:-}" in
     "") cmd_menu ;;
     status) cmd_status ;;
+    overview) cmd_overview ;;
     gateway) shift; cmd_gateway "$@" ;;
     gateway-off) shift; cmd_gateway_off "$@" ;;
     forward) shift; cmd_forward "$@" ;;

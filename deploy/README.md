@@ -258,6 +258,13 @@ settings and interfaces stay as they are.
 
 ## Check it
 
+`sudo outpost-net` → **Status** (or `sudo outpost-net overview`) shows
+everything on one page: each network card and what it's doing (mesh, access
+point with how many devices, Wi-Fi client with signal, internet uplink),
+the mesh's neighbours with link quality and how many nodes are reachable,
+HaLow, whether the internet and DNS work, gateways and forwarding, and
+whether Outpost is running. The details:
+
 ```sh
 sudo halow-mesh status                 # HaLow mesh peers and bat0 address
 sudo outpost-mesh status               # Wi-Fi/Ethernet mesh
