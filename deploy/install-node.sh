@@ -6,7 +6,10 @@
 #   - on a 64-bit Raspberry Pi OS Pi: the HaLow HAT drivers + batman-adv mesh
 #   - optionally: a batman-adv mesh over ordinary Wi-Fi or Ethernet
 #
-#   ./install-node.sh <user@host> [options]
+#   ./install-node.sh <user@host> [options]     install on another machine (SSH)
+#   ./install-node.sh local [options]           install on this machine
+#   (on a fresh machine without the repo, bootstrap.sh downloads it and runs
+#    "install-node.sh local" - see deploy/README.md)
 #
 #   --config FILE      the shared Outpost config (channel keys, mesh key,
 #                      button bindings...), installed with sender_alias set to
@@ -51,6 +54,13 @@ set -euo pipefail
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
 HOST=${1:-}; [ -n "$HOST" ] && [ "${HOST#-}" = "$HOST" ] || usage
 shift
+LOCAL=0; [ "$HOST" = local ] && LOCAL=1
+if [ "$LOCAL" = 1 ] && [ "$(id -u)" = 0 ]; then
+    echo "run this as your normal user (the one Outpost runs as) - it uses sudo itself" >&2; exit 1
+fi
+on_target() {  # run a shell snippet on the machine being set up
+    if [ "$LOCAL" = 1 ]; then bash -c "$1"; else ssh "$HOST" "$1"; fi
+}
 CONFIG=; ENV_FILE=; MESH_ENV=; NAME=; USB_BT=0; HALOW=auto; REBOOT=0
 MESH_WIFI=; MESH_ETH=; FORCE_MESH=0; MESH_SELECT=0; WIFI_SETUP=0; NET_SETUP=0; AUTOSTART=1
 while [ $# -gt 0 ]; do
@@ -87,8 +97,9 @@ for i in $MESH_WIFI $MESH_ETH; do
     [[ "$i" =~ ^[A-Za-z0-9._-]{1,15}$ ]] || { echo "bad interface name: $i" >&2; exit 1; }
 done
 
+[ "$LOCAL" = 1 ] && HOST="this machine"
 echo "== checking $HOST"
-info=$(ssh "$HOST" 'uname -m; . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown Linux}";
+info=$(on_target 'uname -m; . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown Linux}";
     tr -d "\0" 2>/dev/null < /proc/device-tree/model; echo;
     command -v systemctl >/dev/null && echo systemd || echo no-systemd;
     command -v apt-get >/dev/null && echo apt || echo no-apt;
@@ -114,8 +125,13 @@ if [ "$HALOW" = auto ]; then
     fi
 fi
 if [ "$HALOW" = 1 ] && [ ! -f "$HERE/halow/out/KERNEL_RELEASE" ]; then
-    echo "!! the HaLow kit isn't built yet - see deploy/halow/README.md (Build), or use --no-halow" >&2
-    exit 1
+    if [ "$LOCAL" = 1 ]; then
+        echo "   HaLow: skipped - the HaLow kit isn't available (see deploy/halow/README.md)"
+        HALOW=0
+    else
+        echo "!! the HaLow kit isn't built yet - see deploy/halow/README.md (Build), or use --no-halow" >&2
+        exit 1
+    fi
 fi
 # outpost-mesh is always installed (so every node has the full menu). It
 # only has to succeed when mesh cards were asked for, or it's already in use.
@@ -145,8 +161,14 @@ if [ "$HALOW" = 1 ]; then
 fi
 
 echo "== packing Outpost"
-(cd "$REPO" && git ls-files -co --exclude-standard -- outpost scripts config/*.example.yaml \
-    pyproject.toml requirements*.txt README.md | grep -v '__pycache__' |
+# From a git checkout: the tracked (and new, not ignored) files. From a
+# downloaded copy (bootstrap.sh): the same folders, without caches.
+(cd "$REPO" && if [ -d .git ] && command -v git >/dev/null; then
+        git ls-files -co --exclude-standard -- outpost scripts config/*.example.yaml \
+            pyproject.toml requirements*.txt README.md
+    else
+        find outpost scripts config/*.example.yaml pyproject.toml requirements*.txt README.md -type f
+    fi | grep -v '__pycache__' |
     tar ${TARFLAGS[@]+"${TARFLAGS[@]}"} -cf - -T -) | tar -C "$D/outpost" -xf -
 cp "$HERE/setup-outpost.sh" "$HERE/remote-run.sh" "$D/"
 cp "$HERE/lib/pkg.sh" "$D/lib/"
@@ -161,18 +183,21 @@ cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.
     printf 'FORCE_MESH=%q\nMESH_SELECT=%q\nNODE_NAME=%q\nUSB_BT=%q\n' "$FORCE_MESH" "$MESH_SELECT" "$NAME" "$USB_BT"
     printf 'WIFI_SETUP=%q\nNET_SETUP=%q\nAUTOSTART=%q\n' "$WIFI_SETUP" "$NET_SETUP" "$AUTOSTART"
 } > "$D/vars.sh"
-tar ${TARFLAGS[@]+"${TARFLAGS[@]}"} -C "$STAGE" -czf "$STAGE/node.tgz" node
-
-echo "== copying to $HOST"
-scp -q "$STAGE/node.tgz" "$HOST:/tmp/outpost-node.tgz"
-ssh -t "$HOST" 'set -e; umask 077; rm -rf /tmp/outpost-node; mkdir /tmp/outpost-node
-    tar -C /tmp/outpost-node -xzf /tmp/outpost-node.tgz; rm -f /tmp/outpost-node.tgz
-    rc=0; bash /tmp/outpost-node/node/remote-run.sh || rc=$?
-    sudo rm -rf /tmp/outpost-node; exit $rc'
+if [ "$LOCAL" = 1 ]; then
+    bash "$D/remote-run.sh"
+else
+    tar ${TARFLAGS[@]+"${TARFLAGS[@]}"} -C "$STAGE" -czf "$STAGE/node.tgz" node
+    echo "== copying to $HOST"
+    scp -q "$STAGE/node.tgz" "$HOST:/tmp/outpost-node.tgz"
+    ssh -t "$HOST" 'set -e; umask 077; rm -rf /tmp/outpost-node; mkdir /tmp/outpost-node
+        tar -C /tmp/outpost-node -xzf /tmp/outpost-node.tgz; rm -f /tmp/outpost-node.tgz
+        rc=0; bash /tmp/outpost-node/node/remote-run.sh || rc=$?
+        sudo rm -rf /tmp/outpost-node; exit $rc'
+fi
 
 if [ "$REBOOT" = 1 ]; then
     echo "== rebooting $HOST"
-    ssh "$HOST" "sudo systemctl reboot" || true
+    on_target "sudo systemctl reboot" || true
 else
     echo "== done. Reboot if this was the first install (new kernel, groups, Bluetooth settings)."
 fi

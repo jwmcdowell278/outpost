@@ -85,8 +85,32 @@ if [ -f "$N/outpost.yaml" ]; then
     printf 'sender_alias: "%s"\n' "$NAME" >> "$CFG"
     echo "   installed the shared config as node \"$NAME\""
 elif [ ! -f "$CFG" ]; then
-    echo "!! no config here - run install-node.sh again with --config" >&2
-    exit 1
+    # First node, no shared config given: start one with new random keys.
+    # Other nodes need this same file (it's the mesh's keys).
+    token=$("$APP/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(18))')
+    "$APP/.venv/bin/python" - "$APP/config/outpost.example.yaml" "$CFG" "$token" <<'PY'
+import base64, os, sys
+src, dst, token = sys.argv[1:4]
+lines = []
+for line in open(src):
+    if "REPLACE_WITH_BASE64_32_BYTE_KEY" in line:
+        line = line.replace("REPLACE_WITH_BASE64_32_BYTE_KEY", base64.b64encode(os.urandom(32)).decode())
+    elif line.startswith("enable_web_ui:"):
+        line = "enable_web_ui: true\n"
+    elif line.startswith("# web_ui_host:"):
+        line = "web_ui_host: 0.0.0.0\n"
+    elif line.startswith("# web_ui_token:"):
+        line = 'web_ui_token: "%s"\n' % token
+    lines.append(line)
+fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.writelines(lines)
+PY
+    sed -i -E '/^sender_alias:/d' "$CFG"
+    printf 'sender_alias: "%s"\n' "$NAME" >> "$CFG"
+    echo "   no config given - made a NEW one with new keys (a new mesh): $CFG"
+    echo "   web UI token: $token"
+    echo "   Other nodes need this same file: copy it and pass it with --config."
 else
     echo "   keeping the existing config"
 fi

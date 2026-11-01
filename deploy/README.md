@@ -21,6 +21,34 @@ It installs:
   (802.11s or ad-hoc) or Ethernet (`--mesh-select`, `--mesh-wifi`,
   `--mesh-eth`).
 
+## Quick install on the machine itself (no repo needed)
+
+On a fresh machine (e.g. a Pi just flashed with Raspberry Pi OS 64-bit),
+logged in as your normal user, with internet:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jwmcdowell278/outpost/main/deploy/bootstrap.sh | bash -s -- --name "Pi 2"
+```
+
+It downloads the code from GitHub and runs `install-node.sh local` on that
+machine, with the same options as below. On a 64-bit Raspberry Pi it also
+downloads the prebuilt HaLow kit from the repo's latest release, if one is
+published (`deploy/halow/publish-kit.sh` does that, once, from the machine
+that built it); otherwise HaLow is skipped.
+
+**Joining an existing mesh:** the keys and mesh passwords aren't on GitHub,
+so copy them over first and pass them in:
+
+```sh
+scp config/node.yaml deploy/halow/halow.env john@<new-machine>:   # from your computer
+curl -fsSL https://raw.githubusercontent.com/jwmcdowell278/outpost/main/deploy/bootstrap.sh \
+    | bash -s -- --config ~/node.yaml --env ~/halow.env --name "Pi 2" --reboot
+```
+
+Without `--config`, the machine gets a **new** config with new keys - fine
+for the first node, then copy its `~/outpost/config/outpost.yaml` to the
+others. The web UI token it made is printed at the end.
+
 ## Before you start
 
 1. The machine needs internet access during the install, SSH, and `sudo`

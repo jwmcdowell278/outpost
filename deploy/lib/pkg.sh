@@ -30,9 +30,9 @@ pkg_names() {
         apt-get:pipewire) echo pipewire pipewire-pulse wireplumber ;;
         apt-get:audio-extra) echo libspa-0.2-bluetooth pulseaudio-utils libasound2-plugins ;;
         apt-get:tts)      echo espeak-ng ;;
-        apt-get:mesh)     echo batctl iw wpasupplicant ;;
+        apt-get:mesh)     echo batctl iw wpasupplicant iproute2 ;;
         apt-get:menu)     echo whiptail ;;
-        apt-get:firewall) echo nftables ;;
+        apt-get:firewall) echo nftables iproute2 ;;
 
         dnf:build)        echo python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
         dnf:runtime)      echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -40,9 +40,9 @@ pkg_names() {
         dnf:pipewire)     echo pipewire pipewire-pulseaudio wireplumber ;;
         dnf:audio-extra)  echo pulseaudio-utils alsa-plugins-pulseaudio ;;
         dnf:tts)          echo espeak-ng ;;
-        dnf:mesh)         echo batctl iw wpa_supplicant kernel-modules-extra ;;
+        dnf:mesh)         echo batctl iw wpa_supplicant kernel-modules-extra iproute ;;
         dnf:menu)     echo newt ;;
-        dnf:firewall) echo nftables ;;
+        dnf:firewall) echo nftables iproute ;;
 
         pacman:build)     echo python base-devel pkgconf libffi libusb systemd-libs ;;
         pacman:runtime)   echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -50,9 +50,9 @@ pkg_names() {
         pacman:pipewire)  echo pipewire pipewire-pulse wireplumber ;;
         pacman:audio-extra) echo pipewire-audio libpulse ;;
         pacman:tts)       echo espeak-ng ;;
-        pacman:mesh)      echo batctl iw wpa_supplicant ;;
+        pacman:mesh)      echo batctl iw wpa_supplicant iproute2 ;;
         pacman:menu)     echo libnewt ;;
-        pacman:firewall) echo nftables ;;
+        pacman:firewall) echo nftables iproute2 ;;
 
         zypper:build)     echo python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
         zypper:runtime)   echo libopus0 libportaudio2 libhidapi-hidraw0 libcap-progs util-linux kmod ;;
@@ -60,9 +60,9 @@ pkg_names() {
         zypper:pipewire)  echo pipewire pipewire-pulseaudio wireplumber ;;
         zypper:audio-extra) echo pipewire-spa-plugins-0_2 pulseaudio-utils ;;
         zypper:tts)       echo espeak-ng ;;
-        zypper:mesh)      echo batctl iw wpa_supplicant ;;
+        zypper:mesh)      echo batctl iw wpa_supplicant iproute2 ;;
         zypper:menu)     echo newt ;;
-        zypper:firewall) echo nftables ;;
+        zypper:firewall) echo nftables iproute2 ;;
         *) return 1 ;;
     esac
 }
