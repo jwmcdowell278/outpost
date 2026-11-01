@@ -1,0 +1,423 @@
+#!/bin/sh
+# Forwarding between interfaces, and gateways that share one interface's
+# internet with others through NAT. Uses its own nftables table
+# (outpost_net), so other firewall rules are left as they are.
+#
+#   sudo outpost-net                         menu
+#   outpost-net status                       what's set up, and the mesh gateway in use
+#   sudo outpost-net gateway UPLINK IFACE... share UPLINK's internet with these (NAT)
+#   sudo outpost-net gateway-off UPLINK
+#   sudo outpost-net forward IFACE1 IFACE2   route between two interfaces, both ways (no NAT)
+#   sudo outpost-net unforward IFACE1 IFACE2
+#   sudo outpost-net mesh-internet auto|off  use the mesh's gateway for internet
+#   sudo outpost-net apply                   (re)load everything (run at boot)
+#
+# Settings: /etc/outpost-net/net.env
+set -eu
+
+ETC=${OUTPOST_NET_ETC:-/etc/outpost-net}    # override only for testing
+CONF=$ETC/net.env
+SYSCTL=/etc/sysctl.d/90-outpost-net.conf
+TAG=outpost-net
+SELF=$(readlink -f "$0")
+PATH=$PATH:/usr/sbin:/sbin
+
+GATEWAYS=; FORWARD=; MESH_INTERNET=off; MESH_GATEWAY=
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+say() { echo "$*" >&2; }
+die() { echo "outpost-net: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = 0 ] || die "run with sudo"; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
+valid_if() { echo "$1" | grep -Eq '^[A-Za-z0-9._-]{1,15}$' || die "bad interface name: $1"; }
+
+save() {
+    mkdir -p "$ETC"
+    cat > "$CONF" <<EOF
+# outpost-net settings - change with: sudo outpost-net
+# Gateways: UPLINK:IFACE,IFACE... - share UPLINK's internet (NAT) with those.
+GATEWAYS="$GATEWAYS"
+# Forwarding without NAT, both ways: IFACE1:IFACE2 ...
+FORWARD="$FORWARD"
+# auto: route internet through the best gateway in the mesh; off: don't.
+MESH_INTERNET=$MESH_INTERNET
+# Fixed mesh gateway address instead of finding one (optional).
+MESH_GATEWAY=$MESH_GATEWAY
+EOF
+}
+
+# --------------------------------------------------------------- the rules
+
+# Pairs (from>to) that may start connections; replies are always allowed.
+allowed_pairs() {
+    for g in $GATEWAYS; do
+        up=${g%%:*}
+        for s in $(echo "${g#*:}" | tr ',' ' '); do echo "$s>$up"; done
+    done
+    for f in $FORWARD; do echo "${f%%:*}>${f#*:}"; echo "${f#*:}>${f%%:*}"; done
+}
+
+managed_ifaces() {
+    { for g in $GATEWAYS; do echo "${g%%:*}"; echo "${g#*:}" | tr ',' '\n'; done
+      for f in $FORWARD; do echo "${f%%:*}"; echo "${f#*:}"; done; } | sort -u | tr '\n' ' '
+}
+
+nft_rules() {
+    echo "table inet $TAG"
+    echo "delete table inet $TAG"
+    echo "table inet $TAG {"
+    echo "  chain forward {"
+    echo "    type filter hook forward priority -10; policy accept;"
+    # The mesh's MTU is smaller than most links: keep TCP segments fitting.
+    echo "    tcp flags syn tcp option maxseg size set rt mtu"
+    echo "    ct state established,related accept"
+    for p in $(allowed_pairs); do
+        echo "    iifname \"${p%%>*}\" oifname \"${p#*>}\" accept"
+    done
+    # Between interfaces set up here, only what's allowed above. Other
+    # traffic (Docker, VPNs set up elsewhere...) is left to its own rules.
+    m=$(managed_ifaces)
+    if [ -n "$m" ]; then
+        set_=$(for i in $m; do printf '"%s", ' "$i"; done | sed 's/, $//')
+        echo "    iifname { $set_ } oifname { $set_ } drop"
+    fi
+    echo "  }"
+    echo "  chain postrouting {"
+    echo "    type nat hook postrouting priority 100; policy accept;"
+    for g in $GATEWAYS; do
+        echo "    oifname \"${g%%:*}\" masquerade"
+    done
+    echo "  }"
+    echo "}"
+}
+
+# Docker sets the forward policy to DROP; its DOCKER-USER chain is where
+# other forwarding has to be allowed. ufw needs "route allow" rules.
+other_firewalls() {
+    if command -v iptables >/dev/null && iptables -n -L DOCKER-USER >/dev/null 2>&1; then
+        while iptables -S DOCKER-USER | grep -q -- "--comment $TAG"; do
+            rule=$(iptables -S DOCKER-USER | grep -- "--comment $TAG" | head -1 | sed 's/^-A /-D /')
+            # shellcheck disable=SC2086
+            eval "iptables $rule"
+        done
+        if [ -n "$(allowed_pairs)" ]; then
+            for p in $(allowed_pairs); do
+                iptables -I DOCKER-USER -i "${p%%>*}" -o "${p#*>}" -m comment --comment "$TAG" -j ACCEPT
+            done
+            iptables -I DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "$TAG" -j ACCEPT
+        fi
+    fi
+    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        old=$ETC/ufw-applied
+        [ -f "$old" ] && while read -r p; do
+            ufw route delete allow in on "${p%%>*}" out on "${p#*>}" >/dev/null 2>&1 || true
+        done < "$old"
+        allowed_pairs > "$old"
+        for p in $(allowed_pairs); do
+            ufw route allow in on "${p%%>*}" out on "${p#*>}" comment "$TAG" >/dev/null
+        done
+    fi
+    if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1 && [ -n "$(allowed_pairs)" ]; then
+        say "note: firewalld is running and may block this forwarding - allow it there too"
+        say "      (firewall-cmd --zone=<zone> --add-forward --add-masquerade --permanent)"
+    fi
+}
+
+mesh_prefix() {
+    for f in /etc/outpost-mesh/mesh.env /etc/halow-mesh/halow.env; do
+        [ -f "$f" ] && { sed -n 's/^BAT_PREFIX=//p' "$f" | head -1; return; }
+    done
+    echo 10.42
+}
+
+# batman-adv's gateway feature: a node that shares internet with the mesh
+# announces it (server); nodes that want internet from the mesh pick the
+# best one (client).
+batman_gw_mode() {
+    [ -e /sys/class/net/bat0 ] || return 0
+    mode=off
+    [ "$MESH_INTERNET" = auto ] && mode=client
+    for g in $GATEWAYS; do in_list bat0 "$(echo "${g#*:}" | tr ',' ' ')" && mode=server; done
+    [ "$(batctl gw_mode 2>/dev/null | cut -d' ' -f1)" = "$mode" ] || batctl gw_mode "$mode" >/dev/null 2>&1 || true
+}
+
+cmd_apply() {
+    need_root
+    command -v nft >/dev/null || die "needs nftables (nft)"
+    if [ -n "$GATEWAYS$FORWARD" ]; then
+        mkdir -p "$ETC"
+        [ -f "$SYSCTL" ] || cat /proc/sys/net/ipv4/ip_forward > "$ETC/ip_forward.before"
+        echo "net.ipv4.ip_forward = 1" > "$SYSCTL"
+        sysctl -q -w net.ipv4.ip_forward=1
+    elif [ -f "$SYSCTL" ]; then
+        # Put IP forwarding back as it was before this tool turned it on -
+        # but leave it on for Docker, which needs it.
+        rm -f "$SYSCTL"
+        before=$(cat "$ETC/ip_forward.before" 2>/dev/null || echo 1)
+        rm -f "$ETC/ip_forward.before"
+        [ -e /sys/class/net/docker0 ] && before=1
+        sysctl -q -w net.ipv4.ip_forward="$before"
+    fi
+    nft_rules | nft -f -
+    other_firewalls
+    batman_gw_mode
+    cmd_route
+}
+
+# ----------------------------------------------------- internet via the mesh
+
+# The address of the gateway batman-adv picked. Every node's bat0 MAC is
+# 02:ba:74:<suffix> and its address <prefix>.<suffix byte 2>.<byte 3>
+# (outpost-mesh, halow-mesh), so: gateway originator -> the 02:ba:74 client
+# it announces -> address.
+mesh_gateway_addr() {
+    [ -n "$MESH_GATEWAY" ] && { echo "$MESH_GATEWAY"; return; }
+    orig=$(batctl gwl -H 2>/dev/null | grep -E '^\s*(\*|=>)' | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1)
+    [ -n "$orig" ] || return 0
+    mac=$(batctl tg -H 2>/dev/null | awk -v o="$orig" '
+        { n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/) m[++n] = $i
+          if (n >= 2 && tolower(m[2]) == tolower(o) && tolower(m[1]) ~ /^02:ba:74:/) { print m[1]; exit } }')
+    [ -n "$mac" ] || return 0
+    x=$(printf %d "0x$(echo "$mac" | cut -d: -f5)")
+    y=$(printf %d "0x$(echo "$mac" | cut -d: -f6)")
+    [ "$y" -eq 0 ] && y=1
+    [ "$y" -eq 255 ] && y=254
+    echo "$(mesh_prefix).$x.$y"
+}
+
+# Keep a default route through the mesh gateway. Its high metric means any
+# other internet connection this machine has is used first.
+cmd_route() {
+    [ "$(id -u)" = 0 ] || return 0
+    batman_gw_mode   # again here: bat0 loses it when the mesh restarts
+    cur=$(ip -4 route show default dev bat0 2>/dev/null | awk '/proto static metric 900/ {print $3; exit}')
+    want=
+    if [ "$MESH_INTERNET" = auto ] && [ -e /sys/class/net/bat0 ]; then
+        want=$(mesh_gateway_addr)
+    fi
+    [ "$cur" = "$want" ] && return 0
+    [ -n "$cur" ] && ip route del default via "$cur" dev bat0 metric 900 2>/dev/null || true
+    if [ -n "$want" ]; then
+        ip route replace default via "$want" dev bat0 proto static metric 900
+        say "internet through mesh gateway $want"
+    fi
+}
+
+# ----------------------------------------------------------------- changes
+
+drop_gateway() {  # remove UPLINK's entry from GATEWAYS
+    keep=; for g in $GATEWAYS; do [ "${g%%:*}" = "$1" ] || keep="$keep $g"; done
+    GATEWAYS=${keep# }
+}
+
+cmd_gateway() {
+    need_root
+    up=${1:?usage: outpost-net gateway UPLINK IFACE...}; shift
+    [ $# -gt 0 ] || die "which interfaces should use $up's internet? e.g.: outpost-net gateway $up bat0"
+    valid_if "$up"
+    served=
+    for s in "$@"; do
+        valid_if "$s"; [ "$s" != "$up" ] || die "$up can't serve itself"
+        served="${served:+$served,}$s"
+    done
+    [ -e "/sys/class/net/$up" ] || say "note: $up doesn't exist right now - it's used when it appears"
+    drop_gateway "$up"
+    GATEWAYS="${GATEWAYS:+$GATEWAYS }$up:$served"
+    in_list bat0 "$*" && [ "$MESH_INTERNET" = auto ] && MESH_INTERNET=off   # a gateway doesn't need one
+    save; cmd_apply
+    say "$up shares its internet with: $*"
+}
+
+cmd_gateway_off() {
+    need_root
+    drop_gateway "${1:?usage: outpost-net gateway-off UPLINK}"
+    save; cmd_apply
+    say "$1 is no longer a gateway"
+}
+
+pair() { printf '%s\n%s\n' "$1" "$2" | sort | paste -sd: -; }
+
+cmd_forward() {
+    need_root
+    a=${1:?usage: outpost-net forward IFACE1 IFACE2}; b=${2:?usage: outpost-net forward IFACE1 IFACE2}
+    valid_if "$a"; valid_if "$b"; [ "$a" != "$b" ] || die "pick two different interfaces"
+    p=$(pair "$a" "$b")
+    in_list "$p" "$FORWARD" || FORWARD="${FORWARD:+$FORWARD }$p"
+    save; cmd_apply
+    say "forwarding between $a and $b (both ways, no NAT)"
+    say "  devices on each side need a route to the other side through this machine"
+}
+
+cmd_unforward() {
+    need_root
+    p=$(pair "${1:?usage: outpost-net unforward IFACE1 IFACE2}" "${2:?}")
+    keep=; for f in $FORWARD; do [ "$f" = "$p" ] || keep="$keep $f"; done
+    FORWARD=${keep# }
+    save; cmd_apply
+    say "no more forwarding between $1 and $2"
+}
+
+cmd_mesh_internet() {
+    need_root
+    case "${1:-}" in auto|off) MESH_INTERNET=$1 ;; *) die "usage: outpost-net mesh-internet auto|off" ;; esac
+    save; cmd_apply
+    if [ "$1" = auto ]; then
+        a=$(mesh_gateway_addr); say "using the mesh's gateway: ${a:-none found yet (checked every 20 seconds)}"
+    else
+        say "not using a mesh gateway"
+    fi
+}
+
+cmd_status() {
+    echo "Gateways (NAT):"
+    [ -n "$GATEWAYS" ] || echo "  none"
+    for g in $GATEWAYS; do echo "  ${g%%:*} shares its internet with: $(echo "${g#*:}" | tr ',' ' ')"; done
+    echo "Forwarding (no NAT):"
+    [ -n "$FORWARD" ] || echo "  none"
+    for f in $FORWARD; do echo "  ${f%%:*} <-> ${f#*:}"; done
+    echo "Internet through the mesh gateway: $MESH_INTERNET"
+    if [ "$MESH_INTERNET" = auto ]; then
+        r=$(ip -4 route show default dev bat0 2>/dev/null | awk '{print $3; exit}')
+        echo "  current gateway: ${r:-none found}"
+    fi
+    echo "IP forwarding: $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null | sed 's/1/on/; s/0/off/')"
+    m=$(batctl gw_mode 2>/dev/null | cut -d' ' -f1); [ -z "$m" ] || echo "batman-adv gateway mode: $m"
+}
+
+# --------------------------------------------------------------------- menu
+
+ifaces() {  # every interface worth offering, with a short description
+    for p in /sys/class/net/*; do
+        i=${p##*/}
+        [ -e "$p/type" ] || continue    # e.g. bonding_masters is a file, not an interface
+        # Skip loopback, container plumbing and the kernel's unused tunnel placeholders.
+        case "$i" in lo|docker*|veth*|br-*|virbr*|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|sit0|ip6tnl0|ip6gre0|tunl0) continue ;; esac
+        a=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4; exit}')
+        d=
+        [ "$i" = bat0 ] && d="the mesh"
+        [ -e "$p/phy80211" ] && d="Wi-Fi"
+        [ -e "$p/wireguard" ] || [ "$(cat "$p/type" 2>/dev/null)" = 65534 ] && d="tunnel"
+        [ -z "$d" ] && [ -e "$p/device" ] && d="Ethernet"
+        ip -4 route show default dev "$i" 2>/dev/null | grep -q . && d="${d:+$d, }has internet"
+        echo "$i|${d:-network}${a:+ ($a)}"
+    done
+}
+
+use_whiptail() { command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}" != dumb ]; }
+q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+
+menu() {  # menu PROMPT TAG LABEL... -> TAG
+    prompt=$1; shift
+    if use_whiptail; then whiptail --title "Outpost network" --menu "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3; return; fi
+    saved=; for a in "$@"; do saved="$saved $(q "$a")"; done
+    while :; do
+        eval "set -- $saved"; say ""; say "$prompt"; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); say "$(printf '  %d  %-12s %s' "$n" "$1" "$2")"; shift 2; done
+        printf 'Number (Enter to cancel): ' >&2; read -r ans || return 1; [ -n "$ans" ] || return 1
+        eval "set -- $saved"; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); [ "$ans" = "$n" ] && { echo "$1"; return 0; }; shift 2; done
+        say "  no choice $ans"
+    done
+}
+
+checklist() {  # checklist PROMPT TAG LABEL ON|OFF ... -> chosen TAGs
+    prompt=$1; shift
+    if use_whiptail; then
+        whiptail --title "Outpost network" --separate-output --checklist "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3 | tr '\n' ' '
+        return
+    fi
+    saved=; for a in "$@"; do saved="$saved $(q "$a")"; done
+    sel=; eval "set -- $saved"
+    while [ $# -gt 0 ]; do [ "$3" = ON ] && sel="$sel $1"; shift 3; done
+    while :; do
+        eval "set -- $saved"; say ""; say "$prompt"; n=0
+        while [ $# -gt 0 ]; do
+            n=$((n + 1)); b="[ ]"; in_list "$1" "$sel" && b="[x]"
+            say "$(printf '  %d %s %-12s %s' "$n" "$b" "$1" "$2")"; shift 3
+        done
+        printf 'Number to tick/untick, Enter when done, q to cancel: ' >&2
+        read -r ans || return 1
+        case "$ans" in "") echo "$sel"; return 0 ;; q|Q) return 1 ;; esac
+        eval "set -- $saved"; n=0
+        while [ $# -gt 0 ]; do
+            n=$((n + 1))
+            if [ "$ans" = "$n" ]; then
+                if in_list "$1" "$sel"; then sel=$(echo " $sel " | sed "s/ $1 / /"); else sel="$sel $1"; fi
+            fi
+            shift 3
+        done
+    done
+}
+
+iface_menu() {  # iface_menu PROMPT [EXCLUDE] -> IFACE
+    prompt=$1; ex=${2:-}; set --
+    tmp=$(ifaces)
+    while IFS='|' read -r i d; do [ -n "$i" ] && ! in_list "$i" "$ex" && set -- "$@" "$i" "$d"; done <<EOF
+$tmp
+EOF
+    [ $# -gt 0 ] || { say "no interfaces to choose from"; return 1; }
+    menu "$prompt" "$@"
+}
+
+cmd_menu() {
+    need_root
+    while :; do
+        say ""; cmd_status >&2
+        what=$(menu "What would you like to set up?" \
+            gateway "Share an interface's internet with others (gateway, NAT)" \
+            forward "Forward between two interfaces (no NAT)" \
+            mesh "Use the mesh's gateway for internet (now: $MESH_INTERNET)" \
+            remove "Remove a gateway or forwarding" \
+            "done" "Done") || return 0
+        case "$what" in
+            gateway)
+                up=$(iface_menu "Which interface has the internet to share (the uplink)?") || continue
+                set --; tmp=$(ifaces)
+                while IFS='|' read -r i d; do
+                    [ -n "$i" ] && [ "$i" != "$up" ] || continue
+                    on=OFF; [ "$i" = bat0 ] && on=ON
+                    for g in $GATEWAYS; do [ "${g%%:*}" = "$up" ] && in_list "$i" "$(echo "${g#*:}" | tr ',' ' ')" && on=ON; done
+                    set -- "$@" "$i" "$d" "$on"
+                done <<EOF
+$tmp
+EOF
+                sel=$(checklist "Which interfaces should use $up's internet?" "$@") || continue
+                # shellcheck disable=SC2086
+                if [ -n "$(echo $sel)" ]; then cmd_gateway "$up" $sel; else cmd_gateway_off "$up"; fi ;;
+            forward)
+                a=$(iface_menu "Forward between which interface...") || continue
+                b=$(iface_menu "...and which other one?" "$a") || continue
+                cmd_forward "$a" "$b" ;;
+            mesh)
+                m=$(menu "Route internet through the best gateway in the mesh?" \
+                    auto "Yes - when this machine has no other internet connection" off "No") || continue
+                cmd_mesh_internet "$m" ;;
+            remove)
+                set --
+                for g in $GATEWAYS; do set -- "$@" "g:${g%%:*}" "gateway: ${g%%:*} -> $(echo "${g#*:}" | tr ',' ' ')"; done
+                for f in $FORWARD; do set -- "$@" "f:$f" "forwarding: ${f%%:*} <-> ${f#*:}"; done
+                [ $# -gt 0 ] || { say "nothing to remove"; continue; }
+                r=$(menu "Remove which?" "$@") || continue
+                case "$r" in
+                    g:*) cmd_gateway_off "${r#g:}" ;;
+                    f:*) p=${r#f:}; cmd_unforward "${p%%:*}" "${p#*:}" ;;
+                esac ;;
+            *) return 0 ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    "") cmd_menu ;;
+    status) cmd_status ;;
+    gateway) shift; cmd_gateway "$@" ;;
+    gateway-off) shift; cmd_gateway_off "$@" ;;
+    forward) shift; cmd_forward "$@" ;;
+    unforward) shift; cmd_unforward "$@" ;;
+    mesh-internet) shift; cmd_mesh_internet "$@" ;;
+    apply) cmd_apply ;;
+    _route) cmd_route ;;
+    -h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
+    *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" >&2; exit 2 ;;
+esac

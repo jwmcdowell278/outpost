@@ -1,0 +1,475 @@
+#!/bin/sh
+# Sets each Wi-Fi card to join a network (client), be an access point, or
+# be off - through NetworkManager. Cards in the mesh (outpost-mesh) and the
+# HaLow radio are left alone.
+#
+#   sudo outpost-wifi                        menu
+#   outpost-wifi list                        Wi-Fi cards and what they're doing
+#   sudo outpost-wifi client IFACE [SSID]    join a network (asks for its password)
+#   sudo outpost-wifi ap IFACE [--ssid NAME] [--password PW] [--band 2.4|5]
+#                           [--channel N] [--address 192.168.4.1/24]
+#   sudo outpost-wifi off IFACE
+#   sudo outpost-wifi keep IFACE             keep a change that would be undone
+#
+# A change to the card this machine is reached through is undone after 2
+# minutes unless it's kept (the menu asks), so a mistake can't lock you out.
+set -eu
+
+RUN=/run/outpost-wifi
+NM_DIR=/etc/NetworkManager
+OFF_CONF=$NM_DIR/conf.d/outpost-wifi-off.conf
+DNS_CONF=$NM_DIR/dnsmasq-shared.d/outpost-ap.conf
+MESH_NODE=/etc/outpost-mesh/node.env
+UNDO_AFTER=120
+SELF=$(readlink -f "$0")
+
+say() { echo "$*" >&2; }
+die() { echo "outpost-wifi: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = 0 ] || die "run with sudo"; }
+need_nm() {
+    command -v nmcli >/dev/null || die "needs NetworkManager (nmcli) - install it first"
+    nmcli -t general status >/dev/null 2>&1 || die "NetworkManager isn't running"
+}
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
+q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }   # shell-quote
+
+# ---------------------------------------------------------------- what's there
+
+driver() { basename "$(readlink -f "/sys/class/net/$1/device/driver" 2>/dev/null)" 2>/dev/null || echo "?"; }
+
+wifi_ifaces() {  # Wi-Fi cards, not the HaLow radio
+    for p in /sys/class/net/*; do
+        [ -e "$p/phy80211" ] && [ -e "$p/device" ] || continue
+        case "$(driver "${p##*/}")" in morse*) continue ;; esac
+        echo "${p##*/}"
+    done
+}
+
+# shellcheck disable=SC1090
+mesh_ifaces() { ( MESH_WIFI=; [ -f "$MESH_NODE" ] && . "$MESH_NODE"; echo "${MESH_WIFI:-}" ); }
+
+can_ap() {
+    phy=$(cat "/sys/class/net/$1/phy80211/name" 2>/dev/null) || return 1
+    iw phy "$phy" info 2>/dev/null | sed -n '/Supported interface modes/,/^\s*[A-Z].*:$/p' | grep -q '\* AP$'
+}
+
+connected_ifaces() {  # default route + every SSH session's local address
+    ip -o route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p'
+    command -v ss >/dev/null || return 0
+    for a in $(ss -Htn state established '( sport = :ssh )' 2>/dev/null | awk '{print $3}' | sed 's/:[0-9]*$//; s/^\[//; s/\]$//; s/^::ffff://'); do
+        ip -o addr show 2>/dev/null | awk -v a="$a" '{split($4, p, "/"); if (p[1] == a) print $2}'
+    done
+}
+
+off_list() { [ -f "$OFF_CONF" ] && sed -n 's/^unmanaged-devices=//p' "$OFF_CONF" | tr ';' '\n' | sed 's/^interface-name://' | tr '\n' ' '; }
+
+write_off_list() {
+    list=; for i in "$@"; do list="${list:+$list;}interface-name:$i"; done
+    if [ -z "$list" ]; then
+        rm -f "$OFF_CONF"
+    else
+        mkdir -p "$(dirname "$OFF_CONF")"
+        printf '# Wi-Fi cards turned off with outpost-wifi.\n[keyfile]\nunmanaged-devices=%s\n' "$list" > "$OFF_CONF"
+    fi
+    nmcli general reload conf 2>/dev/null || systemctl reload NetworkManager 2>/dev/null || true
+}
+
+active_con() {  # name of the connection active on an interface, if any
+    c=$(nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null || true)
+    [ "$c" = "--" ] && c=
+    echo "$c"
+}
+
+ap_con() { echo "outpost-ap-$1"; }
+
+con_field() { nmcli -g "$2" connection show "$1" 2>/dev/null || true; }
+
+mode_of() {  # mesh | off | ap | client | idle  (+ detail on stdout line 2)
+    i=$1
+    if in_list "$i" "$(mesh_ifaces)"; then echo mesh; echo "in the mesh (outpost-mesh)"; return; fi
+    if in_list "$i" "$(off_list)"; then echo off; echo "off"; return; fi
+    c=$(active_con "$i")
+    if [ -z "$c" ]; then echo idle; echo "not connected"; return; fi
+    ssid=$(con_field "$c" 802-11-wireless.ssid)
+    addr=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4; exit}')
+    if [ "$(con_field "$c" 802-11-wireless.mode)" = ap ]; then
+        echo ap; echo "access point \"$ssid\" ($addr)"
+    else
+        echo client; echo "joined \"$ssid\" (${addr:-no address yet})"
+    fi
+}
+
+describe() {
+    i=$1; conn=$2
+    d=$(mode_of "$i" | sed -n 2p)
+    in_list "$i" "$conn" && d="$d - you're connected through this"
+    printf '%-9s %-10s %s\n' "$i" "$(driver "$i")" "$d"
+}
+
+cmd_list() {
+    need_nm
+    conn=$(connected_ifaces | sort -u | tr '\n' ' ')
+    found=
+    for i in $(wifi_ifaces); do found=1; describe "$i" "$conn"; done
+    [ -n "$found" ] || echo "no Wi-Fi cards"
+}
+
+# ----------------------------------------------------------------- changing
+
+unoff() {
+    if in_list "$1" "$(off_list)"; then
+        keep=; for i in $(off_list); do [ "$i" = "$1" ] || keep="$keep $i"; done
+        # shellcheck disable=SC2086
+        write_off_list $keep
+        sleep 1
+    fi
+    nmcli device set "$1" managed yes 2>/dev/null || true
+    ip link set "$1" up 2>/dev/null || true
+}
+
+ap_disable() {
+    a=$(ap_con "$1")
+    nmcli -t -f NAME connection show 2>/dev/null | grep -qx "$a" || return 0
+    nmcli connection modify "$a" connection.autoconnect no
+    nmcli -t -f NAME connection show --active | grep -qx "$a" && nmcli connection down "$a" >/dev/null || true
+}
+
+# If something else (e.g. Pi-hole) already serves DNS on port 53, the access
+# point's own DHCP/DNS server can't start and the AP fails ("IP configuration
+# could not be reserved"). Then hand out addresses only, with that server as DNS.
+dns_workaround() {
+    addr=${1%/*}
+    if ss -Hlnu 'sport = :53' 2>/dev/null | grep -q . && ! ss -Hlnup 'sport = :53' 2>/dev/null | grep -q 'dnsmasq'; then
+        mkdir -p "$(dirname "$DNS_CONF")"
+        printf '# Another DNS server runs here: the access point only hands out addresses.\nport=0\ndhcp-option=option:dns-server,%s\n' "$addr" > "$DNS_CONF"
+        say "   another DNS server is running here - access point clients will use it"
+    else
+        rm -f "$DNS_CONF"
+    fi
+}
+
+do_client() {  # do_client IFACE SSID PASSWORD HIDDEN
+    i=$1; ssid=$2; pw=$3; hidden=$4
+    unoff "$i"
+    ap_disable "$i"
+    set -- nmcli device wifi connect "$ssid" ifname "$i"
+    [ -n "$pw" ] && set -- "$@" password "$pw"
+    [ "$hidden" = 1 ] && set -- "$@" hidden yes
+    "$@" >/dev/null || { say "couldn't join \"$ssid\" (wrong password, or out of range?)"; return 1; }
+    c=$(active_con "$i")
+    # Tie the network to this card, so another Wi-Fi card doesn't take it.
+    [ -n "$c" ] && nmcli connection modify "$c" connection.interface-name "$i" connection.autoconnect yes || true
+    say "$i joined \"$ssid\""
+}
+
+do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
+    i=$1; ssid=$2; pw=$3; band=$4; ch=$5; addr=$6
+    can_ap "$i" || { say "$i's Wi-Fi card can't be an access point"; return 1; }
+    unoff "$i"
+    dns_workaround "$addr"
+    a=$(ap_con "$i")
+    set -- 802-11-wireless.mode ap 802-11-wireless.band "$band" 802-11-wireless.ssid "$ssid" \
+        802-11-wireless.channel "$ch" \
+        wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn wifi-sec.pairwise ccmp wifi-sec.group ccmp \
+        ipv4.method shared ipv4.addresses "$addr" ipv6.method disabled \
+        connection.interface-name "$i" connection.autoconnect yes connection.autoconnect-priority 100
+    [ -n "$pw" ] && set -- "$@" wifi-sec.psk "$pw"
+    if nmcli -t -f NAME connection show | grep -qx "$a"; then
+        nmcli connection modify "$a" "$@"
+    else
+        [ -n "$pw" ] || { say "an access point needs a password"; return 1; }
+        nmcli connection add type wifi ifname "$i" con-name "$a" ssid "$ssid" "$@" >/dev/null
+    fi
+    if ! nmcli connection up "$a" >/dev/null 2>&1; then
+        say "the access point didn't start - see: journalctl -u NetworkManager -n 30"
+        nmcli connection modify "$a" connection.autoconnect no || true
+        return 1
+    fi
+    say "$i is access point \"$ssid\" at ${addr%/*}"
+}
+
+do_off() {
+    i=$1
+    ap_disable "$i"
+    nmcli device disconnect "$i" >/dev/null 2>&1 || true
+    # shellcheck disable=SC2046
+    in_list "$i" "$(off_list)" || write_off_list $(off_list) "$i"
+    ip link set "$i" down 2>/dev/null || true
+    say "$i is off"
+}
+
+# Runs detached from the SSH session (systemd-run), so a change that drops
+# the connection still finishes. Arguments come in a root-only file.
+cmd_apply() {
+    req=$1
+    # shellcheck disable=SC1090
+    . "$req"; rm -f "$req"
+    case "$ACTION" in
+        client) do_client "$IFACE" "$SSID" "$PASSWORD" "$HIDDEN" ;;
+        ap) do_ap "$IFACE" "$SSID" "$PASSWORD" "$BAND" "$CHANNEL" "$ADDRESS" ;;
+        off) do_off "$IFACE" ;;
+    esac
+}
+
+# Undo to the state saved before a change (no secrets needed).
+cmd_undo() {
+    i=$1; prev=$2
+    say "outpost-wifi: undoing the change on $i"
+    case "$prev" in
+        off) do_off "$i" ;;
+        ap) unoff "$i"; a=$(ap_con "$i")
+            nmcli connection modify "$a" connection.autoconnect yes; nmcli connection up "$a" ;;
+        client:*) unoff "$i"; ap_disable "$i"; nmcli connection up "${prev#client:}" ;;
+        *) unoff "$i"; ap_disable "$i"; nmcli device connect "$i" || true ;;
+    esac
+}
+
+snapshot() {
+    i=$1
+    case "$(mode_of "$i" | head -1)" in
+        off) echo off ;;
+        ap) echo ap ;;
+        client) echo "client:$(nmcli -g connection.uuid connection show "$(active_con "$i")")" ;;
+        *) echo idle ;;
+    esac
+}
+
+# apply ACTION IFACE [VAR=value...]: run a change, with automatic undo if it
+# touches the card this machine is reached through.
+apply() {
+    action=$1; i=$2; shift 2
+    mkdir -p "$RUN"; chmod 700 "$RUN"
+    risky=0; in_list "$i" "$(connected_ifaces | sort -u | tr '\n' ' ')" && risky=1
+    unit=outpost-wifi-undo-$i
+    systemctl stop "$unit.timer" 2>/dev/null || true
+    prev=$(snapshot "$i")
+    if [ "$risky" = 1 ]; then
+        systemd-run --quiet --unit="$unit" --on-active="$UNDO_AFTER" "$SELF" _undo "$i" "$prev"
+    fi
+    req=$RUN/req-$i
+    ( umask 077; { echo "ACTION=$(q "$action")"; echo "IFACE=$(q "$i")"
+        for kv in "$@"; do echo "${kv%%=*}=$(q "${kv#*=}")"; done; } > "$req" )
+    log=$RUN/apply-$i.log
+    if command -v systemd-run >/dev/null; then
+        systemd-run --quiet --wait --collect --unit="outpost-wifi-apply-$i" \
+            -p StandardError=file:"$log" -p StandardOutput=file:"$log" "$SELF" _apply "$req" && rc=0 || rc=$?
+        cat "$log" 2>/dev/null >&2 || true; rm -f "$log"
+    else
+        cmd_apply "$req" && rc=0 || rc=$?
+    fi
+    if [ "$rc" != 0 ]; then
+        # A failed change is put back straight away.
+        systemctl stop "$unit.timer" 2>/dev/null || true
+        say "putting $i back as it was"
+        cmd_undo "$i" "$prev" >/dev/null 2>&1 || true
+        return 1
+    fi
+    [ "$risky" = 1 ] && say "This changed the Wi-Fi you're connected through. It's undone in $((UNDO_AFTER / 60)) minutes unless you run: sudo outpost-wifi keep $i"
+    return 0
+}
+
+cmd_keep() {
+    systemctl stop "outpost-wifi-undo-$1.timer" 2>/dev/null && say "kept the change on $1" || say "nothing to keep on $1"
+}
+
+check_iface() {
+    i=$1
+    [ -e "/sys/class/net/$i/phy80211" ] || die "$i isn't a Wi-Fi card (see: outpost-wifi list)"
+    in_list "$i" "$(wifi_ifaces)" || die "$i is the HaLow radio - halow-mesh runs it"
+    in_list "$i" "$(mesh_ifaces)" && die "$i is in the mesh - take it out first: sudo outpost-mesh select"
+    return 0
+}
+
+# ------------------------------------------------------------------- menus
+
+use_whiptail() { command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}" != dumb ]; }
+
+quote_args() { r=; for a in "$@"; do r="$r $(q "$a")"; done; echo "$r"; }
+
+menu() {  # menu PROMPT TAG LABEL [TAG LABEL...] -> prints the chosen TAG
+    prompt=$1; shift
+    if use_whiptail; then
+        whiptail --title "Outpost Wi-Fi" --menu "$prompt" 20 78 10 "$@" 3>&1 1>&2 2>&3
+        return
+    fi
+    saved=$(quote_args "$@")
+    while :; do
+        eval "set -- $saved"
+        say ""; say "$prompt"; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); say "$(printf '  %d  %-12s %s' "$n" "$1" "$2")"; shift 2; done
+        printf 'Number (Enter to cancel): ' >&2; read -r ans || return 1
+        [ -n "$ans" ] || return 1
+        eval "set -- $saved"; n=0
+        while [ $# -gt 0 ]; do n=$((n + 1)); [ "$ans" = "$n" ] && { echo "$1"; return 0; }; shift 2; done
+        say "  no choice $ans"
+    done
+}
+
+ask() {  # ask PROMPT DEFAULT
+    if use_whiptail; then whiptail --title "Outpost Wi-Fi" --inputbox "$1" 10 78 "$2" 3>&1 1>&2 2>&3; return; fi
+    printf '%s [%s]: ' "$1" "$2" >&2; read -r a || return 1; echo "${a:-$2}"
+}
+
+ask_secret() {
+    if use_whiptail; then whiptail --title "Outpost Wi-Fi" --passwordbox "$1" 10 78 3>&1 1>&2 2>&3; return; fi
+    printf '%s: ' "$1" >&2; stty -echo 2>/dev/null || true; read -r a || a=; stty echo 2>/dev/null || true; say ""; echo "$a"
+}
+
+yesno() {
+    if use_whiptail; then whiptail --title "Outpost Wi-Fi" --yesno "$1" 12 78; return; fi
+    printf '%s Type "yes": ' "$1" >&2; read -r a || return 1; [ "$a" = yes ]
+}
+
+scan() {  # SSID<TAB>signal<TAB>security, strongest first, one per SSID
+    nmcli -t -f SSID,SIGNAL,SECURITY device wifi list ifname "$1" --rescan yes 2>/dev/null |
+        sed 's/\\:/\x01/g' | awk -F: '$1 != "" { gsub("\001", ":", $1); print $1 "\t" $2 "\t" $3 }' |
+        sort -t "$(printf '\t')" -k2,2nr | awk -F '\t' '!seen[$1]++'
+}
+
+menu_client() {
+    i=$1
+    say "scanning on $i..."
+    unoff "$i" 2>/dev/null || true
+    list=$(scan "$i")
+    set --
+    if [ -n "$list" ]; then
+        tab=$(printf '\t')
+        while IFS="$tab" read -r s sig sec; do
+            [ -n "$sec" ] && [ "$sec" != "--" ] || sec=open
+            set -- "$@" "$s" "$(printf '%3s%%  %s' "$sig" "$sec")"
+        done <<EOF
+$list
+EOF
+    fi
+    set -- "$@" "(other)" "a hidden network, or one not listed"
+    ssid=$(menu "Network for $i to join:" "$@") || return 1
+    hidden=0
+    if [ "$ssid" = "(other)" ]; then
+        ssid=$(ask "Network name" "") || return 1
+        [ -n "$ssid" ] || return 1
+        hidden=1; sec=wpa
+    else
+        sec=$(printf '%s\n' "$list" | awk -F '\t' -v s="$ssid" '$1 == s { print $3; exit }')
+    fi
+    pw=
+    if [ "$hidden" = 1 ] || { [ -n "$sec" ] && [ "$sec" != "--" ]; }; then
+        pw=$(ask_secret "Password for \"$ssid\" (empty for an open network)") || return 1
+    fi
+    confirm_risky "$i" || return 1
+    apply client "$i" SSID="$ssid" PASSWORD="$pw" HIDDEN="$hidden" && after_change "$i"
+}
+
+menu_ap() {
+    i=$1
+    can_ap "$i" || { say "$i's Wi-Fi card can't be an access point"; return 1; }
+    a=$(ap_con "$i")
+    cur_ssid=$(con_field "$a" 802-11-wireless.ssid); [ -n "$cur_ssid" ] || cur_ssid="outpost-$(cat /proc/sys/kernel/hostname)"
+    cur_addr=$(con_field "$a" ipv4.addresses); [ -n "$cur_addr" ] || cur_addr=192.168.4.1/24
+    ssid=$(ask "Access point name (SSID)" "$cur_ssid") || return 1
+    [ -n "$ssid" ] || return 1
+    while :; do
+        pw=$(ask_secret "Password, 8-63 characters (empty: $( [ -n "$(con_field "$a" 802-11-wireless.ssid)" ] && echo "keep the current one" || echo "make one up"))") || return 1
+        [ -z "$pw" ] || { [ ${#pw} -ge 8 ] && [ ${#pw} -le 63 ]; } && break
+        say "  must be 8-63 characters"
+    done
+    made=
+    if [ -z "$pw" ] && [ -z "$(con_field "$a" 802-11-wireless.ssid)" ]; then
+        pw=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12); made=1
+    fi
+    band=$(menu "Band:" bg "2.4 GHz - longer range, works with every device" a "5 GHz - faster, shorter range") || return 1
+    ch=$(ask "Channel (empty = automatic)" "") || return 1
+    addr=$(ask "Address of this machine on the access point" "$cur_addr") || return 1
+    case "$addr" in */*) ;; *) addr="$addr/24" ;; esac
+    confirm_risky "$i" || return 1
+    apply ap "$i" SSID="$ssid" PASSWORD="$pw" BAND="$band" CHANNEL="$ch" ADDRESS="$addr" || return 1
+    [ -n "$made" ] && say "Access point password: $pw"
+    after_change "$i"
+}
+
+confirm_risky() {
+    in_list "$1" "$(connected_ifaces | sort -u | tr '\n' ' ')" || return 0
+    yesno "You're connected through $1. Changing it may cut you off. If you can't reach the machine afterwards, the change is undone after $((UNDO_AFTER / 60)) minutes. Go ahead?"
+}
+
+after_change() {
+    unit=outpost-wifi-undo-$1
+    systemctl is-active --quiet "$unit.timer" 2>/dev/null || return 0
+    printf 'Still connected? Press Enter to keep this change: ' >&2
+    read -r _ && cmd_keep "$1"
+}
+
+cmd_menu() {
+    need_root; need_nm
+    conn=$(connected_ifaces | sort -u | tr '\n' ' ')
+    set --
+    for i in $(wifi_ifaces); do set -- "$@" "$i" "$(describe "$i" "$conn" | cut -c11-)"; done
+    [ $# -gt 0 ] || die "no Wi-Fi cards"
+    i=$(menu "Which Wi-Fi card?" "$@") || exit 0
+    if in_list "$i" "$(mesh_ifaces)"; then
+        say "$i is in the mesh - take it out first: sudo outpost-mesh select"; exit 1
+    fi
+    what=$(menu "What should $i do?" client "Join a Wi-Fi network" ap "Be an access point (others join it)" off "Off") || exit 0
+    case "$what" in
+        client) menu_client "$i" ;;
+        ap) menu_ap "$i" ;;
+        off) confirm_risky "$i" && apply off "$i" && after_change "$i" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_client() {
+    need_root; need_nm
+    i=${1:?usage: outpost-wifi client IFACE [SSID]}; check_iface "$i"
+    if [ -z "${2:-}" ]; then menu_client "$i"; return; fi
+    pw=${WIFI_PASSWORD-}
+    [ -n "${WIFI_PASSWORD+x}" ] || pw=$(ask_secret "Password for \"$2\" (empty for an open network)")
+    apply client "$i" SSID="$2" PASSWORD="$pw" HIDDEN="${WIFI_HIDDEN:-0}" && after_change "$i"
+}
+
+cmd_ap() {
+    need_root; need_nm
+    i=${1:?usage: outpost-wifi ap IFACE [options]}; check_iface "$i"; shift
+    a=$(ap_con "$i")
+    ssid=$(con_field "$a" 802-11-wireless.ssid); [ -n "$ssid" ] || ssid="outpost-$(cat /proc/sys/kernel/hostname)"
+    addr=$(con_field "$a" ipv4.addresses); [ -n "$addr" ] || addr=192.168.4.1/24
+    pw=; band="bg"; ch=
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --ssid) ssid=${2:?}; shift ;;
+            --password) pw=${2:?}; shift ;;
+            --band) case "${2:?}" in 2.4|bg) band="bg" ;; 5|a) band="a" ;; *) die "--band 2.4 or 5" ;; esac; shift ;;
+            --channel) ch=${2:?}; shift ;;
+            --address) addr=${2:?}; case "$addr" in */*) ;; *) addr="$addr/24" ;; esac; shift ;;
+            *) die "unknown option $1" ;;
+        esac
+        shift
+    done
+    if [ -n "$pw" ] && { [ ${#pw} -lt 8 ] || [ ${#pw} -gt 63 ]; }; then die "password must be 8-63 characters"; fi
+    made=
+    if [ -z "$pw" ] && [ -z "$(con_field "$a" 802-11-wireless.ssid)" ]; then
+        pw=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12); made=1
+    fi
+    apply ap "$i" SSID="$ssid" PASSWORD="$pw" BAND="$band" CHANNEL="$ch" ADDRESS="$addr" || exit 1
+    [ -n "$made" ] && say "Access point password: $pw"
+    after_change "$i"
+}
+
+cmd_off() {
+    need_root; need_nm
+    i=${1:?usage: outpost-wifi off IFACE}; check_iface "$i"
+    apply off "$i" && after_change "$i"
+}
+
+case "${1:-}" in
+    "") cmd_menu ;;
+    list) cmd_list ;;
+    client) shift; cmd_client "$@" ;;
+    ap) shift; cmd_ap "$@" ;;
+    off) shift; cmd_off "$@" ;;
+    keep) need_root; cmd_keep "${2:?usage: outpost-wifi keep IFACE}" ;;
+    _apply) need_root; cmd_apply "$2" ;;
+    _undo) need_root; cmd_undo "$2" "$3" ;;
+    -h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" ;;
+    *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF" >&2; exit 2 ;;
+esac

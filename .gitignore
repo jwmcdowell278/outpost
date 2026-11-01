@@ -10,3 +10,6 @@ config/outpost-node2.yaml
 *.log
 
 *.log.*
+config/*.yaml
+!config/*.example.yaml
+deploy/mesh/mesh-site.env

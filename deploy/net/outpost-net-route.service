@@ -1,0 +1,6 @@
+[Unit]
+Description=Outpost: keep the route through the mesh gateway up to date
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/outpost-net _route

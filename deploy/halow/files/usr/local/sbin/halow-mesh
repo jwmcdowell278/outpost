@@ -131,7 +131,11 @@ stop_supplicant() {
 }
 
 stop() {
-    [ -e /sys/class/net/bat0 ] && ip link del bat0 || true
+    [ -e "/sys/class/net/$IFACE" ] && ip link set "$IFACE" nomaster 2>/dev/null || true
+    # Remove bat0 only if nothing else (e.g. outpost-mesh's Wi-Fi/Ethernet) still uses it.
+    if [ -e /sys/class/net/bat0 ] && [ -z "$(ls /sys/class/net/bat0/lower_* 2>/dev/null)" ]; then
+        ip link del bat0
+    fi
     stop_supplicant
     [ -e "/sys/class/net/$IFACE" ] && ip link set "$IFACE" down || true
 }

@@ -1,0 +1,15 @@
+[Unit]
+Description=Outpost batman-adv mesh over Wi-Fi/Ethernet (bat0)
+# Starts after the normal network (and the HaLow mesh, if any) and blocks
+# nothing else, so a radio problem can never hold up SSH at boot.
+After=network.target NetworkManager.service halow-mesh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/outpost-mesh start
+ExecStop=/usr/local/sbin/outpost-mesh stop
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

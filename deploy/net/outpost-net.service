@@ -1,0 +1,12 @@
+[Unit]
+Description=Outpost forwarding and gateways (outpost-net)
+# After the networks and firewalls it adds to (Docker's DOCKER-USER chain).
+After=network.target NetworkManager.service docker.service ufw.service halow-mesh.service outpost-mesh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/outpost-net apply
+
+[Install]
+WantedBy=multi-user.target
