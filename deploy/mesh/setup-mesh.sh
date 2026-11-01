@@ -43,7 +43,7 @@ grep -q '^MESH_PASSWORD=.' "$ETC/mesh.env" || { echo "!! MESH_PASSWORD is empty 
 # Keep the HaLow and Wi-Fi meshes one network when both are on this machine.
 if [ -f /etc/halow-mesh/halow.env ]; then
     for k in BATMAN_ALGO BAT_PREFIX; do
-        v=$(sed -n "s/^$k=//p" /etc/halow-mesh/halow.env)
+        v=$(sed -n "s/^$k=//p" /etc/halow-mesh/halow.env | tr -d "'\"")
         [ -z "$v" ] || sed -i "s/^$k=.*/$k=$v/" "$ETC/mesh.env"
     done
 fi

@@ -358,9 +358,9 @@ cmd_settings() {
     [ -f "$ETC/mesh.env" ] || die "not set up yet - install it with install-node.sh"
     changed=
     while :; do
-        what=$(menu "Mesh settings - every node needs the same ones" \
+        what=$(menu "Wi-Fi mesh settings (802.11s and ad-hoc; HaLow has its own) - every node needs the same ones" \
             country "Country: ${COUNTRY:-?} (sets the legal channels)" \
-            channel "Channel: $(freq_label "${FREQ:-2437}")" \
+            channel "Wi-Fi channel: $(freq_label "${FREQ:-2437}")" \
             name "802.11s mesh name: ${MESH_ID:-?}" \
             password "802.11s password: ${MESH_PASSWORD:+set (${#MESH_PASSWORD} characters)}" \
             adhoc "Ad-hoc cell name: ${ADHOC_ID}" \

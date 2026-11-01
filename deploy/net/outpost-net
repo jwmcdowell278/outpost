@@ -6,6 +6,7 @@
 #   sudo outpost-net                         menu (also opens the Wi-Fi and mesh menus)
 #   outpost-net status                       what's set up, and the mesh gateway in use
 #   sudo outpost-net overview                everything at a glance: cards, mesh, internet
+#   sudo outpost-net halow                   HaLow settings: channel, width, country, password
 #   sudo outpost-net gateway UPLINK IFACE... share UPLINK's internet with these (NAT)
 #   sudo outpost-net gateway-off UPLINK
 #   sudo outpost-net forward IFACE1 IFACE2   route between two interfaces, both ways (no NAT)
@@ -133,7 +134,7 @@ other_firewalls() {
 mesh_prefix() {
     local f
     for f in /etc/outpost-mesh/mesh.env /etc/halow-mesh/halow.env; do
-        [ -f "$f" ] && { sed -n 's/^BAT_PREFIX=//p' "$f" | head -1; return; }
+        [ -f "$f" ] && { sed -n 's/^BAT_PREFIX=//p' "$f" | head -1 | tr -d "'\""; return; }
     done
     echo 10.42
 }
@@ -427,6 +428,110 @@ cmd_overview() {
     if pgrep -f 'scripts/run_client.py' >/dev/null 2>&1; then echo "  running"; else echo "  NOT running"; fi
 }
 
+# ----------------------------------------------------------- HaLow settings
+
+HALOW_ENV=/etc/halow-mesh/halow.env
+MORSE_CONF=/etc/modprobe.d/morse.conf
+
+ask() {  # ask PROMPT DEFAULT
+    local a
+    if use_whiptail; then whiptail --title "Outpost HaLow" --inputbox "$1" 10 78 "$2" 3>&1 1>&2 2>&3; return; fi
+    printf '%s [%s]: ' "$1" "$2" >&2; read -r a || return 1; echo "${a:-$2}"
+}
+
+say_box() {
+    if use_whiptail; then whiptail --title "Outpost HaLow" --msgbox "$1" 16 78; else printf '\n%b\n' "$1" >&2; fi
+}
+
+# Values go into halow.env, which halow-mesh reads as shell.
+safe_text() { case "$1" in *[\'\"\\\$\`]*|"") return 1 ;; esac; [ "${#1}" -le "${2:-32}" ]; }
+
+halow_get() { sed -n "s/^$1=//p" "$HALOW_ENV" | head -1 | sed "s/^'\(.*\)'$/\1/"; }
+
+halow_set() {  # halow_set KEY VALUE
+    local tmp
+    tmp=$HALOW_ENV.new
+    awk -v k="$1" -v v="$1='$2'" 'BEGIN { done = 0 }
+        $0 ~ "^" k "=" { print v; done = 1; next } { print }
+        END { if (!done) print v }' "$HALOW_ENV" > "$tmp"
+    chmod 600 "$tmp"; mv "$tmp" "$HALOW_ENV"
+}
+
+width_of() {  # US operating class -> channel width
+    case "$1" in 68) echo "1 MHz" ;; 69) echo "2 MHz" ;; 70) echo "4 MHz" ;; 71) echo "8 MHz" ;; *) echo "op class $1" ;; esac
+}
+
+cmd_halow() {
+    local c ch changed country_changed n oc pw what w
+    need_root
+    [ -f "$HALOW_ENV" ] || die "no HaLow here ($HALOW_ENV is missing)"
+    changed=; country_changed=
+    while :; do
+        what=$(menu "HaLow settings - every HaLow node needs the same ones" \
+            channel "Channel: $(halow_get CHANNEL), $(width_of "$(halow_get OP_CLASS)") wide" \
+            country "Country: $(halow_get COUNTRY)" \
+            name "Mesh name: $(halow_get MESH_ID)" \
+            password "Mesh password: set ($(halow_get MESH_PASSWORD | awk '{print length}') characters)" \
+            "done" "Done") || what="done"
+        case "$what" in
+            channel)
+                if [ "$(halow_get COUNTRY)" != US ]; then
+                    say_box "The channel list here is for the US (902-928 MHz). For $(halow_get COUNTRY), enter the channel and operating class from your regulator's or Morse Micro's channel table."
+                    ch=$(ask "Channel number" "$(halow_get CHANNEL)") || continue
+                    oc=$(ask "Operating class for that channel" "$(halow_get OP_CLASS)") || continue
+                    if echo "$ch$oc" | grep -Eq '^[0-9]+$'; then halow_set CHANNEL "$ch"; halow_set OP_CLASS "$oc"; changed=1
+                    else say_box "Channel and operating class must be numbers."; fi
+                    continue
+                fi
+                w=$(menu "Channel width. Wider is faster but reaches less far; 4 MHz is a good fit for voice." \
+                    1 "1 MHz - longest range, slowest" 2 "2 MHz - long range" \
+                    4 "4 MHz - balanced (recommended)" 8 "8 MHz - fastest, shortest range") || continue
+                case "$w" in
+                    1) oc=68; set -- $(seq 1 2 51) ;;
+                    2) oc=69; set -- $(seq 2 4 50) ;;
+                    4) oc=70; set -- 8 16 24 32 40 48 ;;
+                    8) oc=71; set -- 12 28 44 ;;
+                esac
+                n=; for c in "$@"; do n="$n $c ch$c"; done
+                # shellcheck disable=SC2086
+                ch=$(menu "Channel ($w MHz wide). Nearby HaLow networks or other 900 MHz devices can interfere - try another if links are poor." $n) || continue
+                halow_set CHANNEL "${ch#ch}"; halow_set OP_CLASS "$oc"; changed=1 ;;
+            country)
+                c=$(ask "Two-letter country code (US, AU, NZ, EU, GB, JP, KR, SG ...). Must match where the radio is used, and your HaLow HAT's frequency band." "$(halow_get COUNTRY)") || continue
+                c=$(echo "$c" | tr '[:lower:]' '[:upper:]')
+                if ! echo "$c" | grep -Eq '^[A-Z]{2}$'; then say_box "\"$c\" isn't a two-letter country code."; continue; fi
+                [ "$c" = "$(halow_get COUNTRY)" ] && continue
+                halow_set COUNTRY "$c"
+                [ -f "$MORSE_CONF" ] && sed -i "s/country=[A-Z][A-Z]/country=$c/" "$MORSE_CONF"
+                changed=1; country_changed=1
+                [ "$c" = US ] || say_box "Country set to $c. The channel list in this menu is for the US: check that channel $(halow_get CHANNEL) / operating class $(halow_get OP_CLASS) is valid in $c, and change it under Channel if not." ;;
+            name)
+                n=$(ask "Mesh name (up to 32 characters)" "$(halow_get MESH_ID)") || continue
+                if safe_text "$n" 32; then halow_set MESH_ID "$n"; changed=1
+                else say_box "Use 1-32 characters, without quotes, backslashes, \$ or backticks."; fi ;;
+            password)
+                pw=$(menu "HaLow mesh password (SAE/WPA3)" new "Make up a new one" type "Type one") || continue
+                if [ "$pw" = new ]; then pw=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)
+                else pw=$(ask "Password, 8-63 characters" "") || continue; fi
+                if [ "${#pw}" -ge 8 ] && safe_text "$pw" 63; then
+                    halow_set MESH_PASSWORD "$pw"; changed=1
+                    say_box "New HaLow mesh password:\n\n  $pw\n\nEvery HaLow node needs it. Copy $HALOW_ENV to each one (install-node.sh --env)."
+                else
+                    say_box "Use 8-63 characters, without quotes, backslashes, \$ or backticks."
+                fi ;;
+            *) break ;;
+        esac
+    done
+    [ -n "$changed" ] || return 0
+    if [ -n "$country_changed" ]; then
+        echo "Country changed: reboot for the HaLow driver to use it (sudo reboot)."
+    elif systemctl is-active --quiet halow-mesh.service; then
+        echo "Restarting HaLow with the new settings (the mesh drops for a few seconds)..."
+        systemctl restart halow-mesh.service && echo "HaLow restarted." || echo "HaLow didn't restart - see: journalctl -u halow-mesh" >&2
+    fi
+    echo "Remember: every HaLow node needs the same settings, or they lose contact."
+}
+
 # --------------------------------------------------------------------- menu
 
 ifaces() {  # every interface worth offering, with a short description
@@ -520,7 +625,8 @@ cmd_menu() {
             remove "Remove a gateway or forwarding" \
             wifi "Wi-Fi: join a network, or be an access point (outpost-wifi)" \
             meshif "Mesh interfaces: which cards the mesh uses (outpost-mesh)" \
-            meshset "Mesh settings: channel, country, names, password (outpost-mesh)" \
+            meshset "Wi-Fi mesh settings: channel, country, names, password (not HaLow)" \
+            halow "HaLow settings: channel, width, country, password" \
             "done" "Done") || return 0
         case "$what" in
             status)
@@ -566,6 +672,7 @@ EOF
             wifi) other_tool outpost-wifi ;;
             meshif) other_tool outpost-mesh select ;;
             meshset) other_tool outpost-mesh settings ;;
+            halow) if [ -f "$HALOW_ENV" ]; then cmd_halow; else say "no HaLow on this machine"; fi ;;
             *) return 0 ;;
         esac
     done
@@ -587,6 +694,7 @@ case "${1:-}" in
     "") cmd_menu ;;
     status) cmd_status ;;
     overview) cmd_overview ;;
+    halow) cmd_halow ;;
     gateway) shift; cmd_gateway "$@" ;;
     gateway-off) shift; cmd_gateway_off "$@" ;;
     forward) shift; cmd_forward "$@" ;;

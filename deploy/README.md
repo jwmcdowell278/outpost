@@ -70,6 +70,20 @@ Options:
 After the reboot, pair the headset from the web UI's **Bluetooth** page and
 switch it to hands-free mode (main README, "Bluetooth headset buttons").
 
+## HaLow settings
+
+`sudo outpost-net` → **HaLow settings** (or `sudo outpost-net halow`) changes
+the HaLow mesh on this node: channel and width (picked together, so the
+operating class always matches), country, mesh name and password. It
+restarts HaLow afterwards. A country change also updates the driver
+(`/etc/modprobe.d/morse.conf`) and needs a reboot. The channel list is for
+the US (902-928 MHz); for other countries you enter the channel and
+operating class yourself. Every HaLow node needs the same settings: copy
+`/etc/halow-mesh/halow.env` to the others (`install-node.sh --env`).
+
+The **Wi-Fi mesh settings** entry is separate: it's for ordinary Wi-Fi cards
+in the mesh (802.11s or ad-hoc), not HaLow.
+
 ## Choosing the mesh interfaces
 
 On the machine (over SSH or at its keyboard):

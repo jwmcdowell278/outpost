@@ -15,7 +15,7 @@ F=$K/files
 model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)
 echo "== HaLow kit for kernel $KREL on: $model"
 case "$model" in
-    *"Raspberry Pi 5"*|*"Raspberry Pi 500"*|*"Compute Module 5"*)
+    *"Raspberry Pi 5"*|*"Compute Module 5"*)
         echo "!! This kit's kernel and overlay are for Pi 3/4 (BCM2835-family GPIO), not a Pi 5. Nothing changed."
         exit 1 ;;
 esac
@@ -68,7 +68,7 @@ elif [ ! -f /etc/halow-mesh/halow.env ]; then
     echo "   new mesh password generated - copy /etc/halow-mesh/halow.env to the other nodes"
 fi
 # Keep the driver's country in step with the mesh settings.
-country=$(sed -n 's/^COUNTRY=//p' /etc/halow-mesh/halow.env)
+country=$(sed -n 's/^COUNTRY=//p' /etc/halow-mesh/halow.env | tr -d "'\"")
 [ -n "$country" ] && sed -i "s/country=[A-Z][A-Z]/country=$country/" /etc/modprobe.d/morse.conf
 grep -q "^batman-adv" /etc/modules 2>/dev/null || echo batman-adv >> /etc/modules
 systemctl daemon-reload
