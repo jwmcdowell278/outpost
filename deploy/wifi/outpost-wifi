@@ -226,6 +226,7 @@ do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
     set -- 802-11-wireless.mode ap 802-11-wireless.band "$band" 802-11-wireless.ssid "$ssid" \
         802-11-wireless.channel "$ch" \
         wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn wifi-sec.pairwise ccmp wifi-sec.group ccmp \
+        wifi-sec.pmf disable \
         ipv4.method shared ipv4.addresses "$addr" ipv6.method disabled \
         connection.interface-name "$i" connection.autoconnect yes connection.autoconnect-priority 100
     [ -n "$pw" ] && set -- "$@" wifi-sec.psk "$pw"
@@ -449,8 +450,15 @@ menu_ap() {
     case "$addr" in */*) ;; *) addr="$addr/24" ;; esac
     confirm_risky "$i" || return 1
     apply ap "$i" SSID="$ssid" PASSWORD="$pw" BAND="$band" CHANNEL="$ch" ADDRESS="$addr" || return 1
-    [ -n "$made" ] && say "Access point password: $pw"
+    [ -n "$made" ] && show_password "$ssid" "$pw"
     after_change "$i"
+}
+
+show_password() {  # make a generated password hard to miss
+    if use_whiptail; then
+        whiptail --title "Outpost Wi-Fi" --msgbox "Access point \"$1\" is up.\n\nPassword:  $2\n\nWrite it down - it isn't shown again. To change it:\n  sudo outpost-wifi ap <card> --password '...'" 14 70
+    fi
+    say ""; say "  Access point \"$1\" password:  $2"; say ""
 }
 
 confirm_risky() {
@@ -522,7 +530,7 @@ cmd_ap() {
         pw=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12); made=1
     fi
     apply ap "$i" SSID="$ssid" PASSWORD="$pw" BAND="$band" CHANNEL="$ch" ADDRESS="$addr" || exit 1
-    [ -n "$made" ] && say "Access point password: $pw"
+    [ -n "$made" ] && show_password "$ssid" "$pw"
     after_change "$i"
 }
 
