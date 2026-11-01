@@ -14,11 +14,13 @@
 # A change to the card this machine is reached through is undone after 2
 # minutes unless it's kept (the menu asks), so a mistake can't lock you out.
 set -eu
+PATH=$PATH:/usr/sbin:/sbin   # iw, ip, ss live here; not on a normal user's PATH
 
 RUN=/run/outpost-wifi
 NM_DIR=/etc/NetworkManager
 OFF_CONF=$NM_DIR/conf.d/outpost-wifi-off.conf
 DNS_CONF=$NM_DIR/dnsmasq-shared.d/outpost-ap.conf
+AP_HOOK=$NM_DIR/dispatcher.d/90-outpost-ap
 MESH_NODE=/etc/outpost-mesh/node.env
 UNDO_AFTER=120
 SELF=$(readlink -f "$0")
@@ -47,7 +49,7 @@ wifi_ifaces() {  # Wi-Fi cards, not the HaLow radio
 }
 
 # shellcheck disable=SC1090
-mesh_ifaces() { ( MESH_WIFI=; [ -f "$MESH_NODE" ] && . "$MESH_NODE"; echo "${MESH_WIFI:-}" ); }
+mesh_ifaces() { ( MESH_WIFI=; MESH_ADHOC=; [ -f "$MESH_NODE" ] && . "$MESH_NODE"; echo "${MESH_WIFI:-} ${MESH_ADHOC:-}" ); }
 
 can_ap() {
     local phy
@@ -212,6 +214,34 @@ do_client() {  # do_client IFACE SSID PASSWORD HIDDEN
     say "$i joined \"$ssid\""
 }
 
+# NetworkManager 1.42 offers both WPA2-PSK and WPA2-PSK-SHA256 in the 4-way
+# handshake, while some Wi-Fi chips (the Raspberry Pi's brcmfmac) beacon
+# plain WPA2-PSK only. Phones see the mismatch in message 3/4, disconnect
+# and report a wrong password. This hook, run whenever one of our access
+# points comes up, restricts it to plain WPA2-PSK.
+install_ap_hook() {
+    mkdir -p "$(dirname "$AP_HOOK")"
+    cat > "$AP_HOOK" <<'HOOK'
+#!/bin/sh
+# Installed by outpost-wifi: keep Outpost access points on plain WPA2-PSK
+# (see install_ap_hook in /usr/local/sbin/outpost-wifi).
+[ "$2" = up ] || exit 0
+case "${CONNECTION_ID:-}" in outpost-ap-*) ;; *) exit 0 ;; esac
+PATH=$PATH:/usr/sbin:/sbin
+command -v wpa_cli >/dev/null || exit 0
+n=$(wpa_cli -i "$1" list_networks 2>/dev/null | awk -F '\t' '/\[CURRENT\]/ {print $1; exit}')
+[ -n "$n" ] || exit 0
+case "$(wpa_cli -i "$1" get_network "$n" key_mgmt 2>/dev/null | tail -1)" in
+    *SHA256*)
+        wpa_cli -i "$1" disable_network "$n" >/dev/null
+        wpa_cli -i "$1" set_network "$n" key_mgmt WPA-PSK >/dev/null
+        wpa_cli -i "$1" enable_network "$n" >/dev/null
+        logger -t outpost-wifi "access point on $1 restricted to WPA2-PSK" ;;
+esac
+HOOK
+    chmod 0755 "$AP_HOOK"
+}
+
 do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
     local a addr band ch i pw ssid
     i=$1; ssid=$2; pw=$3; band=$4; ch=$5; addr=$6
@@ -221,6 +251,7 @@ do_ap() {  # do_ap IFACE SSID PASSWORD BAND CHANNEL ADDRESS
         *) say "address $addr leaves no room for devices - use e.g. 192.168.4.1/24"; return 1 ;;
     esac
     unoff "$i"
+    install_ap_hook
     dns_workaround "$addr"
     a=$(ap_con "$i")
     set -- 802-11-wireless.mode ap 802-11-wireless.band "$band" 802-11-wireless.ssid "$ssid" \

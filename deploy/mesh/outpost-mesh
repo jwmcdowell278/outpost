@@ -1,7 +1,9 @@
 #!/bin/bash
-# batman-adv mesh (bat0) over ordinary Wi-Fi (802.11s mesh point, SAE) and/or
-# Ethernet interfaces. On a HaLow Pi it adds these interfaces to the same
-# bat0 as the HaLow radio, joining the two meshes into one network.
+# batman-adv mesh (bat0) over ordinary Wi-Fi and/or Ethernet interfaces.
+# Wi-Fi cards that can do 802.11s mesh use it, encrypted (SAE/WPA3). Cards
+# that can't (e.g. a Raspberry Pi's built-in Wi-Fi) can use ad-hoc (IBSS)
+# mode instead - unencrypted. On a HaLow Pi these interfaces join the same
+# bat0 as the HaLow radio, making the meshes one network.
 #
 #   outpost-mesh select            pick the mesh interfaces from a menu
 #   outpost-mesh use [--force] IFACE...   set them directly (none = mesh off)
@@ -12,14 +14,19 @@
 # Settings: /etc/outpost-mesh/mesh.env (shared by every node) and
 #           /etc/outpost-mesh/node.env (this machine's interfaces)
 set -eu
+PATH=$PATH:/usr/sbin:/sbin   # iw, ip, batctl live here; not on a normal user's PATH
 
 ETC=${OUTPOST_MESH_ETC:-/etc/outpost-mesh}   # override only for testing
 RUN=/run/outpost-mesh
 NM_CONF=/etc/NetworkManager/conf.d/outpost-mesh.conf
-MESH_WIFI=; MESH_ETH=
+MESH_WIFI=; MESH_ADHOC=; MESH_ETH=
 [ -f "$ETC/mesh.env" ] && . "$ETC/mesh.env"
 [ -f "$ETC/node.env" ] && . "$ETC/node.env"
-MESH_WIFI=${MESH_WIFI:-}; MESH_ETH=${MESH_ETH:-}
+MESH_WIFI=${MESH_WIFI:-}; MESH_ADHOC=${MESH_ADHOC:-}; MESH_ETH=${MESH_ETH:-}
+# Ad-hoc cell shared by every node using ad-hoc mode. The fixed cell ID
+# (BSSID) stops nodes from splitting into separate cells.
+ADHOC_ID=${ADHOC_ID:-outpost-adhoc}
+ADHOC_BSSID=${ADHOC_BSSID:-02:6f:75:74:70:01}
 
 log() { echo "outpost-mesh: $*"; }
 die() { echo "outpost-mesh: $*" >&2; exit 1; }
@@ -49,10 +56,24 @@ kind() {  # wifi | halow | ethernet | other
     fi
 }
 
-can_mesh() {  # Wi-Fi card supports 802.11s mesh point
+wifi_modes() {  # the Wi-Fi modes a card supports
     local phy
-    phy=$(cat "/sys/class/net/$1/phy80211/name" 2>/dev/null) || return 1
-    iw phy "$phy" info 2>/dev/null | sed -n '/Supported interface modes/,/^\s*[A-Z].*:$/p' | grep -q "mesh point"
+    phy=$(cat "/sys/class/net/$1/phy80211/name" 2>/dev/null) || return 0
+    iw phy "$phy" info 2>/dev/null | sed -n '/Supported interface modes/,/^\s*[A-Z].*:$/p'
+}
+
+can_mesh() { wifi_modes "$1" | grep -q "mesh point"; }   # 802.11s
+can_ibss() { wifi_modes "$1" | grep -q "\* IBSS"; }      # ad-hoc
+
+wifi_how() {  # how a Wi-Fi card would mesh: 80211s | adhoc | ""
+    if can_mesh "$1"; then echo 80211s; elif can_ibss "$1"; then echo adhoc; fi
+}
+
+nm_connection() {  # what NetworkManager runs on an interface now, if anything
+    local c
+    command -v nmcli >/dev/null || return 0
+    c=$(nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null || true)
+    [ "$c" = "--" ] || echo "$c"
 }
 
 # Interfaces this machine is reached through: the default route, and every
@@ -68,7 +89,7 @@ connected_ifaces() {
 
 unusable() {  # why an interface can't go in the mesh (nothing = it can)
     case "$(kind "$1")" in
-        wifi) can_mesh "$1" || echo "its Wi-Fi card can't do 802.11s mesh - use another card" ;;
+        wifi) [ -n "$(wifi_how "$1")" ] || echo "its Wi-Fi card can't do 802.11s or ad-hoc mesh - use another card" ;;
         ethernet) : ;;
         halow) echo "it's the HaLow radio - halow-mesh already puts it in the mesh" ;;
         *) echo "it isn't Wi-Fi or Ethernet" ;;
@@ -83,7 +104,11 @@ describe() {  # one-line description of an interface for list/select
     local a conn i k what
     i=$1; k=$(kind "$i"); conn=$2
     case "$k" in
-        wifi) if can_mesh "$i"; then what="Wi-Fi, can mesh"; else what="Wi-Fi, CAN'T mesh"; fi ;;
+        wifi) case "$(wifi_how "$i")" in
+                  80211s) what="Wi-Fi, can mesh" ;;
+                  adhoc) what="Wi-Fi, ad-hoc only (no encryption)" ;;
+                  *) what="Wi-Fi, CAN'T mesh" ;;
+              esac ;;
         ethernet) what="Ethernet" ;;
         halow) what="HaLow" ;;
         *) what="other" ;;
@@ -91,7 +116,7 @@ describe() {  # one-line description of an interface for list/select
     a=$(addr_of "$i"); [ -n "$a" ] || a="no address"
     in_list "$i" "$conn" && a="$a - you're connected through this"
     in_list "$i" "$(halow_ifaces)" && a="always in the mesh (halow-mesh)"
-    printf '%-9s %-18s %-10s %s\n' "$i" "$what" "$(driver "$i")" "$a"
+    printf '%-9s %-34s %-10s %s\n' "$i" "$what" "$(driver "$i")" "$a"
 }
 
 halow_ifaces() {
@@ -103,9 +128,9 @@ halow_ifaces() {
 cmd_list() {
     local conn i m
     conn=$(connected_ifaces | sort -u | tr '\n' ' ')
-    printf '  %-9s %-18s %-10s %s\n' IFACE TYPE DRIVER ADDRESS
+    printf '  %-9s %-34s %-10s %s\n' IFACE TYPE DRIVER ADDRESS
     for i in $(nics); do
-        m=" "; in_list "$i" "$MESH_WIFI $MESH_ETH" && m="*"
+        m=" "; in_list "$i" "$MESH_WIFI $MESH_ADHOC $MESH_ETH" && m="*"
         printf '%s ' "$m"; describe "$i" "$conn"
     done
     echo "(* = in the mesh)"
@@ -174,11 +199,11 @@ pick_whiptail() {
 }
 
 cmd_select() {
-    local a conn cur force i risky sel
+    local a c conn cur force i risky sel
     need_root
     [ -f "$ETC/mesh.env" ] || die "not set up yet - install it with install-node.sh"
     conn=$(connected_ifaces | sort -u | tr '\n' ' ')
-    cur="$MESH_WIFI $MESH_ETH"; cur=$(echo "$cur" | sed 's/^ *//; s/ *$//')
+    cur="$MESH_WIFI $MESH_ADHOC $MESH_ETH"; cur=$(echo "$cur" | sed 's/^ *//; s/ *$//')
     if command -v whiptail >/dev/null && [ -t 0 ] && [ "${TERM:-dumb}" != dumb ]; then
         sel=$(pick_whiptail "$conn" "$cur") || { echo "no changes"; exit 0; }
     else
@@ -193,55 +218,79 @@ cmd_select() {
         read -r a; [ "$a" = yes ] || { echo "no changes"; exit 0; }
         force=--force
     fi
+    # Newly ticked cards: say what ad-hoc mode means, and what stops.
+    for i in $sel; do
+        in_list "$i" "$cur" && continue
+        c=$(nm_connection "$i")
+        if [ "$(kind "$i")" = wifi ] && [ "$(wifi_how "$i")" = adhoc ]; then
+            echo ""
+            echo "$i can only mesh in ad-hoc mode:"
+            echo "  - NO ENCRYPTION: anyone nearby with Wi-Fi can join the mesh and reach"
+            echo "    your network. Outpost's voice stays encrypted end to end."
+            echo "  - It only meshes with other nodes in ad-hoc mode (not 802.11s ones)."
+            [ -n "$c" ] && echo "  - It stops being \"$c\" (its access point or Wi-Fi connection)."
+            printf 'Type "yes" to use %s in ad-hoc mode: ' "$i"
+            read -r a; [ "$a" = yes ] || { echo "no changes"; exit 0; }
+        elif [ -n "$c" ]; then
+            echo "$i is now \"$c\" - that stops while it's in the mesh."
+        fi
+    done
     # shellcheck disable=SC2086
     cmd_use $force $sel
 }
 
 # Set the mesh interfaces and apply: NetworkManager hands, service restart.
 cmd_use() {
-    local conn eth force i list old why wifi
+    local adhoc conn eth force i list old why wifi
     need_root
     [ -f "$ETC/mesh.env" ] || die "not set up yet - install it with install-node.sh"
     force=0; [ "${1:-}" = --force ] && { force=1; shift; }
     conn=$(connected_ifaces | sort -u | tr '\n' ' ')
-    wifi=; eth=
+    wifi=; adhoc=; eth=
     for i in "$@"; do
         [ -e "/sys/class/net/$i" ] || die "no interface $i (see: outpost-mesh list)"
         why=$(unusable "$i"); [ -z "$why" ] || die "can't use $i: $why"
         if in_list "$i" "$conn" && [ "$force" = 0 ]; then
             die "$i carries this machine's connection - using it would cut it off (--force to do it anyway)"
         fi
-        if [ "$(kind "$i")" = wifi ]; then wifi="$wifi $i"; else eth="$eth $i"; fi
+        if [ "$(kind "$i")" != wifi ]; then
+            eth="$eth $i"
+        elif [ "$(wifi_how "$i")" = 80211s ]; then
+            wifi="$wifi $i"
+        else
+            adhoc="$adhoc $i"
+            echo "note: $i uses ad-hoc mode - no encryption" >&2
+        fi
     done
-    wifi=${wifi# }; eth=${eth# }
-    old="$MESH_WIFI $MESH_ETH"
+    wifi=${wifi# }; adhoc=${adhoc# }; eth=${eth# }
+    old="$MESH_WIFI $MESH_ADHOC $MESH_ETH"
 
     # Take the old set down with the old settings, then switch.
     systemctl stop outpost-mesh.service 2>/dev/null || true
-    printf 'MESH_WIFI="%s"\nMESH_ETH="%s"\n' "$wifi" "$eth" > "$ETC/node.env"
-    MESH_WIFI=$wifi; MESH_ETH=$eth
+    printf 'MESH_WIFI="%s"\nMESH_ADHOC="%s"\nMESH_ETH="%s"\n' "$wifi" "$adhoc" "$eth" > "$ETC/node.env"
+    MESH_WIFI=$wifi; MESH_ADHOC=$adhoc; MESH_ETH=$eth
 
     if [ -d /etc/NetworkManager ]; then
         list=interface-name:bat0
-        for i in $wifi $eth; do list="$list;interface-name:$i"; done
+        for i in $wifi $adhoc $eth; do list="$list;interface-name:$i"; done
         mkdir -p "$(dirname "$NM_CONF")"
         printf '# The mesh interfaces are run by outpost-mesh.service, not NetworkManager.\n[keyfile]\nunmanaged-devices=%s\n' \
             "$list" > "$NM_CONF"
         systemctl reload NetworkManager 2>/dev/null || true
         # Give interfaces that left the mesh back to NetworkManager.
         for i in $old; do
-            in_list "$i" "$wifi $eth" || nmcli device set "$i" managed yes 2>/dev/null || true
+            in_list "$i" "$wifi $adhoc $eth" || nmcli device set "$i" managed yes 2>/dev/null || true
         done
     fi
 
-    if [ -z "$wifi$eth" ]; then
+    if [ -z "$wifi$adhoc$eth" ]; then
         systemctl disable outpost-mesh.service >/dev/null 2>&1 || true
         echo "Mesh off - no interfaces selected."
         return 0
     fi
     systemctl enable outpost-mesh.service >/dev/null 2>&1 || true
     if systemctl restart outpost-mesh.service; then
-        echo "Mesh on: $wifi $eth"
+        echo "Mesh on: $(echo "$wifi $adhoc $eth" | tr -s ' ')"
         cmd_status | head -1
     else
         die "the mesh didn't start - see: journalctl -u outpost-mesh"
@@ -348,6 +397,34 @@ EOF
     log "$i: Wi-Fi mesh '$MESH_ID' on $FREQ MHz ($COUNTRY)"
 }
 
+start_adhoc() {
+    local i n r
+    i=$1
+    wait_iface "$i" || return 1
+    can_ibss "$i" || { log "$i can't do ad-hoc mode"; return 1; }
+    unmanage "$i"
+    for r in /sys/class/net/"$i"/phy80211/rfkill*/soft; do
+        if [ -e "$r" ]; then echo 0 > "$r"; fi
+    done
+    # NetworkManager lets go of the card a moment after it's unmanaged.
+    n=0
+    until ip link set "$i" down 2>/dev/null && iw dev "$i" set type ibss 2>/dev/null; do
+        n=$((n + 1)); [ "$n" -gt 10 ] && { log "$i couldn't switch to ad-hoc mode"; return 1; }
+        sleep 1
+    done
+    ip link set "$i" up
+    iw dev "$i" ibss leave 2>/dev/null || true
+    iw dev "$i" ibss join "$ADHOC_ID" "$FREQ" fixed-freq "$ADHOC_BSSID" || { log "$i couldn't join ad-hoc cell '$ADHOC_ID'"; return 1; }
+    join_bat0 "$i"
+    log "$i: ad-hoc cell '$ADHOC_ID' on $FREQ MHz (unencrypted)"
+}
+
+stop_adhoc() {
+    iw dev "$1" ibss leave 2>/dev/null || true
+    ip link set "$1" down 2>/dev/null || true
+    iw dev "$1" set type managed 2>/dev/null || true   # ready for NetworkManager again
+}
+
 start_eth() {
     wait_iface "$1" || return 1
     unmanage "$1"
@@ -359,10 +436,11 @@ start_eth() {
 cmd_start() {
     local failed i ok
     [ -f "$ETC/mesh.env" ] || die "no $ETC/mesh.env"
-    [ -n "$MESH_WIFI$MESH_ETH" ] || { log "no interfaces selected (sudo outpost-mesh select)"; exit 0; }
+    [ -n "$MESH_WIFI$MESH_ADHOC$MESH_ETH" ] || { log "no interfaces selected (sudo outpost-mesh select)"; exit 0; }
     ensure_bat0
     ok=0; failed=0
     for i in $MESH_WIFI; do if start_wifi "$i"; then ok=$((ok + 1)); else failed=$((failed + 1)); fi; done
+    for i in $MESH_ADHOC; do if start_adhoc "$i"; then ok=$((ok + 1)); else failed=$((failed + 1)); fi; done
     for i in $MESH_ETH;  do if start_eth "$i";  then ok=$((ok + 1)); else failed=$((failed + 1)); fi; done
     log "bat0 = $(ip -4 -br addr show bat0 | awk '{print $3}'), $ok interface(s) up, $failed failed"
     [ "$ok" -gt 0 ]
@@ -370,10 +448,11 @@ cmd_start() {
 
 cmd_stop() {
     local i
-    for i in $MESH_WIFI $MESH_ETH; do
+    for i in $MESH_WIFI $MESH_ADHOC $MESH_ETH; do
         [ -e "/sys/class/net/$i" ] || continue
         ip link set "$i" nomaster 2>/dev/null || true
         if in_list "$i" "$MESH_WIFI"; then stop_wpa "$i"; ip link set "$i" down || true; fi
+        if in_list "$i" "$MESH_ADHOC"; then stop_adhoc "$i"; fi
     done
     # Remove bat0 only if nothing else (e.g. halow-mesh) still uses it.
     if [ -e /sys/class/net/bat0 ] && [ -z "$(ls /sys/class/net/bat0/lower_* 2>/dev/null)" ]; then
@@ -388,6 +467,9 @@ cmd_status() {
     for i in $MESH_WIFI; do
         echo "--- $i peers (802.11s)"; iw dev "$i" station dump 2>/dev/null | grep -E "^Station|signal:|tx bitrate" || true
     done
+    for i in $MESH_ADHOC; do
+        echo "--- $i peers (ad-hoc, unencrypted)"; iw dev "$i" station dump 2>/dev/null | grep -E "^Station|signal:|tx bitrate" || true
+    done
     echo "--- batman neighbours";    batctl n 2>/dev/null || true
     echo "--- batman originators";   batctl o 2>/dev/null || true
 }
@@ -400,5 +482,5 @@ case "${1:-}" in
     stop) cmd_stop ;;
     restart) cmd_stop; cmd_start ;;
     status) cmd_status ;;
-    *) sed -n '5,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac

@@ -149,6 +149,12 @@ Notes:
 - If another DNS server already runs on the machine (e.g. Pi-hole), the
   access point hands out addresses only and points clients at that server.
   Otherwise it would fail with "IP configuration could not be reserved".
+- Access points use plain WPA2 (WPA2-PSK). NetworkManager 1.42 also offers
+  the WPA2-PSK-SHA256 variant, which the Raspberry Pi's built-in Wi-Fi
+  doesn't advertise. Phones notice the mismatch during the handshake and
+  report a wrong password. A small NetworkManager hook,
+  `/etc/NetworkManager/dispatcher.d/90-outpost-ap`, switches each Outpost
+  access point to plain WPA2 as it starts.
 - 5 GHz access points need the country set (`iw reg get`). On a Pi, set it
   with `sudo raspi-config` (Localisation, WLAN Country).
 
@@ -215,9 +221,24 @@ Wi-Fi uses an encrypted 802.11s mesh (WPA3/SAE) on the frequency in
 machine's interfaces, set by `outpost-mesh select`). After editing
 `mesh.env`: `sudo systemctl restart outpost-mesh`.
 
-- **Wi-Fi card:** it must support "mesh point" (`iw list`). Most Atheros
-  (ath9k, ath10k), MediaTek (mt76) and Intel AX2xx cards do. Raspberry Pi
-  onboard Wi-Fi and many Realtek USB adapters don't; the script checks.
+- **Wi-Fi card, two ways:**
+  - **802.11s (encrypted, recommended):** cards that support "mesh point"
+    (`iw list`). Most Atheros (ath9k, ath10k), MediaTek (mt76) and Intel
+    AX2xx cards do, e.g. USB adapters with an MT7612U or AR9271 chip. Meshes
+    with other 802.11s nodes using `MESH_ID`/`MESH_PASSWORD`.
+  - **Ad-hoc (IBSS), no encryption:** for cards that can't do 802.11s but
+    support ad-hoc mode, like the Raspberry Pi's built-in Wi-Fi. They show
+    as "ad-hoc only" in the menu, which asks before using one. Anyone nearby
+    can join an ad-hoc mesh and reach the network; Outpost's voice stays
+    encrypted end to end. Ad-hoc nodes only mesh with other ad-hoc nodes
+    (`ADHOC_ID`, `ADHOC_BSSID` and `FREQ` in `mesh.env`, the same on every
+    node). A node with both kinds of card (or with HaLow) joins them into
+    one network.
+  - Either way the card is used only for the mesh: an access point or Wi-Fi
+    connection on it stops while it's in the mesh. On a Pi, keep the
+    built-in Wi-Fi as an access point and add a USB adapter for an
+    encrypted mesh, or use the built-in Wi-Fi for an ad-hoc mesh and give up
+    its access point.
 - **One network with HaLow:** a HaLow mesh and a Wi-Fi mesh can't hear each
   other directly. A Pi with both (`--mesh-wifi` or `--mesh-eth` on a HaLow
   Pi) joins them: both go into the same `bat0`, so every node can reach
