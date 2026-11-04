@@ -84,6 +84,11 @@ class ChannelAnnouncer:
 
     def __init__(self, voice: str | None = None) -> None:
         self._queue: "queue.Queue[str]" = queue.Queue()
+        # Called on the announcer's thread just before / after speaking -
+        # the client uses them to have the speaker (and a Bluetooth
+        # headset's audio link) up first, so the start isn't cut off.
+        self.before_speak = None
+        self.after_speak = None
         self._unavailable = False
         self._voice: str | None = None
         self._use_say = _HAS_SAY
@@ -123,25 +128,50 @@ class ChannelAnnouncer:
             self._queue.put(text)
 
     def _run(self) -> None:
-        if not self._use_say:
-            import pyttsx3
         while True:
-            text = self._queue.get()
+            self._announce_once(self._next_text())
+
+    def _next_text(self) -> str:
+        """Waits for an announcement. Several queued (e.g. a channel button
+        pressed a few times quickly): only the newest still matters."""
+        text = self._queue.get()
+        while True:
             try:
-                if self._use_say:
-                    cmd = ["say"] + (["-v", self._voice] if self._voice else []) + [text]
-                    subprocess.run(cmd, check=False)
-                else:
-                    engine = pyttsx3.init()
-                    if self._voice is not None:
-                        engine.setProperty("voice", self._voice)
-                    engine.say(text)
-                    engine.runAndWait()
-                    engine.stop()
-                    del engine
-                    gc.collect()
-            except Exception:
-                log.warning("channel announce (text-to-speech) failed", exc_info=True)
+                text = self._queue.get_nowait()
+            except queue.Empty:
+                return text
+
+    def _announce_once(self, text: str) -> None:
+        try:
+            if self.before_speak is not None:
+                self.before_speak()
+        except Exception:
+            log.warning("getting the speaker ready for an announcement failed", exc_info=True)
+        try:
+            self._speak(text)
+        except Exception:
+            log.warning("channel announce (text-to-speech) failed", exc_info=True)
+        finally:
+            if self.after_speak is not None:
+                try:
+                    self.after_speak()
+                except Exception:
+                    log.debug("after_speak failed", exc_info=True)
+
+    def _speak(self, text: str) -> None:
+        if self._use_say:
+            cmd = ["say"] + (["-v", self._voice] if self._voice else []) + [text]
+            subprocess.run(cmd, check=False)
+            return
+        import pyttsx3
+        engine = pyttsx3.init()
+        if self._voice is not None:
+            engine.setProperty("voice", self._voice)
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
+        del engine
+        gc.collect()
 
 
 def _list_voices() -> None:

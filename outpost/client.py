@@ -63,6 +63,11 @@ _AUDIO_OPEN_TIMEOUT_S = 10.0
 # With release_audio_when_idle: how long the speaker stays open after the
 # last sound, and the mic after PTT is released.
 _AUDIO_IDLE_RELEASE_S = 3.0
+# Announcements with release_audio_when_idle: how long to wait for a closed
+# speaker to open, then how much longer for a Bluetooth headset's audio link
+# to start carrying sound once it's running (else the first words are lost).
+_SPEECH_OPEN_TIMEOUT_S = 3.0
+_SPEECH_LINK_WAIT_S = 0.8
 _AUDIO_RETRY_MAX_S = 300.0
 
 # Local-only "PTT blocked" busy tone (tx lockout) - short and quiet enough
@@ -248,6 +253,9 @@ class OutpostClient:
             channel_announcer if channel_announcer is not None
             else (ChannelAnnouncer(voice=config.channel_announce_voice) if config.enable_channel_announce else None)
         )
+        if self.channel_announcer is not None and hasattr(self.channel_announcer, "before_speak"):
+            self.channel_announcer.before_speak = self.prepare_local_speech
+            self.channel_announcer.after_speak = self.local_speech_done
 
         self.ciphers = {cid: ChannelCipher(ch.key) for cid, ch in config.channels.items()}
 
@@ -484,6 +492,31 @@ class OutpostClient:
         self._last_own_speaker_activity = time.monotonic()
         self.mixer.play_local(frames)
         self._demand_audio_threadsafe("output")
+
+    def prepare_local_speech(self) -> None:
+        """Called (on the announcer's thread) just before a channel
+        announcement is spoken. The text-to-speech program plays on its own,
+        not through our speaker stream - so with release_audio_when_idle,
+        open the speaker first and give a Bluetooth headset's audio link
+        time to come up; otherwise the start of the announcement is lost.
+        Blocks for up to about a second when the speaker was closed."""
+        self._last_own_speaker_activity = time.monotonic()  # keep it open
+        if not self._release_audio or self.relay_only or self._loop is None:
+            return
+        if self.speaker.wanted and time.monotonic() - self.speaker.last_callback < 0.5:
+            return  # already open and running
+        self._demand_audio_threadsafe("output")
+        deadline = time.monotonic() + _SPEECH_OPEN_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self.speaker.wanted and time.monotonic() - self.speaker.last_callback < 0.2:
+                break
+            time.sleep(0.05)
+        time.sleep(_SPEECH_LINK_WAIT_S)
+        self._last_own_speaker_activity = time.monotonic()
+
+    def local_speech_done(self) -> None:
+        """After an announcement: the speaker stays open the usual idle time."""
+        self._last_own_speaker_activity = time.monotonic()
 
     def _own_speaker_active(self) -> bool:
         """True if this device's own speaker played something within the
