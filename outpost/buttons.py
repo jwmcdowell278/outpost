@@ -37,6 +37,12 @@ _RESCAN_S = 3.0
 # Volume change per press of a volume button (volumes run 0.0-1.0).
 VOLUME_STEP = 0.1
 
+# Mouse and touchscreen buttons. "Press a button" ignores them - the page
+# is used with a mouse, so a click there would otherwise be recorded (e.g.
+# left click bound to volume down, turning a channel down on every click).
+MOUSE_BUTTONS = frozenset({"BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE", "BTN_SIDE", "BTN_EXTRA",
+                           "BTN_FORWARD", "BTN_BACK", "BTN_TASK", "BTN_TOUCH"})
+
 # (device name, key name, value) - called on the reader thread.
 EventCallback = Callable[[str, str, int], None]
 
@@ -552,7 +558,8 @@ class ButtonController:
         source = (device, key)
         if value == KEY_DOWN:
             self.last_press = (device, key, time.monotonic())
-            if self._learn_future is not None and not self._learn_future.done():
+            if (self._learn_future is not None and not self._learn_future.done()
+                    and key not in MOUSE_BUTTONS):
                 self._learn_future.set_result({"device": device, "key": key})
                 self._captured.add(source)
                 return

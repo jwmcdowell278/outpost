@@ -517,3 +517,17 @@ def test_serial_status_sent_on_connect_is_not_a_press():
     spp._SETTLE_S = 0.2
     spp._read("34:D7:F5:00:C5:7D", sock)
     assert events == ["SPP_VP", "SPP_VP"]  # GP/GR right after connecting are dropped
+
+
+def test_learn_ignores_mouse_clicks():
+    async def run():
+        client = _client()
+        b = await _started(client)
+        learn = asyncio.ensure_future(b.learn(2.0))
+        await asyncio.sleep(0.05)
+        b.handle_event("Logitech Wireless Mouse", "BTN_LEFT", KEY_DOWN)
+        await asyncio.sleep(0.05)
+        assert not learn.done()
+        b.handle_event(INRICO, "KEY_F13", KEY_DOWN)
+        assert await learn == {"device": INRICO, "key": "KEY_F13"}
+    asyncio.run(run())

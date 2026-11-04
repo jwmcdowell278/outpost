@@ -1037,7 +1037,8 @@ Inrico), USB footswitches, media remotes, or keys on a keyboard. Actions:
 | Next / previous channel | switches the active channel, in channel-id order, wrapping around |
 
 To bind a button, open **Buttons**, pick the action, click **Press a
-button…** and press it within 15 seconds. It applies straight away and is
+button…** and press it within 15 seconds (mouse clicks are ignored, so
+clicking around the page can't be recorded). It applies straight away and is
 saved to the config file (`button_bindings`). By default a binding only
 reacts to the device you pressed it on. Tick "any device" for a key that
 should work from anything, such as a keyboard's volume keys. Several
