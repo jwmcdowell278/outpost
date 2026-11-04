@@ -14,9 +14,11 @@ import asyncio
 import ctypes
 import glob
 import logging
+import re
 import select
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -242,12 +244,188 @@ class HandsFreeInput:
                 log.exception("buttons: bad Bluetooth monitor frame")
 
 
+class SerialHeadsetInput:
+    """Buttons that a Bluetooth headset reports over its serial port (SPP)
+    channel - e.g. the Inrico B02PTT's group up/down buttons send
+    `C:VP*` and `C:VM*` there (PTT apps listen on it), and nothing over the
+    hands-free link or as key presses.
+
+    Opens the serial channel of every connected, paired device that has
+    one, and reports each `C:<code>*` message as key SPP_<code> (one press:
+    down then up) on device "Bluetooth headset". Devices that connect later
+    are picked up; dropped ones are retried."""
+
+    DEVICE = "Bluetooth headset"
+    SERIAL_PORT_UUID = "00001101-0000-1000-8000-00805f9b34fb"
+    _MESSAGE = re.compile(rb"C:([A-Za-z0-9_]{1,16})\*?")
+    _RESCAN_S = 10.0
+    _CHANNELS = range(1, 31)
+
+    def __init__(self, on_event: EventCallback, list_devices=None, connect=None):
+        self._on_event = on_event
+        # list_devices() -> addresses; connect(address) -> socket or None.
+        # Both swapped in tests.
+        self._list_devices = list_devices or self._serial_devices
+        self._connect = connect or self._open_rfcomm
+        self._channels: dict[str, int] = {}   # address -> working channel
+        self._open: dict[str, object] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def available() -> bool:
+        return hasattr(socket, "BTPROTO_RFCOMM") and sys.platform.startswith("linux")
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="spp-buttons", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        with self._lock:
+            socks = list(self._open.values())
+            self._open.clear()
+        for sock in socks:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def devices(self) -> list[str]:
+        with self._lock:
+            return [self.DEVICE] if self._open else []
+
+    @classmethod
+    def _serial_devices(cls) -> list[str]:
+        """Connected, paired devices offering a serial port, via bluetoothctl."""
+        from .bluetooth import parse_devices
+
+        def run(*args):
+            return subprocess.run(["bluetoothctl", *args], capture_output=True, text=True, timeout=10).stdout
+        try:
+            connected = parse_devices(run("devices", "Connected"))
+            found = []
+            for address, _ in connected:
+                info = run("info", address)
+                if cls.SERIAL_PORT_UUID in info.lower() and "Paired: yes" in info:
+                    found.append(address)
+            return found
+        except (OSError, subprocess.SubprocessError):
+            return []
+
+    def _rfcomm(self, address: str, channel: int, timeout: float):
+        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect((address, channel))
+        except OSError:
+            sock.close()
+            return None
+        return sock
+
+    def _open_rfcomm(self, address: str):
+        """The device's serial channel. Its number isn't looked up (Python
+        has no SDP client): the last one that worked, else 1, else the first
+        of 2-30 that accepts a connection."""
+        known = self._channels.get(address)
+        for channel in ([known] if known else []) + [1]:
+            sock = self._rfcomm(address, channel, 6.0)
+            if sock is not None:
+                self._channels[address] = channel
+                return sock
+        found: dict[int, object] = {}
+
+        def probe(ch):
+            sock = self._rfcomm(address, ch, 6.0)
+            if sock is not None:
+                found[ch] = sock
+        threads = [threading.Thread(target=probe, args=(ch,)) for ch in self._CHANNELS if ch != 1]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if not found:
+            return None
+        channel = min(found)
+        for ch, sock in found.items():
+            if ch != channel:
+                sock.close()
+        self._channels[address] = channel
+        return found[channel]
+
+    def handle_data(self, data: bytes) -> None:
+        for m in self._MESSAGE.finditer(data):
+            key = "SPP_" + m.group(1).decode().upper()
+            self._on_event(self.DEVICE, key, KEY_DOWN)
+            self._on_event(self.DEVICE, key, KEY_UP)
+
+    def _read(self, address: str, sock) -> None:
+        sock.settimeout(1.0)
+        buffer = b""
+        while not self._stop.is_set():
+            try:
+                data = sock.recv(1024)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+            buffer += data
+            # Messages end in "*" and NUL; keep a partial one for the next read.
+            *complete, buffer = buffer.split(b"\x00")
+            if buffer.endswith(b"*"):
+                complete.append(buffer)
+                buffer = b""
+            for message in complete:
+                try:
+                    self.handle_data(message)
+                except Exception:
+                    log.exception("buttons: bad serial message %r", message)
+            if len(buffer) > 256:
+                buffer = b""
+        with self._lock:
+            if self._open.get(address) is sock:
+                del self._open[address]
+        try:
+            sock.close()
+        except OSError:
+            pass
+        if not self._stop.is_set():
+            log.info("buttons: %s serial buttons disconnected", address)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                addresses = self._list_devices()
+            except Exception as exc:
+                log.debug("buttons: serial device scan failed: %s", exc)
+                addresses = []
+            for address in addresses:
+                with self._lock:
+                    if address in self._open:
+                        continue
+                sock = self._connect(address)
+                if sock is None or self._stop.is_set():
+                    continue
+                with self._lock:
+                    self._open[address] = sock
+                log.info("buttons: listening to %s serial buttons", address)
+                threading.Thread(target=self._read, args=(address, sock), name="spp-read", daemon=True).start()
+            self._stop.wait(self._RESCAN_S)
+
+
 class ButtonController:
     """Turns key events into client actions according to the configured
     bindings, and records presses for the web UI's "press a button" setup."""
 
     def __init__(self, client, bindings: list[ButtonBinding], input_factory=None, handsfree_factory=None,
-                 ptt_key: str | None = None):
+                 ptt_key: str | None = None, serial_factory=None):
         self.client = client
         self.bindings = list(bindings)
         # Keyboard key that's push-to-talk (hold) on any device - see
@@ -256,6 +434,9 @@ class ButtonController:
         self._input_factory = input_factory
         # None = the real HandsFreeInput (Linux only); False = don't use one.
         self._handsfree_factory = handsfree_factory
+        # None = the real SerialHeadsetInput (Linux only); False = don't use one.
+        self._serial_factory = serial_factory
+        self._serial = None
         self._input = None
         self._handsfree = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -271,11 +452,12 @@ class ButtonController:
 
     @property
     def running(self) -> bool:
-        return self._input is not None or self._handsfree is not None
+        return self._input is not None or self._handsfree is not None or self._serial is not None
 
     def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._start_handsfree()
+        self._start_serial()
         factory = self._input_factory
         if factory is None:
             evdev, reason = _load_evdev()
@@ -288,6 +470,22 @@ class ButtonController:
             factory = lambda on_event: EvdevInput(on_event, evdev)  # noqa: E731
         self._input = factory(self._on_event_threadsafe)
         self._input.start()
+
+    def _start_serial(self) -> None:
+        factory = self._serial_factory
+        if factory is False:
+            return
+        if factory is None:
+            if not SerialHeadsetInput.available():
+                return
+            factory = SerialHeadsetInput
+        try:
+            serial = factory(self._on_event_threadsafe)
+            serial.start()
+        except OSError as exc:
+            log.info("buttons: headset serial buttons unavailable: %s", exc)
+            return
+        self._serial = serial
 
     def _start_handsfree(self) -> None:
         factory = self._handsfree_factory
@@ -320,11 +518,16 @@ class ButtonController:
         if self._handsfree is not None:
             self._handsfree.stop()
             self._handsfree = None
+        if self._serial is not None:
+            self._serial.stop()
+            self._serial = None
 
     def devices(self) -> list[str]:
         devices = self._input.devices() if self._input is not None else []
         if self._handsfree is not None:
             devices = devices + self._handsfree.devices()
+        if self._serial is not None:
+            devices = devices + [d for d in self._serial.devices() if d not in devices]
         return devices
 
     def unreadable_devices(self) -> int:

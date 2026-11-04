@@ -41,6 +41,7 @@ def _client(tmp_path=None, bindings=(), channels=("ops", "tac", "logistics")) ->
             yaml.safe_dump({"mesh_key": _b64()}, f)
     client = OutpostClient(config, channels[0], config_path=path)
     client.buttons._input_factory = FakeInput
+    client.buttons._serial_factory = False
     return client
 
 
@@ -431,4 +432,70 @@ def test_web_ui_sets_and_clears_ptt_key(tmp_path):
                 assert yaml.safe_load(f)["ptt_key"] is None
             page = await (await tc.get("/buttons")).text()
             assert "Keyboard push-to-talk key" in page and '"Space": "KEY_SPACE"' in page
+    asyncio.run(run())
+
+
+
+# --- Headset serial-port (SPP) buttons, e.g. the Inrico's group up/down ------------
+
+import socket as socket_mod
+from outpost.buttons import SerialHeadsetInput
+
+
+class FakeSerialSocket:
+    """recv() hands out the queued chunks, then reports the link closed."""
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.closed = False
+
+    def settimeout(self, t): pass
+
+    def recv(self, n):
+        if self.chunks:
+            return self.chunks.pop(0)
+        time.sleep(0.05)
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+def test_serial_messages_become_button_presses():
+    events = []
+    spp = SerialHeadsetInput(lambda *e: events.append(e), list_devices=lambda: [], connect=lambda a: None)
+    spp.handle_data(b"C:VP*")
+    spp.handle_data(b"junk C:vm*")
+    assert events == [("Bluetooth headset", "SPP_VP", KEY_DOWN), ("Bluetooth headset", "SPP_VP", KEY_UP),
+                      ("Bluetooth headset", "SPP_VM", KEY_DOWN), ("Bluetooth headset", "SPP_VM", KEY_UP)]
+
+
+def test_serial_reader_splits_messages_and_survives_disconnect():
+    events = []
+    done = threading.Event()
+    sock = FakeSerialSocket([b"C:VP*\x00C:V", b"M*\x00", b"C:VP*"])
+    spp = SerialHeadsetInput(lambda d, k, v: events.append((k, v)),
+                             list_devices=lambda: ["34:D7:F5:00:C5:7D"],
+                             connect=lambda a: (done.set(), sock)[1] if not done.is_set() else None)
+    spp._RESCAN_S = 0.05
+    spp.start()
+    deadline = time.time() + 3
+    while time.time() < deadline and not (sock.closed and len(events) == 6):
+        time.sleep(0.02)
+    spp.stop()
+    assert [k for k, v in events if v == KEY_DOWN] == ["SPP_VP", "SPP_VM", "SPP_VP"]
+    assert sock.closed and spp.devices() == []
+
+
+def test_serial_buttons_drive_channel_bindings():
+    async def run():
+        client = _client(bindings=[ButtonBinding("SPP_VP", "channel_up", "Bluetooth headset"),
+                                   ButtonBinding("SPP_VM", "channel_down", "Bluetooth headset")])
+        b = await _started(client)
+        spp = SerialHeadsetInput(b.handle_event, list_devices=lambda: [], connect=lambda a: None)
+        assert client.active_channel.name == "ops"
+        spp.handle_data(b"C:VP*")
+        assert client.active_channel.name == "tac"
+        spp.handle_data(b"C:VM*")
+        spp.handle_data(b"C:VM*")
+        assert client.active_channel.name == "logistics"
     asyncio.run(run())
