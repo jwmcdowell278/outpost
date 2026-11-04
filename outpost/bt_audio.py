@@ -45,12 +45,12 @@ def profile_label(name: str, description: str = "") -> str:
     if name.startswith("headset-head-unit"):
         desc = description.lower()
         if name.endswith("cvsd") or "cvsd" in desc:
-            return "Hands-free, 8 kHz (mic + speaker, most reliable)"
+            return "Hands-free, 8 kHz (most reliable)"
         if "msbc" in desc or "lc3" in desc or name.endswith("msbc"):
-            return "Hands-free, 16 kHz (mic + speaker)"
-        return "Hands-free (mic + speaker)"
+            return "Hands-free, 16 kHz"
+        return "Hands-free"
     if name.startswith("a2dp"):
-        return "Playback only (no mic)" + (" - high quality" if "xq" in name else "")
+        return "Playback only, no mic" + (" (high quality)" if "xq" in name else "")
     if name == "off":
         return "Off"
     return description or name

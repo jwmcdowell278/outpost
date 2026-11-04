@@ -213,6 +213,13 @@ _STYLE = """
   .pill.low { background: var(--danger); color: white; }
   .field-row { justify-content: space-between; }
   .field-row .name { font-size: 0.88rem; }
+  .device { border-top: 1px solid var(--border); padding: 0.4rem 0; }
+  .device:first-child { border-top: none; }
+  .device .audio { margin: 0.2rem 0; }
+  .row.control label { min-width: 3.6rem; }
+  .row.control select { flex: 1; min-width: 0; max-width: 100%; }
+  .row.control input[type=range] { flex: 1; min-width: 0; }
+  select { max-width: 100%; font-size: 0.85rem; }
   .setting-group { margin: 1.1rem 0 0; }
   .setting-group:first-child { margin-top: 0; }
   h3 { font-size: 0.92rem; margin: 0 0 0.15rem; }
@@ -1168,10 +1175,7 @@ _BLUETOOTH_HTML = f"""<!doctype html>
 
 <div class="card">
   <h2>My devices</h2>
-  <table id="pairedTable">
-    <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th>Audio</th><th></th></tr></thead>
-    <tbody></tbody>
-  </table>
+  <div id="pairedList"></div>
   <div class="muted" id="noPaired">No paired devices.</div>
   <div id="audioNotes"></div>
   <div class="muted">A headset needs hands-free mode for its mic. <b>Set up as headset</b> does everything it needs: hands-free mode, Outpost's mic and speaker, full volume, and no automatic mode switching. New headsets are set up this way when you pair them.</div>
@@ -1219,9 +1223,10 @@ function audioCell(d, a) {{
   else pill = '<span class="pill">speaker only</span>';
   const opts = a.profiles.map(p =>
     `<option value="${{esc(p.name)}}"${{p.name === a.profile ? ' selected' : ''}}${{p.available ? '' : ' disabled'}}>${{esc(p.label)}}</option>`).join('');
-  let html = `<div>${{pill}}</div><div class="row"><label>Mode <select data-audio="profile" data-a="${{addr}}">${{opts}}</select></label></div>`;
+  let html = `<div class="row">${{pill}}</div>` +
+    `<div class="row control"><label for="mode-${{addr}}">Mode</label><select id="mode-${{addr}}" data-audio="profile" data-a="${{addr}}">${{opts}}</select></div>`;
   if (a.sink && a.volume != null) {{
-    html += `<div class="row"><label>Volume <input type="range" min="0" max="100" step="5" value="${{a.volume}}" data-audio="volume" data-a="${{addr}}"></label> <span class="muted">${{a.volume}}%</span></div>`;
+    html += `<div class="row control"><label for="vol-${{addr}}">Volume</label><input id="vol-${{addr}}" type="range" min="0" max="100" step="5" value="${{a.volume}}" data-audio="volume" data-a="${{addr}}"><span class="muted">${{a.volume}}%</span></div>`;
   }}
   const btns = [];
   if (a.has_handsfree && !a.outpost_headset) btns.push(`<button type="button" data-audio="setup" data-a="${{addr}}">Set up as headset</button>`);
@@ -1250,17 +1255,19 @@ function render(s) {{
 
   const paired = s.devices.filter(d => d.paired);
   const nearby = s.devices.filter(d => !d.paired);
-  const pt = document.querySelector('#pairedTable tbody');
+  // One block per device, stacked, so it fits a phone-width page.
+  const pt = document.getElementById('pairedList');
   pt.textContent = '';
   for (const d of paired) {{
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${{esc(d.name)}}<div class="muted">${{esc(d.address)}}</div></td>` +
-      `<td>${{d.connected ? '<span class="pill live">connected</span>' : '<span class="pill">not connected</span>'}}</td>` +
-      `<td>${{battery(d.battery)}}</td>` +
-      `<td>${{audioCell(d, (s.audio || {{}})[d.address])}}</td>` +
-      `<td><button type="button" data-a="${{d.address}}" data-act="${{d.connected ? 'disconnect' : 'connect'}}">${{d.connected ? 'Disconnect' : 'Connect'}}</button> ` +
-      `<button type="button" data-a="${{d.address}}" data-act="unpair">Unpair</button></td>`;
-    pt.appendChild(tr);
+    const div = document.createElement('div');
+    div.className = 'device';
+    div.innerHTML =
+      `<div class="row field-row"><span class="name">${{esc(d.name)}}<div class="muted">${{esc(d.address)}}</div></span>` +
+      `<span>${{d.connected ? '<span class="pill live">connected</span>' : '<span class="pill">not connected</span>'}} ${{battery(d.battery)}}</span></div>` +
+      `<div class="audio">${{audioCell(d, (s.audio || {{}})[d.address])}}</div>` +
+      `<div class="row"><button type="button" data-a="${{d.address}}" data-act="${{d.connected ? 'disconnect' : 'connect'}}">${{d.connected ? 'Disconnect' : 'Connect'}}</button> ` +
+      `<button type="button" data-a="${{d.address}}" data-act="unpair">Unpair</button></div>`;
+    pt.appendChild(div);
   }}
   document.getElementById('noPaired').style.display = paired.length ? 'none' : '';
   const notes = document.getElementById('audioNotes');
