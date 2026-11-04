@@ -24,7 +24,7 @@ pkg_detect() {
 
 pkg_names() {
     case "$PM:$1" in
-        apt-get:build)    echo python3 python3-venv python3-dev build-essential pkg-config libffi-dev libusb-1.0-0-dev libudev-dev ;;
+        apt-get:build)    echo git python3 python3-venv python3-dev build-essential pkg-config libffi-dev libusb-1.0-0-dev libudev-dev ;;
         apt-get:runtime)  echo libopus0 libportaudio2 libhidapi-hidraw0 libcap2-bin rfkill kmod ;;
         apt-get:bluetooth) echo bluez ;;
         apt-get:pipewire) echo pipewire pipewire-pulse wireplumber ;;
@@ -34,7 +34,7 @@ pkg_names() {
         apt-get:menu)     echo whiptail ;;
         apt-get:firewall) echo nftables iproute2 ;;
 
-        dnf:build)        echo python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
+        dnf:build)        echo git python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
         dnf:runtime)      echo opus portaudio hidapi libcap util-linux kmod ;;
         dnf:bluetooth)    echo bluez ;;
         dnf:pipewire)     echo pipewire pipewire-pulseaudio wireplumber ;;
@@ -44,7 +44,7 @@ pkg_names() {
         dnf:menu)     echo newt ;;
         dnf:firewall) echo nftables iproute ;;
 
-        pacman:build)     echo python base-devel pkgconf libffi libusb systemd-libs ;;
+        pacman:build)     echo git python base-devel pkgconf libffi libusb systemd-libs ;;
         pacman:runtime)   echo opus portaudio hidapi libcap util-linux kmod ;;
         pacman:bluetooth) echo bluez bluez-utils ;;
         pacman:pipewire)  echo pipewire pipewire-pulse wireplumber ;;
@@ -54,7 +54,7 @@ pkg_names() {
         pacman:menu)     echo libnewt ;;
         pacman:firewall) echo nftables iproute2 ;;
 
-        zypper:build)     echo python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
+        zypper:build)     echo git python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
         zypper:runtime)   echo libopus0 libportaudio2 libhidapi-hidraw0 libcap-progs util-linux kmod ;;
         zypper:bluetooth) echo bluez ;;
         zypper:pipewire)  echo pipewire pipewire-pulseaudio wireplumber ;;

@@ -16,7 +16,8 @@ curl -sSL https://raw.githubusercontent.com/jwmcdowell278/outpost/main/deploy/bo
 
 It asks a few questions (node name, start a new mesh or join one, HaLow,
 Wi-Fi, ...) and installs Outpost, the HaLow drivers on a Pi, and the network
-tools (`sudo outpost-net`). To join an existing mesh, it copies the keys from
+tools (`sudo outpost-net`). The code goes in `~/outpost` as a git clone;
+update it with `~/outpost/deploy/update.sh` (or `git pull` there). To join an existing mesh, it copies the keys from
 a node you name. For options, scripted installs and installing from another
 computer over SSH, see [deploy/README.md](deploy/README.md).
 
@@ -1135,6 +1136,15 @@ one way - with a USB adapter, the mic worked but the speaker stayed silent
 works. The Pi remembers the choice for that device. In hands-free mode the
 headset's volume buttons are handled by the headset itself. See "Raspberry
 Pi with a Bluetooth headset" below for the rest of a reliable setup.
+
+**Group up/down buttons** on the Inrico B02PTT (and other headsets made
+for PTT apps) don't send key presses or hands-free commands either: they
+send short messages (`C:VM*` for group up, `C:VP*` for group down) over the
+headset's serial port (SPP) channel. Outpost opens that channel on every
+connected, paired headset that has one and shows the messages on the
+Buttons page as device **Bluetooth headset**, keys `SPP_VM` / `SPP_VP` -
+bind them to "Next channel" / "Previous channel" there. Nothing extra
+needs installing, and no special permission is needed.
 
 ### Bluetooth page
 

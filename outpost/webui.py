@@ -840,7 +840,7 @@ function renderKey(data) {{
   document.getElementById('pickKey').disabled = !!picking || !data.can_save;
   document.getElementById('pickKey').textContent = picking ? 'Press a key...' : 'Choose key\u2026';
   document.getElementById('clearKey').disabled = !!picking || !data.ptt_key || !data.can_save;
-  if (!data.can_save) setKeyMsg('no config file - the key can\'t be saved', 'error');
+  if (!data.can_save) setKeyMsg('no config file - the key can\\'t be saved', 'error');
 }}
 
 function stopPicking() {{

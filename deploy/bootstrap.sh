@@ -11,13 +11,17 @@
 # With options it doesn't ask - they're install-node.sh's, e.g.:
 #   ... | bash -s -- --config ~/node.yaml --env ~/halow.env --name "Pi 2" --reboot
 #
-# It downloads the code and, on a 64-bit Raspberry Pi, the prebuilt HaLow kit
-# from the repo's latest GitHub release (skipped if there's none), then runs
-# "install-node.sh local".
+# It puts the code in ~/outpost as a git clone - update it later with
+# "git pull" there, or by running this again - and, on a 64-bit Raspberry
+# Pi, downloads the prebuilt HaLow kit from the repo's latest GitHub release
+# (skipped if there's none), then runs "install-node.sh local". An
+# ~/outpost from an older install (a plain copy) is turned into a git clone
+# in place; its config, logs and Python environment are kept.
 #
 # Environment: OUTPOST_REPO (default jwmcdowell278/outpost), OUTPOST_REF
-# (branch or tag, default main), OUTPOST_TARBALL (a .tar.gz URL of the code
-# to use instead, e.g. file:///tmp/outpost.tar.gz for testing).
+# (branch, default main), OUTPOST_TARBALL (a .tar.gz URL of the code to use
+# instead of git, e.g. file:///tmp/outpost.tar.gz for testing - ~/outpost
+# is then a plain copy, as before).
 
 TITLE="Outpost setup"
 
@@ -174,6 +178,49 @@ wizard() {
     yesno "Ready to install:\n\n$summary\n\nGo ahead?" yes || { echo "Cancelled - nothing was changed."; exit 0; }
 }
 
+# ------------------------------------------------------------------- the code
+
+# git, installed if it's missing. Fails quietly if it can't be.
+ensure_git() {
+    command -v git >/dev/null && return 0
+    echo "== installing git"
+    if command -v apt-get >/dev/null; then
+        sudo apt-get update -qq </dev/null >/dev/null && sudo apt-get install -y -qq git </dev/null >/dev/null
+    elif command -v dnf >/dev/null; then sudo dnf install -y -q git </dev/null
+    elif command -v pacman >/dev/null; then sudo pacman -S --noconfirm --needed git </dev/null
+    elif command -v zypper >/dev/null; then sudo zypper -n -q install git </dev/null
+    fi
+    command -v git >/dev/null
+}
+
+# Make DIR a git clone of URL on branch REF, up to date with GitHub.
+checkout_code() {  # checkout_code URL REF DIR
+    local url=$1 ref=$2 dir=$3
+    if [ -d "$dir/.git" ]; then
+        echo "== updating the Outpost code in $dir (git pull)"
+        git -C "$dir" fetch -q origin "$ref"
+        if ! git -C "$dir" merge -q --ff-only FETCH_HEAD; then
+            echo "!! $dir has changes of its own that clash with $ref on GitHub." >&2
+            echo "   See them with: git -C $dir status - then run this again." >&2
+            exit 1
+        fi
+    elif [ -e "$dir" ]; then
+        # From an install before ~/outpost was a git clone. The checkout
+        # replaces the code; config/, logs and .venv aren't in git (see
+        # .gitignore), so they stay as they are.
+        echo "== turning $dir into a git clone (config, logs and the Python environment are kept)"
+        git -C "$dir" init -q
+        git -C "$dir" remote add origin "$url" 2>/dev/null || git -C "$dir" remote set-url origin "$url"
+        git -C "$dir" fetch -q origin "+refs/heads/${ref}:refs/remotes/origin/${ref}"
+        git -C "$dir" checkout -q -f -B "$ref" "origin/$ref"
+        git -C "$dir" branch -q --set-upstream-to="origin/$ref" "$ref"
+    else
+        echo "== downloading Outpost (git clone $url)"
+        git clone -q --branch "$ref" "$url" "$dir"
+    fi
+    echo "   $(git -C "$dir" log -1 --format='%h %s (%cd)' --date=short)"
+}
+
 # ---------------------------------------------------------------------- main
 
 # Everything runs from main(), so bash has read the whole script before it
@@ -181,7 +228,7 @@ wizard() {
 # terminal at stdin for sudo, ssh and the questions.
 main() {
     set -euo pipefail
-    local repo ref src tmp kit_url is_pi=0 have_kit=0
+    local repo ref src tmp kit_url code is_pi=0 have_kit=0
     repo=${OUTPOST_REPO:-jwmcdowell278/outpost}
     ref=${OUTPOST_REF:-main}
 
@@ -197,9 +244,16 @@ main() {
 
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    src=${OUTPOST_TARBALL:-https://codeload.github.com/$repo/tar.gz/$ref}
-    echo "== downloading Outpost ($src)"
-    curl -fsSL "$src" | tar -xz -C "$tmp" --strip-components=1
+    if [ -z "${OUTPOST_TARBALL:-}" ] && ensure_git; then
+        code=$HOME/outpost
+        checkout_code "https://github.com/$repo.git" "$ref" "$code"
+    else
+        [ -n "${OUTPOST_TARBALL:-}" ] || echo "   couldn't install git - using a plain copy of the code (no git pull)"
+        code=$tmp
+        src=${OUTPOST_TARBALL:-https://codeload.github.com/$repo/tar.gz/$ref}
+        echo "== downloading Outpost ($src)"
+        curl -fsSL "$src" | tar -xz -C "$tmp" --strip-components=1
+    fi
 
     # The HaLow kit (kernel + driver, built with deploy/halow/build.sh) is too
     # big for the repo; it's published as a release download.
@@ -207,12 +261,14 @@ main() {
     if [ "$is_pi" = 1 ] && [ "$(uname -m)" = aarch64 ] && ! printf '%s\n' "$@" | grep -qx -- --no-halow; then
         kit_url="https://github.com/$repo/releases/latest/download/halow-kit.tar.gz"
         echo "== downloading the HaLow kit"
-        mkdir -p "$tmp/deploy/halow/out"
-        if curl -fsSL "$kit_url" | tar -xz -C "$tmp/deploy/halow/out"; then
-            echo "   HaLow kit for kernel $(cat "$tmp/deploy/halow/out/KERNEL_RELEASE")"; have_kit=1
+        # deploy/halow/out/ is git-ignored, so the kit doesn't touch the clone.
+        rm -rf "$code/deploy/halow/out"
+        mkdir -p "$code/deploy/halow/out"
+        if curl -fsSL "$kit_url" | tar -xz -C "$code/deploy/halow/out"; then
+            echo "   HaLow kit for kernel $(cat "$code/deploy/halow/out/KERNEL_RELEASE")"; have_kit=1
         else
             echo "   no HaLow kit published at $kit_url - HaLow will be skipped"
-            rm -rf "$tmp/deploy/halow/out"
+            rm -rf "$code/deploy/halow/out"
         fi
     fi
 
@@ -220,13 +276,13 @@ main() {
         # No options: ask. whiptail makes it nicer; get it if it's missing.
         if ! command -v whiptail >/dev/null; then
             # </dev/null: the package manager mustn't read the answers being typed.
-            ( . "$tmp/deploy/lib/pkg.sh" && pkg_detect && pkg_want menu ) </dev/null >/dev/null 2>&1 || true
+            ( . "$code/deploy/lib/pkg.sh" && pkg_detect && pkg_want menu ) </dev/null >/dev/null 2>&1 || true
         fi
-        wizard "$tmp" "$is_pi" "$have_kit"
+        wizard "$tmp" "$is_pi" "$have_kit"   # its working folder: deleted at exit (holds copied keys)
         set -- ${OPTS[@]+"${OPTS[@]}"}
     fi
 
-    bash "$tmp/deploy/install-node.sh" local "$@"
+    bash "$code/deploy/install-node.sh" local "$@"
     exit $?
 }
 

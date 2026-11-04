@@ -30,8 +30,9 @@ logged in as your normal user, with internet:
 curl -fsSL https://raw.githubusercontent.com/jwmcdowell278/outpost/main/deploy/bootstrap.sh | bash -s -- --name "Pi 2"
 ```
 
-It downloads the code from GitHub and runs `install-node.sh local` on that
-machine, with the same options as below. On a 64-bit Raspberry Pi it also
+It puts the code in `~/outpost` as a git clone of the GitHub repo and runs
+`install-node.sh local` on that machine, with the same options as below.
+Update it later with `~/outpost/deploy/update.sh` (see "Update a node"). On a 64-bit Raspberry Pi it also
 downloads the prebuilt HaLow kit from the repo's latest release, if one is
 published (`deploy/halow/publish-kit.sh` does that, once, from the machine
 that built it); otherwise HaLow is skipped.
@@ -309,8 +310,29 @@ machine's interfaces, set by `outpost-mesh select`). After editing
 
 ## Update a node
 
-Run it again with only the host. The code is updated; the config, mesh
-settings and interfaces stay as they are.
+**Installed with `bootstrap.sh`:** `~/outpost` is a git clone, so on the
+node itself:
+
+```sh
+~/outpost/deploy/update.sh
+```
+
+It does a `git pull`, updates the Python packages if they changed and
+restarts Outpost. Plain `git pull` in `~/outpost` works too (then
+`systemctl --user restart outpost`). The config, keys and logs aren't in
+git, so they stay as they are. When an update needs new system packages,
+HaLow drivers or network tools, run `bootstrap.sh` again instead - it does
+the `git pull` itself and keeps the config, mesh settings and interfaces.
+
+Nodes installed before `~/outpost` was a git clone: run `bootstrap.sh` once
+(with no options it only asks the usual questions - answer them as before).
+It turns `~/outpost` into a git clone in place, keeping its config, logs and
+Python environment.
+
+**From another computer over SSH:** run it again with only the host. The
+code is copied from your checkout; the config, mesh settings and interfaces
+stay as they are. (On a node whose `~/outpost` is a git clone, this copies
+your checkout's code over it - `git status` there shows the difference.)
 
 ```sh
 ./deploy/install-node.sh john@<node>

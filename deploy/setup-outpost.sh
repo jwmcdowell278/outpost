@@ -5,7 +5,9 @@
 # node-dir holds outpost/ (the code), lib/pkg.sh and, optionally,
 # outpost.yaml (the shared config). Env: NODE_NAME (default: hostname),
 # USB_BT=1 to turn off a Raspberry Pi's built-in Bluetooth, AUTOSTART=0 to
-# not start Outpost at boot, SKIP_PACKAGES=1
+# not start Outpost at boot, SOURCE_DIR (the folder the code came from - if
+# it's ~/outpost itself, a git clone, the code is used where it is),
+# SKIP_PACKAGES=1
 # if the system packages are already installed by hand.
 # Works on any systemd Linux with apt, dnf, pacman or zypper. Safe to run
 # again to update.
@@ -45,9 +47,16 @@ echo "== Python $PYV ($PY)"
 
 echo "== Outpost code in $APP"
 mkdir -p "$APP"
-# Replace the code but keep config/, logs and the virtual environment.
-rm -rf "$APP/outpost" "$APP/scripts"
-cp -a "$N"/outpost/. "$APP/"
+if [ -n "${SOURCE_DIR:-}" ] && [ "$(cd "$SOURCE_DIR" && pwd -P)" = "$(cd "$APP" && pwd -P)" ]; then
+    echo "   using the git clone in $APP as it is (update it with: $APP/deploy/update.sh)"
+else
+    # Replace the code but keep config/, logs and the virtual environment.
+    rm -rf "$APP/outpost" "$APP/scripts"
+    cp -a "$N"/outpost/. "$APP/"
+    if [ -d "$APP/.git" ]; then
+        echo "   note: $APP is a git clone and this copied other code over it - see: git -C $APP status"
+    fi
+fi
 
 echo "== Python environment"
 if [ -x "$APP/.venv/bin/python" ] && ! "$APP/.venv/bin/python" -c 'import sys' 2>/dev/null; then

@@ -182,6 +182,9 @@ cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.
     printf 'HALOW=%q\nMESH_ASKED=%q\nMESH_WIFI=%q\nMESH_ETH=%q\n' "$HALOW" "$MESH_ASKED" "$MESH_WIFI" "$MESH_ETH"
     printf 'FORCE_MESH=%q\nMESH_SELECT=%q\nNODE_NAME=%q\nUSB_BT=%q\n' "$FORCE_MESH" "$MESH_SELECT" "$NAME" "$USB_BT"
     printf 'WIFI_SETUP=%q\nNET_SETUP=%q\nAUTOSTART=%q\n' "$WIFI_SETUP" "$NET_SETUP" "$AUTOSTART"
+    # Installing on this machine from its own ~/outpost git clone: use the
+    # code where it is (setup-outpost.sh checks).
+    printf 'SOURCE_DIR=%q\n' "$([ "$LOCAL" = 1 ] && echo "$REPO")"
 } > "$D/vars.sh"
 if [ "$LOCAL" = 1 ]; then
     bash "$D/remote-run.sh"
