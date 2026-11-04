@@ -34,6 +34,7 @@ pkg_names() {
         apt-get:menu)     echo whiptail ;;
         apt-get:firewall) echo nftables iproute2 ;;
         apt-get:dns)  echo dnsmasq-base ;;
+        apt-get:nettools)   echo iputils-arping iputils-ping ;;
 
         dnf:build)        echo git python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
         dnf:runtime)      echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -45,6 +46,7 @@ pkg_names() {
         dnf:menu)     echo newt ;;
         dnf:firewall) echo nftables iproute ;;
         dnf:dns)      echo dnsmasq ;;
+        dnf:nettools)       echo iputils ;;
 
         pacman:build)     echo git python base-devel pkgconf libffi libusb systemd-libs ;;
         pacman:runtime)   echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -56,6 +58,7 @@ pkg_names() {
         pacman:menu)     echo libnewt ;;
         pacman:firewall) echo nftables iproute2 ;;
         pacman:dns)   echo dnsmasq ;;
+        pacman:nettools)    echo iputils ;;
 
         zypper:build)     echo git python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
         zypper:runtime)   echo libopus0 libportaudio2 libhidapi-hidraw0 libcap-progs util-linux kmod ;;
@@ -67,6 +70,7 @@ pkg_names() {
         zypper:menu)     echo newt ;;
         zypper:firewall) echo nftables iproute2 ;;
         zypper:dns)   echo dnsmasq ;;
+        zypper:nettools)    echo iputils ;;
         *) return 1 ;;
     esac
 }

@@ -56,6 +56,18 @@ node_suffix() {
     printf 'outpost-node:%s' "$(node_id)" | md5sum | cut -c1-6 | sed 's/../&:/g; s/:$//'
 }
 
+# The bat0 MAC and address bytes: node_suffix, unless outpost-net found this
+# address already taken by another node and moved it ("X Y" in this file).
+ADDR_OVERRIDE=/var/lib/outpost-net/mesh-address
+bat0_suffix() {
+    local s o
+    s=$(node_suffix)
+    o=$(cat "$ADDR_OVERRIDE" 2>/dev/null || true)
+    # shellcheck disable=SC2086
+    [ -n "$o" ] && set -- $o && [ -n "${2:-}" ] && s="${s%%:*}:$(printf %02x "$1"):$(printf %02x "$2")"
+    echo "$s"
+}
+
 load_driver() {
     lsmod | grep -q "^morse " && { timeout 30 modprobe -r morse dot11ah 2>/dev/null || true; }
     reset_chip
@@ -83,7 +95,7 @@ wait_iface() {
 
 derive_address() {  # same as outpost-mesh: <prefix>.<suffix byte 2>.<byte 3>
     [ -n "${BAT_ADDRESS:-}" ] && { echo "$BAT_ADDRESS"; return; }
-    s=$(node_suffix)
+    s=$(bat0_suffix)
     x=$(printf %d "0x$(echo "$s" | cut -d: -f2)")
     y=$(printf %d "0x$(echo "$s" | cut -d: -f3)")
     [ "$y" -eq 0 ] && y=1
@@ -130,7 +142,7 @@ EOF
         batctl ra "$BATMAN_ALGO"
         ip link add bat0 type batadv
     fi
-    ip link set bat0 address "02:ba:74:$(node_suffix)"   # stable, so peers' ARP stays valid
+    ip link set bat0 address "02:ba:74:$(bat0_suffix)"   # stable, so peers' ARP stays valid
     # batman-adv adds 32 bytes; raise the radio MTU if the driver allows it,
     # otherwise batman fragments (works, slightly more airtime).
     ip link set "$IFACE" mtu 1532 2>/dev/null || log "radio MTU stays $(cat /sys/class/net/$IFACE/mtu)"

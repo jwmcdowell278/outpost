@@ -13,6 +13,7 @@
 #   sudo outpost-net unforward IFACE1 IFACE2
 #   sudo outpost-net mesh-internet auto|off  use the mesh's gateway for internet
 #   sudo outpost-net mtu-check               test that each mesh link carries full-size packets
+#   sudo outpost-net addr-check              check no other mesh node has this node's address
 #   sudo outpost-net apply                   (re)load everything (run at boot)
 #
 # Settings: /etc/outpost-net/net.env
@@ -26,11 +27,14 @@ TABLE=outpost_net        # our nftables table
 SELF=$(readlink -f "$0")
 PATH=$PATH:/usr/sbin:/sbin
 
-GATEWAYS=; FORWARD=; MESH_INTERNET=off; MESH_GATEWAY=; MESH_DNS="gateway 1.1.1.1 9.9.9.9"
+GATEWAYS=; FORWARD=; MESH_INTERNET=off; MESH_GATEWAY=; MESH_DNS="gateway 1.1.1.1 9.9.9.9"; UPLINK_CHECK="1.1.1.1 8.8.8.8 9.9.9.9"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
 
 say() { echo "$*" >&2; }
+# Into the system log too when run by hand - from the timer/service,
+# stderr (say) already goes there.
+journal() { [ -t 2 ] && logger -t outpost-net "$*" 2>/dev/null; return 0; }
 die() { echo "outpost-net: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = 0 ] || die "run with sudo"; }
 in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -53,6 +57,10 @@ MESH_GATEWAY=$MESH_GATEWAY
 # "gateway": the mesh gateway in use, if it answers DNS (gateways that share
 # with bat0 run a DNS forwarder there). Empty: leave DNS alone.
 MESH_DNS="$MESH_DNS"
+# A gateway checks its internet by pinging these through the uplink every
+# 20 s; after 2 failures in a row it stops offering itself to the mesh, so
+# nodes move to another gateway. Empty: don't check.
+UPLINK_CHECK="$UPLINK_CHECK"
 EOF
 }
 
@@ -203,12 +211,51 @@ mesh_prefix() {
 # batman-adv's gateway feature: a node that shares internet with the mesh
 # announces it (server); nodes that want internet from the mesh pick the
 # best one (client).
+# A gateway only offers itself to the mesh while its uplink reaches the
+# internet - batman-adv itself only knows the gateway node is reachable, so
+# a dead uplink would otherwise keep every node sending into a dead end.
+UPLINK_STATE=/run/outpost-net/uplink
+UPLINK_FAILS_DOWN=2
+
+uplink_ok() {  # uplink_ok IFACE: does any UPLINK_CHECK address answer through it?
+    local t
+    [ -n "$UPLINK_CHECK" ] || return 0
+    for t in $UPLINK_CHECK; do
+        ping -n -q -c 1 -W 2 -I "$1" "$t" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+uplink_up() {  # uplink_up IFACE: checks now; down only after UPLINK_FAILS_DOWN failures in a row
+    local f n
+    f="$UPLINK_STATE-$1"
+    mkdir -p "$(dirname "$f")"
+    n=$(cat "$f" 2>/dev/null || echo 0)
+    if uplink_ok "$1"; then
+        if [ "$n" -ge "$UPLINK_FAILS_DOWN" ]; then
+            journal "$1 reaches the internet again - offering it to the mesh" 2>/dev/null || true
+            say "$1 reaches the internet again - offering it to the mesh"
+        fi
+        echo 0 > "$f"
+        return 0
+    fi
+    n=$((n + 1)); echo "$n" > "$f"
+    if [ "$n" -eq "$UPLINK_FAILS_DOWN" ]; then
+        journal "$1 has no internet ($UPLINK_CHECK unanswered) - no longer offering it to the mesh" 2>/dev/null || true
+        say "$1 has no internet - no longer offering it to the mesh"
+    fi
+    [ "$n" -lt "$UPLINK_FAILS_DOWN" ]
+}
+
 batman_gw_mode() {
     local g mode
     [ -e /sys/class/net/bat0 ] || return 0
     mode=off
     [ "$MESH_INTERNET" = auto ] && mode=client
-    for g in $GATEWAYS; do in_list bat0 "$(echo "${g#*:}" | tr ',' ' ')" && mode=server; done
+    for g in $GATEWAYS; do
+        in_list bat0 "$(echo "${g#*:}" | tr ',' ' ')" || continue
+        uplink_up "${g%%:*}" && mode=server
+    done
     [ "$(batctl gw_mode 2>/dev/null | cut -d' ' -f1)" = "$mode" ] || batctl gw_mode "$mode" >/dev/null 2>&1 || true
 }
 
@@ -343,6 +390,8 @@ cmd_route() {
     local cur want
     [ "$(id -u)" = 0 ] || return 0
     batman_gw_mode   # again here: bat0 loses it when the mesh restarts
+    # Before reading the route: moving the address drops it.
+    addr_check_due && cmd_addr_check
     cur=$(ip -4 route show default dev bat0 2>/dev/null | awk '/proto static metric 900/ {print $3; exit}')
     want=
     if [ "$MESH_INTERNET" = auto ] && [ -e /sys/class/net/bat0 ]; then
@@ -356,6 +405,79 @@ cmd_route() {
         ip route replace default via "$want" dev bat0 proto static metric 900
         say "internet through mesh gateway $want"
     fi
+}
+
+# ------------------------------------------- duplicate mesh address check
+
+# Each node's mesh address comes from a hash of its board serial - 16 bits,
+# so with dozens of nodes two can land on the same one (2% at 50 nodes, 7%
+# at 100). About once a minute, ask the mesh whether anyone else answers for
+# this node's address (ARP duplicate detection). If someone does, the node
+# with the higher bat0 MAC moves to the next free address - bat0's address
+# and MAC together, since mesh addresses are worked out from MACs - and saves
+# it (ADDR_OVERRIDE) so halow-mesh/outpost-mesh use it from then on.
+ADDR_OVERRIDE=/var/lib/outpost-net/mesh-address
+ADDR_STAMP=/run/outpost-net/addr-check
+ADDR_RECHECK_MIN=1
+
+addr_check_due() {
+    [ -e /sys/class/net/bat0 ] && command -v arping >/dev/null || return 1
+    [ -f "$ADDR_STAMP" ] || return 0
+    [ -n "$(find "$ADDR_STAMP" -mmin +$ADDR_RECHECK_MIN 2>/dev/null)" ]
+}
+
+addr_taken() {  # addr_taken ADDR: prints the other node's MAC if someone answers for ADDR
+    arping -D -I bat0 -c 2 -w 3 "$1" 2>/dev/null |
+        grep -oiE '\[[0-9a-f:]{17}\]' | head -1 | tr -d '[]' | tr 'A-F' 'a-f'
+}
+
+cmd_addr_check() {
+    local cidr addr len mine theirs b4 x y i cand newmac
+    need_root
+    mkdir -p "$(dirname "$ADDR_STAMP")"; : > "$ADDR_STAMP"
+    command -v arping >/dev/null || { say "needs arping (iputils-arping)"; return 0; }
+    cidr=$(ip -4 -o addr show dev bat0 2>/dev/null | awk '{print $4; exit}')
+    [ -n "$cidr" ] || return 0
+    addr=${cidr%/*}; len=${cidr#*/}
+    theirs=$(addr_taken "$addr")
+    if [ -z "$theirs" ]; then
+        [ -t 1 ] && say "$addr: no other mesh node uses it"
+        return 0
+    fi
+    mine=$(tr 'A-F' 'a-f' < /sys/class/net/bat0/address)
+    # Only addresses worked out from the MAC are moved - one set by hand
+    # (BAT_ADDRESS) is the owner's call.
+    x=$(printf %d "0x$(echo "$mine" | cut -d: -f5)"); y=$(printf %d "0x$(echo "$mine" | cut -d: -f6)")
+    if [ "$addr" != "$(mesh_prefix).$x.$y" ]; then
+        journal "mesh address $addr is also used by $theirs - it was set by hand, so it's left as it is" 2>/dev/null || true
+        say "!! $addr is also used by $theirs (set by hand - change BAT_ADDRESS on one of them)"
+        return 0
+    fi
+    if [ "$(printf '%s\n%s\n' "$mine" "$theirs" | sort | head -1)" = "$mine" ]; then
+        say "$addr is also used by $theirs - that node moves (its MAC is higher)"
+        return 0
+    fi
+    b4=$(echo "$mine" | cut -d: -f4)
+    i=0
+    while [ $i -lt 50 ]; do
+        i=$((i + 1)); y=$((y + 1))
+        [ "$y" -gt 254 ] && { y=1; x=$(((x + 1) % 256)); }
+        cand="$(mesh_prefix).$x.$y"
+        [ -z "$(addr_taken "$cand")" ] && break
+        cand=
+    done
+    [ -n "$cand" ] || { say "!! $addr is taken and no free address was found nearby"; return 0; }
+    newmac=$(printf '02:ba:74:%s:%02x:%02x' "$b4" "$x" "$y")
+    mkdir -p "$(dirname "$ADDR_OVERRIDE")"
+    echo "$x $y" > "$ADDR_OVERRIDE"
+    # Old address off first: deleting a subnet's primary address can take
+    # the others on it along (without promote_secondaries).
+    ip addr del "$cidr" dev bat0 2>/dev/null || true
+    ip link set bat0 address "$newmac"
+    ip addr add "$cand/$len" dev bat0
+    journal "mesh address $addr was also used by $theirs - moved to $cand (bat0 MAC $newmac)" 2>/dev/null || true
+    say "$addr was also used by $theirs: this node moved to $cand"
+
 }
 
 # --------------------------------------------- mesh link packet-size check
@@ -410,7 +532,7 @@ $ifc $nb ($addr): not answering pings - not tested"; continue; fi
         if [ "$want" -lt "$cur" ]; then
             if ip link set "$ifc" mtu "$want" 2>/dev/null; then
                 ip link set bat0 mtu "$bm" 2>/dev/null || true   # keep bat0's as it was
-                logger -t outpost-net "mesh link $ifc to $addr only carries $lo-byte packets: $ifc MTU $cur -> $want (batman-adv fragments bigger ones)" 2>/dev/null || true
+                journal "mesh link $ifc to $addr only carries $lo-byte packets: $ifc MTU $cur -> $want (batman-adv fragments bigger ones)" 2>/dev/null || true
                 say "$ifc to $addr carries at most $lo-byte packets: lowered $ifc's MTU from $cur to $want"
             fi
         fi
@@ -505,7 +627,16 @@ cmd_status() {
     local f g m r
     echo "Gateways (NAT):"
     [ -n "$GATEWAYS" ] || echo "  none"
-    for g in $GATEWAYS; do echo "  ${g%%:*} shares its internet with: $(echo "${g#*:}" | tr ',' ' ')"; done
+    for g in $GATEWAYS; do
+        echo "  ${g%%:*} shares its internet with: $(echo "${g#*:}" | tr ',' ' ')"
+        if in_list bat0 "$(echo "${g#*:}" | tr ',' ' ')" && [ -n "$UPLINK_CHECK" ]; then
+            if [ "$(cat "$UPLINK_STATE-${g%%:*}" 2>/dev/null || echo 0)" -ge "$UPLINK_FAILS_DOWN" ]; then
+                echo "    its internet: DOWN - not offered to the mesh until it's back"
+            else
+                echo "    its internet: working (checked every 20 seconds)"
+            fi
+        fi
+    done
     echo "Forwarding (no NAT):"
     [ -n "$FORWARD" ] || echo "  none"
     for f in $FORWARD; do echo "  ${f%%:*} <-> ${f#*:}"; done
@@ -922,6 +1053,7 @@ case "${1:-}" in
     unforward) shift; cmd_unforward "$@" ;;
     mesh-internet) shift; cmd_mesh_internet "$@" ;;
     mtu-check) cmd_mtu_check ;;
+    addr-check) cmd_addr_check ;;
     _dns) cmd_dns ;;
     apply) cmd_apply ;;
     _route) cmd_route ;;

@@ -39,6 +39,6 @@ if [ -n "$REL" ]; then
     mkdir -p "$DEST/debs"
     docker run --rm --platform linux/arm64 -v "$DEST/debs:/debs" "debian:$REL" bash -c \
         'apt-get -qq update >/dev/null && cd /debs && apt-get -qq download \
-         batctl iw libnl-3-200 libnl-genl-3-200 libnl-route-3-200 libusb-1.0-0 >/dev/null && ls'
+         batctl iw libnl-3-200 libnl-genl-3-200 libnl-route-3-200 libusb-1.0-0 iputils-arping >/dev/null && ls'
 fi
 echo "== kit ready in $DEST ($(du -sh "$DEST" | cut -f1))"

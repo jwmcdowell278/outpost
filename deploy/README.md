@@ -271,6 +271,23 @@ Notes:
   `mesh-internet auto` use the best one and move to another if it goes away
   (checked every 20 seconds, once batman-adv drops the old one). Open
   connections are reset by a switch.
+- **A gateway whose internet stops stops offering it.** batman-adv only
+  knows a gateway node is reachable, not whether its internet works, so
+  every 20 seconds each gateway pings `UPLINK_CHECK` (in
+  `/etc/outpost-net/net.env`, default `1.1.1.1 8.8.8.8 9.9.9.9`) through
+  its uplink. After 2 failures in a row it stops announcing itself and the
+  nodes move to another gateway (about a minute from the internet going
+  down); it announces itself again on the first check that works. Set
+  `UPLINK_CHECK` to addresses that answer pings if the uplink blocks those,
+  or empty to turn the check off. `outpost-net status` shows the result.
+- **Duplicate mesh addresses are fixed.** Mesh addresses come from a hash
+  of each board's serial, so with dozens of nodes two can get the same one.
+  About once a minute each node checks nobody else answers for its address
+  (ARP duplicate detection, `arping`); if someone does, the node with the
+  higher `bat0` MAC moves to the next free address and keeps it
+  (`/var/lib/outpost-net/mesh-address`; delete it and restart the mesh to
+  go back). Addresses set by hand (`BAT_ADDRESS`) are only reported, not
+  moved. Check now: `sudo outpost-net addr-check`.
 - **DNS follows the gateway.** A gateway sharing with `bat0` answers DNS on
   its `bat0` address - with dnsmasq (installed by setup) forwarding to its
   own DNS servers, or with a DNS server already listening there (e.g.
