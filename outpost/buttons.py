@@ -247,8 +247,10 @@ class HandsFreeInput:
 class SerialHeadsetInput:
     """Buttons that a Bluetooth headset reports over its serial port (SPP)
     channel - e.g. the Inrico B02PTT's group up/down buttons send
-    `C:VP*` and `C:VM*` there (PTT apps listen on it), and nothing over the
-    hands-free link or as key presses.
+    `C:VP*` (up) and `C:VM*` (down) there (PTT apps listen on it), and
+    nothing over the hands-free link or as key presses. Right after the
+    channel opens it also sends status (`C:GP*`, `C:GR*`) that isn't a
+    press - anything in the first _SETTLE_S is ignored.
 
     Opens the serial channel of every connected, paired device that has
     one, and reports each `C:<code>*` message as key SPP_<code> (one press:
@@ -260,6 +262,9 @@ class SerialHeadsetInput:
     _MESSAGE = re.compile(rb"C:([A-Za-z0-9_]{1,16})\*?")
     _RESCAN_S = 10.0
     _CHANNELS = range(1, 31)
+    # Messages this soon after the channel opens are the headset's status,
+    # not button presses.
+    _SETTLE_S = 2.0
 
     def __init__(self, on_event: EventCallback, list_devices=None, connect=None):
         self._on_event = on_event
@@ -367,6 +372,7 @@ class SerialHeadsetInput:
     def _read(self, address: str, sock) -> None:
         sock.settimeout(1.0)
         buffer = b""
+        settled_at = time.monotonic() + self._SETTLE_S
         while not self._stop.is_set():
             try:
                 data = sock.recv(1024)
@@ -376,6 +382,9 @@ class SerialHeadsetInput:
                 break
             if not data:
                 break
+            if time.monotonic() < settled_at:
+                log.debug("buttons: %s serial status on connect: %r", address, data)
+                continue
             buffer += data
             # Messages end in "*" and NUL; keep a partial one for the next read.
             *complete, buffer = buffer.split(b"\x00")

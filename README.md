@@ -1139,11 +1139,14 @@ Pi with a Bluetooth headset" below for the rest of a reliable setup.
 
 **Group up/down buttons** on the Inrico B02PTT (and other headsets made
 for PTT apps) don't send key presses or hands-free commands either: they
-send short messages (`C:VM*` for group up, `C:VP*` for group down) over the
+send short messages (`C:VP*` for group up, `C:VM*` for group down) over the
 headset's serial port (SPP) channel. Outpost opens that channel on every
 connected, paired headset that has one and shows the messages on the
-Buttons page as device **Bluetooth headset**, keys `SPP_VM` / `SPP_VP` -
-bind them to "Next channel" / "Previous channel" there. Nothing extra
+Buttons page as device **Bluetooth headset**, keys `SPP_VP` / `SPP_VM` -
+bind them to "Next channel" / "Previous channel" there. What the headset
+sends in the first two seconds after connecting (status such as `C:GP*`
+and `C:GR*`) is ignored, so it can't be mistaken for a press. The Inrico's
+volume buttons send nothing there; the headset handles them itself. Nothing extra
 needs installing, and no special permission is needed.
 
 ### Bluetooth page

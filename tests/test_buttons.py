@@ -477,6 +477,7 @@ def test_serial_reader_splits_messages_and_survives_disconnect():
                              list_devices=lambda: ["34:D7:F5:00:C5:7D"],
                              connect=lambda a: (done.set(), sock)[1] if not done.is_set() else None)
     spp._RESCAN_S = 0.05
+    spp._SETTLE_S = 0
     spp.start()
     deadline = time.time() + 3
     while time.time() < deadline and not (sock.closed and len(events) == 6):
@@ -499,3 +500,20 @@ def test_serial_buttons_drive_channel_bindings():
         spp.handle_data(b"C:VM*")
         assert client.active_channel.name == "logistics"
     asyncio.run(run())
+
+
+def test_serial_status_sent_on_connect_is_not_a_press():
+    events = []
+
+    class SlowSocket(FakeSerialSocket):
+        def recv(self, n):
+            if self.chunks and self.chunks[0] == b"PAUSE":
+                self.chunks.pop(0)
+                time.sleep(0.25)
+                raise socket_mod.timeout
+            return super().recv(n)
+    sock = SlowSocket([b"C:GP*", b"C:GR*", b"PAUSE", b"C:VP*\x00"])
+    spp = SerialHeadsetInput(lambda d, k, v: events.append(k), list_devices=lambda: [], connect=lambda a: None)
+    spp._SETTLE_S = 0.2
+    spp._read("34:D7:F5:00:C5:7D", sock)
+    assert events == ["SPP_VP", "SPP_VP"]  # GP/GR right after connecting are dropped
