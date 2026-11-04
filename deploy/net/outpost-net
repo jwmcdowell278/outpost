@@ -25,7 +25,7 @@ TABLE=outpost_net        # our nftables table
 SELF=$(readlink -f "$0")
 PATH=$PATH:/usr/sbin:/sbin
 
-GATEWAYS=; FORWARD=; MESH_INTERNET=off; MESH_GATEWAY=
+GATEWAYS=; FORWARD=; MESH_INTERNET=off; MESH_GATEWAY=; MESH_DNS="1.1.1.1 9.9.9.9"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
 
@@ -47,6 +47,9 @@ FORWARD="$FORWARD"
 MESH_INTERNET=$MESH_INTERNET
 # Fixed mesh gateway address instead of finding one (optional).
 MESH_GATEWAY=$MESH_GATEWAY
+# DNS servers to use while MESH_INTERNET=auto (set in NetworkManager, so
+# names still resolve with no other network connected). Empty: leave DNS alone.
+MESH_DNS="$MESH_DNS"
 EOF
 }
 
@@ -229,7 +232,28 @@ cmd_apply() {
     nft_rules | nft -f -
     other_firewalls
     batman_gw_mode
+    mesh_dns
     cmd_route
+}
+
+# With internet through the mesh, a node may have no other connection to
+# get DNS servers from - give NetworkManager fixed ones (MESH_DNS).
+NM_DNS=/etc/NetworkManager/conf.d/90-outpost-mesh-dns.conf
+mesh_dns() {
+    local want=
+    if [ "$MESH_INTERNET" = auto ] && [ -n "$MESH_DNS" ] && [ -d /etc/NetworkManager/conf.d ]; then
+        want=$(printf '%s\n' "# Outpost (outpost-net): DNS for internet through the mesh gateway." \
+            "[global-dns-domain-*]" "servers=$(echo $MESH_DNS | tr ' ' ',')")
+    fi
+    if [ -n "$want" ]; then
+        [ "$(cat "$NM_DNS" 2>/dev/null)" = "$want" ] && return 0
+        printf '%s\n' "$want" > "$NM_DNS"
+    elif [ -f "$NM_DNS" ]; then
+        rm -f "$NM_DNS"
+    else
+        return 0
+    fi
+    systemctl reload NetworkManager 2>/dev/null || true
 }
 
 # ----------------------------------------------------- internet via the mesh

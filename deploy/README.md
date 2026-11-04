@@ -266,9 +266,12 @@ Notes:
   between zones. Needs firewalld 0.9 or newer.
 - Tested as the router on Raspberry Pi OS, Debian, Ubuntu, Fedora (with and
   without firewalld), Arch and openSUSE. Needs systemd and nftables.
-- Mesh nodes using a gateway need a DNS server too, e.g. set one with
-  `nmcli` or in `/etc/resolv.conf` (the gateway's upstream DNS or a public
-  one).
+- Mesh nodes using a gateway also get DNS servers: `mesh-internet auto`
+  sets `MESH_DNS` in `/etc/outpost-net/net.env` (default `1.1.1.1 9.9.9.9`)
+  as NetworkManager's DNS, so names resolve even with no other network
+  connected. Set it to e.g. `"192.168.88.1 1.1.1.1"` to use the gateway
+  side's router first, or empty to leave DNS alone; then
+  `sudo outpost-net apply`.
 - Finding the mesh gateway assumes the nodes' standard mesh addresses. If
   `BAT_ADDRESS` is set by hand, set `MESH_GATEWAY=<its address>` in
   `/etc/outpost-net/net.env` on the other nodes.

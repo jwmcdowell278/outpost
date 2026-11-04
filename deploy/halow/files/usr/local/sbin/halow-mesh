@@ -135,6 +135,10 @@ EOF
     # otherwise batman fragments (works, slightly more airtime).
     ip link set "$IFACE" mtu 1532 2>/dev/null || log "radio MTU stays $(cat /sys/class/net/$IFACE/mtu)"
     ip link set "$IFACE" master bat0
+    # The radio takes 1532 but drops frames that big: across the mesh, IP
+    # packets over 1494 bytes vanish - pings work, SSH and web pages stall.
+    # A smaller bat0 MTU keeps every packet under that (BAT_MTU in halow.env).
+    ip link set bat0 mtu "${BAT_MTU:-1480}" 2>/dev/null || log "couldn't set bat0's MTU to ${BAT_MTU:-1480}"
     ip link set bat0 up
     nmcli device set bat0 managed no 2>/dev/null || true
     addr=$(derive_address)

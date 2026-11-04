@@ -114,6 +114,15 @@ sudo systemctl start halow-mesh
 dmesg | grep "Loaded BCF"        # shows the file in use
 ```
 
+## Packet size (MTU)
+
+The radio accepts 1532-byte frames but drops the largest ones, so across
+the mesh IP packets over 1494 bytes vanish: pings work, but SSH, web pages
+and other full-size traffic stall. `halow-mesh` sets `bat0`'s MTU to 1480
+(`BAT_MTU` in `/etc/halow-mesh/halow.env`; keep it the same on every node).
+To check a link: `ping -M do -s 1452 <other node's 10.42 address>` should
+get replies.
+
 ## Known issue
 
 On the first Pi this was installed on, a `reboot` sometimes hangs at the very
