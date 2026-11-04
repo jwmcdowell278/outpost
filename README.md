@@ -1228,6 +1228,10 @@ systemctl --user restart wireplumber
 
 (WirePlumber 0.4 syntax, as on Raspberry Pi OS Bookworm.)
 
+**If the adapter locks up anyway**, `outpost-bt-watchdog` (installed with
+Outpost) resets its USB port within about two minutes and Outpost reconnects
+the headset - see deploy/README.md, "Watchdogs".
+
 **Pair from the Bluetooth page.** **Pair** also makes the adapter
 "pairable" first - without that BlueZ completes the pairing but doesn't
 keep the keys, so the device shows as unpaired after it disconnects.

@@ -133,6 +133,14 @@ done
 echo "== Bluetooth"
 command -v rfkill >/dev/null && { $SUDO rfkill unblock bluetooth 2>/dev/null || true; }
 command -v systemctl >/dev/null && { $SUDO systemctl enable --now bluetooth.service >/dev/null 2>&1 || true; }
+# Resets the Bluetooth adapter if it locks up (README "Raspberry Pi with a
+# Bluetooth headset").
+if [ -f "$N/bt/outpost-bt-watchdog" ] && command -v systemctl >/dev/null; then
+    $SUDO install -m 0755 "$N/bt/outpost-bt-watchdog" /usr/local/sbin/outpost-bt-watchdog
+    $SUDO install -m 0644 "$N/bt/outpost-bt-watchdog.service" "$N/bt/outpost-bt-watchdog.timer" /etc/systemd/system/
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    $SUDO systemctl enable --now outpost-bt-watchdog.timer >/dev/null 2>&1 || true
+fi
 if [ "${USB_BT:-0}" = 1 ]; then
     BOOTCFG=; for f in /boot/firmware/config.txt /boot/config.txt; do [ -f "$f" ] && { BOOTCFG=$f; break; }; done
     if [ -z "$BOOTCFG" ]; then

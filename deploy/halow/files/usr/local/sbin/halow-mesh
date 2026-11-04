@@ -1,7 +1,8 @@
 #!/bin/sh
 # Brings the Heltec HT-HC01P HaLow radio up as an 802.11s mesh point (SAE,
 # no 802.11s forwarding) and puts batman-adv (bat0) on top of it.
-# Usage: halow-mesh start|stop|status       Settings: /etc/halow-mesh/halow.env
+# Usage: halow-mesh start|stop|restart|status|watchdog
+# Settings: /etc/halow-mesh/halow.env
 set -eu
 
 . /etc/halow-mesh/halow.env
@@ -184,10 +185,61 @@ status() {
     echo "--- batman originators";   batctl o 2>/dev/null || true
 }
 
+# Run every minute by halow-mesh-watchdog.timer. The chip's firmware or the
+# mesh daemon can stop mid-run (seen with this HAT: a firmware upload that
+# half-failed, a hung SPI link) and nothing else notices until a reboot. If
+# the radio is gone, fails the chip's own health check, its mesh daemon has
+# died, or it has sent nothing for 2 checks in a row, reload the driver and
+# bring the mesh back up. At most WATCHDOG_MAX_PER_HOUR reloads an hour, so a
+# broken board can't be reset in a loop.
+WD=$RUN/watchdog
+WATCHDOG_MAX_PER_HOUR=${WATCHDOG_MAX_PER_HOUR:-3}
+
+watchdog() {
+    systemctl is-active --quiet halow-mesh.service || return 0   # not meant to be up
+    mkdir -p "$WD"
+    reason=
+    if [ ! -e "/sys/class/net/$IFACE" ]; then
+        reason="the HaLow interface ($IFACE) is gone"
+    elif command -v morse_cli >/dev/null && ! timeout 20 morse_cli -i "$IFACE" health >/dev/null 2>&1; then
+        reason="the HaLow chip failed its health check"
+    elif ! { [ -f "$RUN/wpa_supplicant.pid" ] && kill -0 "$(cat "$RUN/wpa_supplicant.pid")" 2>/dev/null; }; then
+        reason="the mesh daemon (wpa_supplicant_s1g) isn't running"
+    else
+        tx=$(cat "/sys/class/net/$IFACE/statistics/tx_packets" 2>/dev/null || echo 0)
+        last=$(cat "$WD/tx" 2>/dev/null || echo -1)
+        echo "$tx" > "$WD/tx"
+        if [ "$tx" = "$last" ]; then
+            n=$(( $(cat "$WD/stalled" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WD/stalled"
+            [ "$n" -ge 2 ] && reason="the radio has sent nothing for $n minutes"
+        else
+            echo 0 > "$WD/stalled"
+        fi
+    fi
+    [ -n "$reason" ] || return 0
+    now=$(date +%s)
+    recent=$(awk -v now="$now" 'now - $1 < 3600' "$WD/reloads" 2>/dev/null | wc -l)
+    if [ "$recent" -ge "$WATCHDOG_MAX_PER_HOUR" ]; then
+        log "watchdog: $reason - but it was already reloaded $recent times this hour; leaving it (check: dmesg | grep -i morse)"
+        return 0
+    fi
+    echo "$now" >> "$WD/reloads"
+    log "watchdog: $reason - reloading the driver and restarting the mesh"
+    # Through the service, not stop/start here: the mesh daemon has to live
+    # in halow-mesh.service - one started from this (oneshot) watchdog unit
+    # is killed by systemd as soon as the watchdog run ends.
+    systemctl stop halow-mesh.service || true
+    timeout 30 modprobe -r morse dot11ah 2>/dev/null || true
+    rm -f "$WD/tx" "$WD/stalled"
+    if systemctl start halow-mesh.service; then log "watchdog: mesh is back up"
+    else log "watchdog: the mesh didn't come back up - see: journalctl -u halow-mesh"; fi
+}
+
 case "${1:-}" in
     start) start ;;
     stop) stop ;;
     restart) stop; start ;;
     status) status ;;
-    *) echo "usage: $0 start|stop|restart|status" >&2; exit 2 ;;
+    watchdog) watchdog ;;
+    *) echo "usage: $0 start|stop|restart|status|watchdog" >&2; exit 2 ;;
 esac

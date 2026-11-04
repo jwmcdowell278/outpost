@@ -125,6 +125,17 @@ get replies. `outpost-net` also checks every mesh link this way every few
 minutes and lowers a link's MTU if it drops full-size packets
 (`outpost-net status` shows the results).
 
+## Watchdog
+
+`halow-mesh-watchdog.timer` runs `halow-mesh watchdog` every minute. If the
+radio interface is gone, the chip fails its own health check
+(`morse_cli health`), the mesh daemon (`wpa_supplicant_s1g`) has died, or
+the radio has sent nothing for 2 minutes, it reloads the driver and
+restarts the mesh - about a minute and a half from failure to the mesh
+being back. At most 3 reloads an hour (`WATCHDOG_MAX_PER_HOUR` in
+`halow.env`), so a faulty board isn't reset in a loop. What it did:
+`journalctl -u halow-mesh-watchdog`.
+
 ## Known issue
 
 On the first Pi this was installed on, a `reboot` sometimes hangs at the very

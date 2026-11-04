@@ -1,0 +1,7 @@
+[Unit]
+Description=Outpost: reset the Bluetooth adapter if it stops answering
+After=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/outpost-bt-watchdog

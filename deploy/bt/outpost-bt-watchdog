@@ -1,0 +1,78 @@
+#!/bin/bash
+# Run every minute (as root) by outpost-bt-watchdog.timer. A USB Bluetooth
+# adapter can lock up - on a Pi 3 with a TP-Link UB500 the kernel logs
+# "command tx timeout" or "RTL: hw err" and BlueZ can't reach it - and then
+# the headset stays gone until a reboot. If the adapter stops answering for
+# 2 checks in a row, or vanishes, reset its USB connection (or, for a
+# built-in one, restart Bluetooth). Outpost reconnects the headset by itself
+# afterwards. An adapter switched off on purpose still answers, so it's
+# left alone. At most MAX_PER_HOUR resets an hour.
+set -u
+STATE=/var/lib/outpost-bt-watchdog
+RUN=/run/outpost-bt-watchdog
+MAX_PER_HOUR=${MAX_PER_HOUR:-4}
+mkdir -p "$STATE" "$RUN"
+
+log() { echo "outpost-bt-watchdog: $*"; }
+
+responsive() {  # does BlueZ get an answer from the adapter?
+    local out
+    out=$(timeout 10 bluetoothctl show 2>&1) || return 1
+    printf '%s\n' "$out" | grep -q "Powered:"
+}
+
+usb_dir() {  # the adapter's USB device in sysfs, if it's a USB adapter
+    local p d
+    p=$(readlink -f /sys/class/bluetooth/hci0/device 2>/dev/null) || return 1
+    d=$(dirname "$p")
+    [ -f "$d/authorized" ] && echo "$d"
+}
+
+command -v bluetoothctl >/dev/null || exit 0
+systemctl is-enabled --quiet bluetooth.service 2>/dev/null || exit 0   # Bluetooth not in use here
+
+reason=
+if [ -e /sys/class/bluetooth/hci0 ]; then
+    u=$(usb_dir) && echo "$u" > "$STATE/usb"
+    if responsive; then
+        echo 0 > "$RUN/fails"
+        exit 0
+    fi
+    n=$(( $(cat "$RUN/fails" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$RUN/fails"
+    [ "$n" -ge 2 ] || exit 0
+    reason="the Bluetooth adapter hasn't answered for $n checks"
+else
+    # Gone: only act if there was one (a USB adapter we've seen before).
+    u=$(cat "$STATE/usb" 2>/dev/null) || exit 0
+    [ -f "$u/authorized" ] || exit 0
+    reason="the Bluetooth adapter disappeared"
+fi
+
+now=$(date +%s)
+recent=$(awk -v now="$now" 'now - $1 < 3600' "$STATE/resets" 2>/dev/null | wc -l)
+if [ "$recent" -ge "$MAX_PER_HOUR" ]; then
+    log "$reason - but it was already reset $recent times this hour; leaving it (check: dmesg | grep -i bluetooth)"
+    exit 0
+fi
+echo "$now" >> "$STATE/resets"
+u=${u:-$(cat "$STATE/usb" 2>/dev/null || true)}
+if [ -n "$u" ] && [ -f "$u/authorized" ]; then
+    log "$reason - resetting its USB connection ($(basename "$u"))"
+    # A USB port reset makes the adapter restart (and reload its firmware),
+    # like replugging it. Just switching the connection off and on
+    # (authorized) brings a locked-up Realtek chip back still locked up.
+    [ "$(cat "$u/authorized")" = 1 ] || { echo 1 > "$u/authorized"; sleep 3; }
+    if command -v usbreset >/dev/null && [ -f "$u/busnum" ] && [ -f "$u/devnum" ]; then
+        usbreset "$(printf '%03d/%03d' "$(cat "$u/busnum")" "$(cat "$u/devnum")")" >/dev/null 2>&1 \
+            || log "usbreset failed"
+    else
+        echo 0 > "$u/authorized"; sleep 2; echo 1 > "$u/authorized"
+    fi
+    sleep 5
+else
+    log "$reason - restarting Bluetooth"
+fi
+systemctl restart bluetooth.service
+echo 0 > "$RUN/fails"
+sleep 8
+if responsive; then log "Bluetooth is answering again"; else log "Bluetooth still isn't answering"; fi

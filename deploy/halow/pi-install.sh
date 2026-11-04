@@ -57,6 +57,8 @@ mkdir -p /etc/NetworkManager/conf.d
 install -m 0644 "$F/etc/NetworkManager/conf.d/halow-mesh.conf" /etc/NetworkManager/conf.d/halow-mesh.conf
 install -m 0755 "$F/usr/local/sbin/halow-mesh" /usr/local/sbin/halow-mesh
 install -m 0644 "$F/etc/systemd/system/halow-mesh.service" /etc/systemd/system/halow-mesh.service
+install -m 0644 "$F/etc/systemd/system/halow-mesh-watchdog.service" /etc/systemd/system/halow-mesh-watchdog.service
+install -m 0644 "$F/etc/systemd/system/halow-mesh-watchdog.timer" /etc/systemd/system/halow-mesh-watchdog.timer
 mkdir -p /etc/halow-mesh
 if [ -f "$K/halow.env" ]; then
     install -m 0600 "$K/halow.env" /etc/halow-mesh/halow.env
@@ -79,7 +81,7 @@ country=$(sed -n 's/^COUNTRY=//p' /etc/halow-mesh/halow.env | tr -d "'\"")
 [ -n "$country" ] && sed -i "s/country=[A-Z][A-Z]/country=$country/" /etc/modprobe.d/morse.conf
 grep -q "^batman-adv" /etc/modules 2>/dev/null || echo batman-adv >> /etc/modules
 systemctl daemon-reload
-systemctl enable halow-mesh.service >/dev/null 2>&1
+systemctl enable halow-mesh.service halow-mesh-watchdog.timer >/dev/null 2>&1
 systemctl reload NetworkManager 2>/dev/null || true
 udevadm control --reload
 

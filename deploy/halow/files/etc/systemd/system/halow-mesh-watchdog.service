@@ -1,0 +1,7 @@
+[Unit]
+Description=HaLow mesh watchdog: reload the driver if the radio stops
+After=halow-mesh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/halow-mesh watchdog

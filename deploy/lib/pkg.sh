@@ -26,7 +26,7 @@ pkg_names() {
     case "$PM:$1" in
         apt-get:build)    echo git python3 python3-venv python3-dev build-essential pkg-config libffi-dev libusb-1.0-0-dev libudev-dev ;;
         apt-get:runtime)  echo libopus0 libportaudio2 libhidapi-hidraw0 libcap2-bin rfkill kmod ;;
-        apt-get:bluetooth) echo bluez ;;
+        apt-get:bluetooth) echo bluez usbutils ;;
         apt-get:pipewire) echo pipewire pipewire-pulse wireplumber ;;
         apt-get:audio-extra) echo libspa-0.2-bluetooth pulseaudio-utils libasound2-plugins pipewire-alsa ;;
         apt-get:tts)      echo espeak-ng ;;
@@ -35,10 +35,11 @@ pkg_names() {
         apt-get:firewall) echo nftables iproute2 ;;
         apt-get:dns)  echo dnsmasq-base ;;
         apt-get:nettools)   echo iputils-arping iputils-ping ;;
+        apt-get:time)       echo chrony ;;
 
         dnf:build)        echo git python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
         dnf:runtime)      echo opus portaudio hidapi libcap util-linux kmod ;;
-        dnf:bluetooth)    echo bluez ;;
+        dnf:bluetooth)    echo bluez usbutils ;;
         dnf:pipewire)     echo pipewire pipewire-pulseaudio wireplumber ;;
         dnf:audio-extra)  echo pulseaudio-utils alsa-plugins-pulseaudio ;;
         dnf:tts)          echo espeak-ng ;;
@@ -47,10 +48,11 @@ pkg_names() {
         dnf:firewall) echo nftables iproute ;;
         dnf:dns)      echo dnsmasq ;;
         dnf:nettools)       echo iputils ;;
+        dnf:time)           echo chrony ;;
 
         pacman:build)     echo git python base-devel pkgconf libffi libusb systemd-libs ;;
         pacman:runtime)   echo opus portaudio hidapi libcap util-linux kmod ;;
-        pacman:bluetooth) echo bluez bluez-utils ;;
+        pacman:bluetooth) echo bluez bluez-utils usbutils ;;
         pacman:pipewire)  echo pipewire pipewire-pulse wireplumber ;;
         pacman:audio-extra) echo pipewire-audio libpulse ;;
         pacman:tts)       echo espeak-ng ;;
@@ -59,10 +61,11 @@ pkg_names() {
         pacman:firewall) echo nftables iproute2 ;;
         pacman:dns)   echo dnsmasq ;;
         pacman:nettools)    echo iputils ;;
+        pacman:time)        echo chrony ;;
 
         zypper:build)     echo git python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
         zypper:runtime)   echo libopus0 libportaudio2 libhidapi-hidraw0 libcap-progs util-linux kmod ;;
-        zypper:bluetooth) echo bluez ;;
+        zypper:bluetooth) echo bluez usbutils ;;
         zypper:pipewire)  echo pipewire pipewire-pulseaudio wireplumber ;;
         zypper:audio-extra) echo pipewire-spa-plugins-0_2 pulseaudio-utils ;;
         zypper:tts)       echo espeak-ng ;;
@@ -71,6 +74,7 @@ pkg_names() {
         zypper:firewall) echo nftables iproute2 ;;
         zypper:dns)   echo dnsmasq ;;
         zypper:nettools)    echo iputils ;;
+        zypper:time)        echo chrony ;;
         *) return 1 ;;
     esac
 }

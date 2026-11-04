@@ -296,6 +296,12 @@ Notes:
   (default `gateway 1.1.1.1 9.9.9.9`: the gateway in use if it answers,
   then public servers), so names resolve with no other network connected.
   Set it empty to leave DNS alone; then `sudo outpost-net apply`.
+- **Time without internet.** With chrony (installed by setup), each node
+  takes time from its mesh gateway and up to 4 direct neighbours, serves
+  time to the mesh itself (unless something else already has UDP port 123,
+  e.g. Pi-hole, which then serves it), and in orphan mode the nodes keep
+  agreeing with each other even when none can reach a time server.
+  `outpost-net status` shows what each node is synced to.
 - **Packet sizes are checked.** Every few minutes, and when a neighbour
   appears, each node pings its mesh neighbours with full `bat0`-sized
   packets. If a link drops them (a radio that reports a bigger MTU than it
@@ -372,6 +378,18 @@ your checkout's code over it - `git status` there shows the difference.)
 ```sh
 ./deploy/install-node.sh john@<node>
 ```
+
+## Watchdogs
+
+- **HaLow:** `halow-mesh-watchdog.timer` reloads the driver if the radio
+  hangs or its mesh daemon dies (see `halow/README.md`, "Watchdog").
+- **Bluetooth:** `outpost-bt-watchdog.timer` checks every minute that the
+  Bluetooth adapter answers. If it stops answering for 2 checks, or a USB
+  adapter vanishes, it resets the adapter's USB port (`usbreset`, like
+  replugging it) and restarts Bluetooth; Outpost reconnects the headset by
+  itself. An adapter switched off on purpose still answers and is left
+  alone. At most 4 resets an hour. What it did:
+  `journalctl -u outpost-bt-watchdog`.
 
 ## Check it
 

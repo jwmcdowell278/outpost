@@ -398,6 +398,7 @@ cmd_route() {
         want=$(mesh_gateway_addr)
     fi
     mesh_dns "$want"
+    mesh_time "$want"
     mtu_check_due && cmd_mtu_check
     [ "$cur" = "$want" ] && return 0
     [ -n "$cur" ] && ip route del default via "$cur" dev bat0 metric 900 2>/dev/null || true
@@ -478,6 +479,56 @@ cmd_addr_check() {
     journal "mesh address $addr was also used by $theirs - moved to $cand (bat0 MAC $newmac)" 2>/dev/null || true
     say "$addr was also used by $theirs: this node moved to $cand"
 
+}
+
+# ------------------------------------------------------ time for the mesh
+
+# Pis have no clock that runs while they're off, and a mesh may have no
+# internet at all. With chrony installed, each node takes time from its mesh
+# gateway and its direct neighbours (kept up to date here), serves time to
+# the mesh itself (unless something else already has UDP 123 - e.g. Pi-hole,
+# which then serves it instead), and in "orphan" mode the nodes keep agreeing
+# with each other even when none of them can reach a time server.
+CHRONY_CONF=/etc/chrony/conf.d/outpost-mesh.conf
+CHRONY_SOURCES=/etc/chrony/sources.d/outpost-mesh.sources
+MESH_TIME_NEIGHBOURS=4
+
+chrony_unit() {
+    local u
+    for u in chrony chronyd; do
+        systemctl cat "$u.service" >/dev/null 2>&1 && { echo "$u"; return; }
+    done
+}
+
+mesh_time() {  # mesh_time GATEWAY-IN-USE
+    local unit conf srcs me nb a other
+    command -v chronyd >/dev/null && [ -f /etc/chrony/chrony.conf ] && [ -e /sys/class/net/bat0 ] || return 0
+    unit=$(chrony_unit); [ -n "$unit" ] || return 0
+    # Older/other chrony.conf files may not read the drop-in directories.
+    grep -q '^confdir /etc/chrony/conf.d' /etc/chrony/chrony.conf || echo 'confdir /etc/chrony/conf.d' >> /etc/chrony/chrony.conf
+    grep -q '^sourcedir /etc/chrony/sources.d' /etc/chrony/chrony.conf || echo 'sourcedir /etc/chrony/sources.d' >> /etc/chrony/chrony.conf
+    mkdir -p "$(dirname "$CHRONY_CONF")" "$(dirname "$CHRONY_SOURCES")"
+    other=$(ss -lunpH 'sport = :123' 2>/dev/null | grep -v chronyd || true)
+    conf=$(printf '%s\n' "# Outpost (outpost-net): mesh nodes keep each other's time, internet or not." \
+        "local stratum 10 orphan" "makestep 1 -1")
+    [ -z "$other" ] && conf="$conf
+allow $(mesh_prefix).0.0/16"
+    me=$(ip -4 -o addr show dev bat0 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}')
+    srcs="# Outpost (outpost-net): the mesh gateway in use and direct mesh neighbours."
+    for a in ${1:-} $(mesh_neighbours | head -n "$MESH_TIME_NEIGHBOURS" | while read -r _ nb; do orig_addr "$nb"; done); do
+        [ "$a" = "?" ] || [ "$a" = "$me" ] && continue
+        case "$srcs" in *"server $a "*) continue ;; esac
+        srcs="$srcs
+server $a iburst"
+    done
+    if [ "$(cat "$CHRONY_CONF" 2>/dev/null)" != "$conf" ]; then
+        printf '%s\n' "$conf" > "$CHRONY_CONF"
+        printf '%s\n' "$srcs" > "$CHRONY_SOURCES"
+        systemctl restart "$unit" 2>/dev/null || say "!! couldn't restart $unit"
+    elif [ "$(cat "$CHRONY_SOURCES" 2>/dev/null)" != "$srcs" ]; then
+        printf '%s\n' "$srcs" > "$CHRONY_SOURCES"
+        chronyc reload sources >/dev/null 2>&1 || systemctl restart "$unit" 2>/dev/null || true
+    fi
 }
 
 # --------------------------------------------- mesh link packet-size check
@@ -660,6 +711,16 @@ cmd_status() {
     if [ -f "$MTU_STATE" ]; then
         echo "Mesh links (packet size check, $(date -r "$MTU_STATE" +%H:%M 2>/dev/null)):"
         sed 1d "$MTU_STATE" | sed 's/^/  /'
+    fi
+    if command -v chronyc >/dev/null; then
+        r=$(chronyc -n tracking 2>/dev/null | awk -F': ' '
+            /^Reference ID/ { ref = $2; sub(/^[^(]*\(/, "", ref); sub(/\).*/, "", ref) }
+            /^Stratum/ { st = $2 }
+            /^Leap status/ { leap = $2 }
+            END { if (leap == "") exit
+                  if (ref == "" || ref ~ /^127\./) print "on its own clock (no time source answering yet)"
+                  else print "synced to " ref " (stratum " st ")" }')
+        echo "Time: ${r:-chrony is not running}"
     fi
 }
 
