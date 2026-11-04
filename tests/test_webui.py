@@ -733,3 +733,31 @@ async def _import_config_overwrites_file_and_requires_restart(tmp_path):
 
     assert config_path.read_text() == new_text
 
+
+
+def test_settings_page_groups_every_setting_once():
+    from outpost.config import EDITABLE_FIELDS
+    from outpost.webui import SETTINGS_GROUPS, settings_layout
+    names = [f[0] for _, _, fields in SETTINGS_GROUPS for f in fields]
+    assert sorted(names) == sorted(EDITABLE_FIELDS), "every editable setting belongs in exactly one group"
+    assert len(names) == len(set(names))
+    for title, _, fields in SETTINGS_GROUPS:
+        in_group = {f[0] for f in fields}
+        for name, label, _, parent in fields:
+            assert label, name
+            if parent is not None:
+                # Indented under an on/off setting of the same group.
+                assert parent in in_group, (title, name, parent)
+                assert EDITABLE_FIELDS[parent][0].__name__ == "_validate_bool", parent
+    assert "Other" not in [g["title"] for g in settings_layout()]
+
+
+def test_settings_api_includes_the_layout():
+    async def run():
+        client = _make_client()
+        async with TestClient(TestServer(WebUI(client).app)) as tc:
+            body = await (await tc.get("/api/config")).json()
+            assert body["groups"][0]["title"] == "This node"
+            shown = [f["name"] for g in body["groups"] for f in g["fields"]]
+            assert sorted(shown) == sorted(body["fields"])
+    asyncio.run(run())

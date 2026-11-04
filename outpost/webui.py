@@ -59,6 +59,110 @@ _FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" 
 </svg>
 """
 
+
+# The Settings page's layout: (title, description, fields). Each field is
+# (name, label, help, parent) - parent is the on/off setting it belongs to
+# (shown indented under it), or None. Every EDITABLE_FIELDS entry belongs in
+# exactly one group (tests/test_webui.py checks); any that doesn't is shown
+# under "Other".
+SETTINGS_GROUPS: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] = [
+    ("This node", "", [
+        ("sender_alias", "Name shown to others", "Shown to other users while you talk. Not a secret.", None),
+    ]),
+    ("Audio devices", "Which mic and speaker Outpost uses.", [
+        ("input_device", "Microphone", "System default follows the headset set up on the Bluetooth page.", None),
+        ("output_device", "Speaker", "System default follows the headset set up on the Bluetooth page.", None),
+        ("release_audio_when_idle", "Release mic and speaker when idle",
+         "Opens the speaker only while there's something to play and the mic only while you talk. "
+         "Saves a Bluetooth headset's battery; the start of each transmission is slightly delayed.", None),
+    ]),
+    ("Talking", "What happens when you press push-to-talk.", [
+        ("talk_permit_tone", "Beep when the mic is live",
+         "A short beep once you can start talking. Not transmitted. Useful with Bluetooth headsets.", None),
+        ("enable_tx_lockout", "Don't talk over others",
+         "Ignores a push-to-talk press while someone else is talking on your channel.", None),
+        ("tx_lockout_timeout_ms", "Blocked for (ms) after their last audio",
+         "In case the end of their transmission is lost.", "enable_tx_lockout"),
+        ("enable_echo_guard", "Echo guard",
+         "Mutes your mic briefly after your own speaker plays, to stop feedback between devices close together.", None),
+        ("echo_guard_hold_ms", "Mute for (ms) after playback", "", "enable_echo_guard"),
+    ]),
+    ("Microphone processing", "Applied to your mic in this order before sending.", [
+        ("enable_highpass", "Low-cut filter", "Removes rumble and handling noise.", None),
+        ("highpass_cutoff_hz", "Cut below (Hz)", "", "enable_highpass"),
+        ("enable_squelch", "Noise gate",
+         "Sends silence instead of background noise between words. Needs the threshold tuned to your mic.", None),
+        ("squelch_threshold_rms", "Threshold (level)", "Sound quieter than this counts as silence.", "enable_squelch"),
+        ("squelch_hold_ms", "Wait (ms) before muting", "", "enable_squelch"),
+        ("enable_agc", "Automatic volume", "Evens out mic volume so every device sounds about as loud.", None),
+        ("agc_target_rms", "Target level", "", "enable_agc"),
+    ]),
+    ("Listening", "", [
+        ("duck_monitored_channels", "Turn down monitored channels",
+         "While someone talks on your active channel, the other channels you listen to get quieter.", None),
+        ("enable_channel_announce", "Speak the channel name", "Says the channel's name aloud when you switch.", None),
+        ("channel_announce_voice", "Voice",
+         "Part of a voice's name, or female / male. Empty: the system's default voice.", "enable_channel_announce"),
+    ]),
+    ("Voice quality and bandwidth", "Every node on a channel should normally use the same values.", [
+        ("bitrate", "Bitrate (bits per second)", "Higher sounds better but uses more of the link. Default 16000.", None),
+        ("frame_ms", "Frame length (ms)", "Longer frames send fewer packets but add delay. Default 20.", None),
+        ("inband_fec", "Loss protection", "Adds a little data so a lost packet can be rebuilt.", None),
+        ("constant_size_audio", "Same-size packets",
+         "Hides speech patterns from anyone watching packet sizes, at a steady bandwidth cost.", None),
+        ("max_packet_bytes", "Largest packet (bytes)", "Keep below the network's MTU. Default 1200.", None),
+    ]),
+    ("Finding other nodes", "", [
+        ("listen_port", "UDP port", "Nodes in a mesh normally all use the same port.", None),
+        ("enable_mdns", "Find nodes on the local network", "mDNS. Doesn't work over most VPNs or mesh radio.", None),
+        ("enable_pex", "Share peer lists",
+         "Learns about nodes from other nodes. Works over VPNs and mesh radio.", None),
+        ("pex_interval_s", "Share every (seconds)", "", "enable_pex"),
+        ("pex_fanout", "Share with (peers) each time", "", "enable_pex"),
+        ("enable_subnet_scan", "Scan subnets for nodes",
+         "Probes every address on this device's networks - for VPNs where the local-network search "
+         "doesn't reach. Makes some extra traffic.", None),
+        ("subnet_scan_interval_s", "Scan every (seconds)", "", "enable_subnet_scan"),
+        ("subnet_scan_max_hosts", "Skip networks larger than (addresses)", "", "enable_subnet_scan"),
+        ("max_peers", "Most peers to keep track of", "A safety limit. Raise it only for meshes of over 1,000 devices.", None),
+    ]),
+    ("Mesh traffic", "How audio gets to the other nodes.", [
+        ("enable_multicast", "Multicast on busy channels",
+         "Sends each frame once to the whole site instead of once per listener, once a channel has enough listeners.",
+         None),
+        ("multicast_min_listeners", "Listeners needed", "", "enable_multicast"),
+        ("channel_announce_interval_s", "Announce my channels every (seconds)",
+         "Lets other nodes send audio only to nodes on that channel.", None),
+        ("enable_relay", "Relay for other nodes",
+         "Passes other nodes' traffic between the networks this device is on (e.g. mesh and VPN). "
+         "It can't decrypt it.", None),
+    ]),
+    ("Bluetooth", "", [
+        ("bluetooth_auto_reconnect", "Reconnect Bluetooth devices",
+         "Every 15 seconds, reconnects paired devices that dropped out. Ones you disconnect on the "
+         "Bluetooth page are left alone.", None),
+    ]),
+]
+
+
+def settings_layout() -> list[dict]:
+    """SETTINGS_GROUPS as JSON for the Settings page, plus an "Other" group
+    for any editable setting not placed in one."""
+    placed = set()
+    groups = []
+    for title, description, fields in SETTINGS_GROUPS:
+        entries = [{"name": n, "label": label, "help": help_text, "parent": parent}
+                   for n, label, help_text, parent in fields if n in EDITABLE_FIELDS]
+        placed.update(e["name"] for e in entries)
+        if entries:
+            groups.append({"title": title, "description": description, "fields": entries})
+    rest = [n for n in EDITABLE_FIELDS if n not in placed]
+    if rest:
+        groups.append({"title": "Other", "description": "",
+                       "fields": [{"name": n, "label": n, "help": "", "parent": None} for n in rest]})
+    return groups
+
+
 _FAVICON_LINK = '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
 
 # Shared <head> styling for both pages - kept as one constant so the two
@@ -109,6 +213,15 @@ _STYLE = """
   .pill.low { background: var(--danger); color: white; }
   .field-row { justify-content: space-between; }
   .field-row .name { font-size: 0.88rem; }
+  .setting-group { margin: 1.1rem 0 0; }
+  .setting-group:first-child { margin-top: 0; }
+  h3 { font-size: 0.92rem; margin: 0 0 0.15rem; }
+  .setting { padding: 0.35rem 0; border-top: 1px solid var(--border); }
+  .setting .row { margin: 0; }
+  .setting.sub { margin-left: 1.2rem; border-top-style: dashed; }
+  .setting.off { opacity: 0.55; }
+  .setting .key { font-family: ui-monospace, monospace; font-size: 0.7rem; color: var(--muted); }
+  .setting .help { color: var(--muted); font-size: 0.78rem; margin-top: 0.1rem; }
   .muted { color: var(--muted); font-size: 0.8rem; }
   #saveMsg { font-size: 0.82rem; min-height: 1.1rem; }
   .error { color: var(--danger); }
@@ -396,6 +509,22 @@ function settingsInput(name, field) {{
   return `<input type="text" data-field="${{name}}" value="${{v ?? ''}}" size="20">`;
 }}
 
+// Values as loaded, to send only what changed.
+let initialValues = {{}};
+let fieldLabels = {{}};
+
+function readField(el) {{
+  return el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
+}}
+
+// Settings that only matter with their on/off setting on are dimmed while it's off.
+function updateDependents() {{
+  for (const row of document.querySelectorAll('#settingsFields .setting[data-parent]')) {{
+    const parent = document.querySelector(`#settingsFields [data-field="${{row.dataset.parent}}"]`);
+    row.classList.toggle('off', !!parent && parent.type === 'checkbox' && !parent.checked);
+  }}
+}}
+
 async function loadSettings() {{
   const container = document.getElementById('settingsFields');
   try {{
@@ -406,13 +535,31 @@ async function loadSettings() {{
       audioDevices = {{ input: [], output: [] }};
     }}
     container.textContent = '';
-    for (const [name, field] of Object.entries(cfg.fields)) {{
-      const row = document.createElement('div');
-      row.className = 'row field-row';
-      const livePill = field.live ? '<span class="pill live">live</span>' : '<span class="pill">restart</span>';
-      row.innerHTML = `<span class="name">${{name}} ${{livePill}}</span>${{settingsInput(name, field)}}`;
-      container.appendChild(row);
+    initialValues = {{}}; fieldLabels = {{}};
+    for (const group of cfg.groups) {{
+      const section = document.createElement('div');
+      section.className = 'setting-group';
+      section.innerHTML = `<h3>${{escapeHtml(group.title)}}</h3>` +
+        (group.description ? `<div class="muted">${{escapeHtml(group.description)}}</div>` : '');
+      for (const f of group.fields) {{
+        const field = cfg.fields[f.name];
+        if (!field) continue;
+        fieldLabels[f.name] = f.label;
+        const row = document.createElement('div');
+        row.className = 'setting' + (f.parent ? ' sub' : '');
+        if (f.parent) row.dataset.parent = f.parent;
+        const pill = field.live ? '<span class="pill live">live</span>' : '<span class="pill" title="takes effect after a restart">restart</span>';
+        row.innerHTML = `<div class="row field-row"><span class="name">${{escapeHtml(f.label)}} ${{pill}} <span class="key">${{escapeHtml(f.name)}}</span></span>${{settingsInput(f.name, field)}}</div>` +
+          (f.help ? `<div class="help">${{escapeHtml(f.help)}}</div>` : '');
+        section.appendChild(row);
+      }}
+      container.appendChild(section);
     }}
+    for (const el of container.querySelectorAll('[data-field]')) {{
+      initialValues[el.dataset.field] = readField(el);
+      el.addEventListener('change', updateDependents);
+    }}
+    updateDependents();
     document.getElementById('saveSettings').disabled = !cfg.can_save;
     if (!cfg.can_save) {{
       document.getElementById('saveMsg').textContent = 'no config file path - settings are read-only here';
@@ -424,20 +571,25 @@ async function loadSettings() {{
 
 document.getElementById('saveSettings').addEventListener('click', async () => {{
   const msg = document.getElementById('saveMsg');
-  msg.className = ''; msg.textContent = 'saving...';
   const updates = {{}};
   for (const el of document.querySelectorAll('#settingsFields [data-field]')) {{
-    const name = el.dataset.field;
-    updates[name] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
+    const value = readField(el);
+    if (value !== initialValues[el.dataset.field]) updates[el.dataset.field] = value;
   }}
+  if (!Object.keys(updates).length) {{
+    msg.className = ''; msg.textContent = 'nothing changed';
+    return;
+  }}
+  msg.className = ''; msg.textContent = 'saving...';
   try {{
     const result = await api('/api/config', {{
       method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify(updates),
     }});
+    Object.assign(initialValues, updates);
     msg.className = 'ok';
     msg.textContent = result.restart_required.length
-      ? `saved - restart required for: ${{result.restart_required.join(', ')}}`
+      ? `saved - restart Outpost for: ${{result.restart_required.map(n => fieldLabels[n] || n).join(', ')}}`
       : 'saved and applied';
     document.getElementById('restartBtn').style.display = result.restart_required.length ? 'inline-block' : 'none';
   }} catch (e) {{
@@ -1715,7 +1867,8 @@ class WebUI:
             name: {"value": values[name], "live": live}
             for name, (_validator, live) in EDITABLE_FIELDS.items()
         }
-        return web.json_response({"fields": fields, "can_save": self.client.config_path is not None})
+        return web.json_response({"fields": fields, "groups": settings_layout(),
+                                  "can_save": self.client.config_path is not None})
 
     async def _handle_audio_devices(self, request) -> web.Response:
         """Mic/speaker devices on this machine, for the Settings page's
