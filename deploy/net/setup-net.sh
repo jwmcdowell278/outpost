@@ -5,11 +5,11 @@ set -euo pipefail
 N=${1:?usage: setup-net.sh <node-dir>}
 [ "$(id -u)" = 0 ] || { echo "!! run as root" >&2; exit 1; }
 . "$N/lib/pkg.sh"
-if [ "${SKIP_PACKAGES:-0}" != 1 ]; then pkg_detect && pkg_want firewall menu; fi
+if [ "${SKIP_PACKAGES:-0}" != 1 ]; then pkg_detect && pkg_want firewall menu dns; fi
 PATH=$PATH:/usr/sbin:/sbin
 command -v nft >/dev/null || { echo "!! nftables (nft) missing - outpost-net not installed" >&2; exit 0; }
 install -m 0755 "$N/net/outpost-net" /usr/local/sbin/outpost-net
-for u in outpost-net.service outpost-net-route.service outpost-net-route.timer; do
+for u in outpost-net.service outpost-net-route.service outpost-net-route.timer outpost-net-dns.service; do
     install -m 0644 "$N/net/$u" "/etc/systemd/system/$u"
 done
 systemctl daemon-reload || true

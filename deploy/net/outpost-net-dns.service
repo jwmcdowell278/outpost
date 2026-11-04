@@ -1,0 +1,11 @@
+[Unit]
+Description=Outpost: DNS for mesh nodes using this gateway (on bat0)
+After=network.target NetworkManager.service halow-mesh.service outpost-mesh.service
+
+[Service]
+ExecStart=/usr/local/sbin/outpost-net _dns
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

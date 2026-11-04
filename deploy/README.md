@@ -266,12 +266,27 @@ Notes:
   between zones. Needs firewalld 0.9 or newer.
 - Tested as the router on Raspberry Pi OS, Debian, Ubuntu, Fedora (with and
   without firewalld), Arch and openSUSE. Needs systemd and nftables.
-- Mesh nodes using a gateway also get DNS servers: `mesh-internet auto`
-  sets `MESH_DNS` in `/etc/outpost-net/net.env` (default `1.1.1.1 9.9.9.9`)
-  as NetworkManager's DNS, so names resolve even with no other network
-  connected. Set it to e.g. `"192.168.88.1 1.1.1.1"` to use the gateway
-  side's router first, or empty to leave DNS alone; then
-  `sudo outpost-net apply`.
+- **Several gateways** can share internet with one mesh: run `gateway ...
+  bat0` on each. They announce themselves through batman-adv; nodes with
+  `mesh-internet auto` use the best one and move to another if it goes away
+  (checked every 20 seconds, once batman-adv drops the old one). Open
+  connections are reset by a switch.
+- **DNS follows the gateway.** A gateway sharing with `bat0` answers DNS on
+  its `bat0` address - with dnsmasq (installed by setup) forwarding to its
+  own DNS servers, or with a DNS server already listening there (e.g.
+  Pi-hole on all addresses). Nodes with `mesh-internet auto` get
+  `MESH_DNS` from `/etc/outpost-net/net.env` as NetworkManager's DNS
+  (default `gateway 1.1.1.1 9.9.9.9`: the gateway in use if it answers,
+  then public servers), so names resolve with no other network connected.
+  Set it empty to leave DNS alone; then `sudo outpost-net apply`.
+- **Packet sizes are checked.** Every few minutes, and when a neighbour
+  appears, each node pings its mesh neighbours with full `bat0`-sized
+  packets. If a link drops them (a radio that reports a bigger MTU than it
+  carries, like HaLow), its MTU is lowered to what gets through and
+  batman-adv fragments bigger packets on that link. Results:
+  `outpost-net status`; run it now with `sudo outpost-net mtu-check`. A
+  gateway whose uplink takes smaller packets (LTE, VPN) needs nothing: TCP
+  connections are clamped to the route's MTU.
 - Finding the mesh gateway assumes the nodes' standard mesh addresses. If
   `BAT_ADDRESS` is set by hand, set `MESH_GATEWAY=<its address>` in
   `/etc/outpost-net/net.env` on the other nodes.

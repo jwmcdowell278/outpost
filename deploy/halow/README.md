@@ -121,7 +121,9 @@ the mesh IP packets over 1494 bytes vanish: pings work, but SSH, web pages
 and other full-size traffic stall. `halow-mesh` sets `bat0`'s MTU to 1480
 (`BAT_MTU` in `/etc/halow-mesh/halow.env`; keep it the same on every node).
 To check a link: `ping -M do -s 1452 <other node's 10.42 address>` should
-get replies.
+get replies. `outpost-net` also checks every mesh link this way every few
+minutes and lowers a link's MTU if it drops full-size packets
+(`outpost-net status` shows the results).
 
 ## Known issue
 

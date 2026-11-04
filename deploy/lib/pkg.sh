@@ -33,6 +33,7 @@ pkg_names() {
         apt-get:mesh)     echo batctl iw wpasupplicant iproute2 ;;
         apt-get:menu)     echo whiptail ;;
         apt-get:firewall) echo nftables iproute2 ;;
+        apt-get:dns)  echo dnsmasq-base ;;
 
         dnf:build)        echo git python3 python3-devel gcc gcc-c++ make pkgconf-pkg-config libffi-devel libusb1-devel systemd-devel ;;
         dnf:runtime)      echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -43,6 +44,7 @@ pkg_names() {
         dnf:mesh)         echo batctl iw wpa_supplicant kernel-modules-extra iproute ;;
         dnf:menu)     echo newt ;;
         dnf:firewall) echo nftables iproute ;;
+        dnf:dns)      echo dnsmasq ;;
 
         pacman:build)     echo git python base-devel pkgconf libffi libusb systemd-libs ;;
         pacman:runtime)   echo opus portaudio hidapi libcap util-linux kmod ;;
@@ -53,6 +55,7 @@ pkg_names() {
         pacman:mesh)      echo batctl iw wpa_supplicant iproute2 ;;
         pacman:menu)     echo libnewt ;;
         pacman:firewall) echo nftables iproute2 ;;
+        pacman:dns)   echo dnsmasq ;;
 
         zypper:build)     echo git python3 python3-devel gcc gcc-c++ make pkg-config libffi-devel libusb-1_0-devel systemd-devel ;;
         zypper:runtime)   echo libopus0 libportaudio2 libhidapi-hidraw0 libcap-progs util-linux kmod ;;
@@ -63,6 +66,7 @@ pkg_names() {
         zypper:mesh)      echo batctl iw wpa_supplicant iproute2 ;;
         zypper:menu)     echo newt ;;
         zypper:firewall) echo nftables iproute2 ;;
+        zypper:dns)   echo dnsmasq ;;
         *) return 1 ;;
     esac
 }
