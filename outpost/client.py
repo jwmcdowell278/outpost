@@ -63,6 +63,9 @@ _AUDIO_OPEN_TIMEOUT_S = 10.0
 # With release_audio_when_idle: how long the speaker stays open after the
 # last sound, and the mic after PTT is released.
 _AUDIO_IDLE_RELEASE_S = 3.0
+# How often to check whether this machine's network addresses changed (and
+# mDNS needs restarting on the new ones).
+_NETWORK_CHECK_S = 10.0
 # Announcements with release_audio_when_idle: how long to wait for a closed
 # speaker to open, then how much longer for a Bluetooth headset's audio link
 # to start carrying sound once it's running (else the first words are lost).
@@ -346,6 +349,7 @@ class OutpostClient:
         # Shared with the web UI's Bluetooth page.
         self.bluetooth = BluetoothManager()
         self._bluetooth_task: asyncio.Task | None = None
+        self._network_watch_task: asyncio.Task | None = None
         self.web_ui = (
             WebUI(self, host=config.web_ui_host, port=config.web_ui_port, token=config.web_ui_token)
             if config.enable_web_ui
@@ -817,6 +821,8 @@ class OutpostClient:
                 # Multicast is commonly unavailable on VPN/mesh-radio links -
                 # PEX gossip and/or static peers still work without it.
                 log.warning("mDNS discovery unavailable (%s); relying on PEX/static peers", exc)
+            # Interfaces come and go - re-announce on the current ones.
+            self._network_watch_task = asyncio.create_task(self._network_watch_loop())
         if self.pex:
             self.pex.start()
         if self.subnet_scan:
@@ -841,6 +847,22 @@ class OutpostClient:
                 await self._open_audio()
             self._tx_task = asyncio.create_task(self._tx_loop())
             self._audio_watchdog_task = asyncio.create_task(self._audio_watchdog_loop())
+
+    async def _network_watch_loop(self, interval_s: float = _NETWORK_CHECK_S) -> None:
+        """Interfaces come and go - Wi-Fi switched off, a mesh coming up after
+        Outpost started, a VPN reconnecting with a new address. mDNS only
+        listens and announces on the interfaces it started with, so restart
+        it whenever this machine's addresses change (and start it if it
+        couldn't at first)."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await loop.run_in_executor(None, self.discovery.check_networks)
+            except (OSError, EventLoopBlocked) as exc:
+                log.debug("mDNS restart failed (%s) - trying again shortly", exc)
+            except Exception:
+                log.exception("mDNS network check failed")
 
     # --- on-demand audio (release_audio_when_idle) ------------------------
 
@@ -956,6 +978,9 @@ class OutpostClient:
             self.pex.stop()
         if self.subnet_scan:
             self.subnet_scan.stop()
+        if self._network_watch_task:
+            self._network_watch_task.cancel()
+            self._network_watch_task = None
         if self.discovery:
             self.discovery.stop()
         if self.mic:

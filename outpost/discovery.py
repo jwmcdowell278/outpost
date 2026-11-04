@@ -10,8 +10,10 @@ links mDNS can't reach (e.g. peers on a different subnet/VPN hop without
 multicast routing).
 """
 from __future__ import annotations
+import ipaddress
 import logging
 import socket
+import threading
 
 import ifaddr
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
@@ -34,40 +36,77 @@ def _local_ip() -> str:
         s.close()
 
 
+# Container and VM bridges: their addresses only mean something on this
+# machine (Docker's 172.17.0.1, ...), so they're never advertised - another
+# node would pick one and send into nowhere. VPNs (wg*, tun*, ...) are real.
+_VIRTUAL_IFACE_PREFIXES = ("docker", "br-", "veth", "virbr", "lxcbr", "lxdbr", "cni", "flannel",
+                           "podman", "vmnet", "vboxnet", "vnet")
+
+
+def _is_virtual(name: str) -> bool:
+    return name.startswith(_VIRTUAL_IFACE_PREFIXES)
+
+
+def _local_networks() -> list[tuple[str, ipaddress.IPv4Network, str]]:
+    """(address, its network, interface name) for every usable IPv4
+    address: not loopback, not link-local, not on a container/VM bridge."""
+    nets = []
+    for adapter in ifaddr.get_adapters():
+        name = adapter.nice_name or str(adapter.name)
+        if _is_virtual(name):
+            continue
+        for ip in adapter.ips:
+            if not ip.is_IPv4:
+                continue
+            try:
+                addr = ipaddress.IPv4Address(ip.ip)
+                net = ipaddress.IPv4Network(f"{ip.ip}/{ip.network_prefix}", strict=False)
+            except ValueError:
+                continue
+            if addr.is_loopback or addr.is_link_local:
+                continue
+            nets.append((ip.ip, net, name))
+    return nets
+
+
 def _all_local_ipv4s() -> list[str]:
-    """Every non-loopback IPv4 address across all interfaces, primary/default-
-    route one first. A node can have multiple active interfaces (e.g. LAN +
-    VPN + mesh radio) and a peer on a secondary interface still needs an
-    advertised address it can actually reach."""
-    ips = []
+    """Every usable IPv4 address across all interfaces (see _local_networks),
+    primary/default-route one first. A node can have multiple active
+    interfaces (e.g. LAN + VPN + mesh radio) and a peer on a secondary
+    interface still needs an advertised address it can actually reach."""
     try:
-        primary = _local_ip()
-        ips.append(primary)
-    except OSError:
-        primary = None
-    try:
-        for adapter in ifaddr.get_adapters():
-            for ip in adapter.ips:
-                if ip.is_IPv4 and ip.ip != "127.0.0.1" and ip.ip != primary:
-                    ips.append(ip.ip)
+        local = [ip for ip, _, _ in _local_networks()]
     except OSError as exc:
         log.warning("interface enumeration failed, advertising primary address only: %s", exc)
-    return ips
+        local = []
+    try:
+        primary = _local_ip()
+    except OSError:
+        primary = None  # no default route (e.g. only a mesh)
+    if primary and (primary in local or not local):
+        return [primary] + [ip for ip in local if ip != primary]
+    return local
 
 
-def _subnet_prefix(ip: str) -> str:
-    return ".".join(ip.split(".")[:3])
-
-
-def _order_candidates(hosts: list[str], port: int) -> list[Peer]:
-    """Same-subnet ("shortest path" - likely a direct LAN hop) addresses
-    first, other addresses (e.g. only reachable via a VPN/routed hop) as
-    fallback - see MeshTransport.add_peer_group."""
-    local_prefixes = {_subnet_prefix(ip) for ip in _all_local_ipv4s()}
+def _order_candidates(hosts: list[str], port: int, networks=None) -> list[Peer]:
+    """Addresses on one of this node's own networks first (a direct hop -
+    by each interface's real netmask, so a /16 mesh counts as one network),
+    other addresses (e.g. only reachable via a VPN/routed hop) as fallback -
+    see MeshTransport.add_peer_group."""
+    if networks is None:
+        try:
+            networks = [net for _, net, _ in _local_networks()]
+        except OSError:
+            networks = []
     peers = [Peer(host=host, port=port) for host in hosts]
-    local_first = [p for p in peers if _subnet_prefix(p.host) in local_prefixes]
-    others = [p for p in peers if _subnet_prefix(p.host) not in local_prefixes]
-    return local_first + others
+
+    def local(p: Peer) -> bool:
+        try:
+            a = ipaddress.IPv4Address(p.host)
+        except ValueError:
+            return False
+        return any(a in net for net in networks)
+    return [p for p in peers if local(p)] + [p for p in peers if not local(p)]
 
 
 class _Listener(ServiceListener):
@@ -101,7 +140,9 @@ class _Listener(ServiceListener):
 
 
 class PeerDiscovery:
-    """Advertises this node on the LAN and reports discovered peers via callbacks."""
+    """Advertises this node on the LAN and reports discovered peers via
+    callbacks. Interfaces come and go (Wi-Fi switched off, a mesh coming up
+    after start): check_networks() restarts it on the current ones."""
 
     def __init__(self, sender_id: int, listen_port: int, on_peer_added, on_peer_removed):
         self._sender_id = sender_id
@@ -112,8 +153,35 @@ class PeerDiscovery:
         self._zc: Zeroconf | None = None
         self._browser: ServiceBrowser | None = None
         self._info: ServiceInfo | None = None
+        self._lock = threading.Lock()
+        self.advertised: list[str] | None = None   # addresses of the running instance
+
+    @staticmethod
+    def _networks_now() -> list[str]:
+        return sorted(_all_local_ipv4s())
+
+    def check_networks(self) -> bool:
+        """Restart on this machine's current interfaces if its addresses
+        changed since the last start (or start if not running). Blocking -
+        call from an executor thread. Returns whether it (re)started."""
+        with self._lock:
+            now = self._networks_now()
+            if self._zc is not None and now == self.advertised:
+                return False
+            if self._zc is not None:
+                log.info("network addresses changed (%s -> %s) - re-announcing on mDNS",
+                         ", ".join(self.advertised or []) or "none", ", ".join(now) or "none")
+                self._stop_locked()
+            if not now:
+                return False
+            self._start_locked()
+            return True
 
     def start(self) -> None:
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         self._zc = Zeroconf()
         ips = _all_local_ipv4s()
         self._info = ServiceInfo(
@@ -126,12 +194,24 @@ class PeerDiscovery:
         self._zc.register_service(self._info)
         listener = _Listener(self._service_name, self._on_peer_added, self._on_peer_removed)
         self._browser = ServiceBrowser(self._zc, SERVICE_TYPE, listener)
+        self.advertised = sorted(ips)
         log.info("advertising as %s at %s:%d", self._service_name, ips, self._listen_port)
 
     def stop(self) -> None:
+        with self._lock:
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
         if self._zc:
-            if self._info:
-                self._zc.unregister_service(self._info)
-            self._zc.close()
+            try:
+                if self._info:
+                    self._zc.unregister_service(self._info)
+            except Exception as exc:  # e.g. the interface it was on is gone
+                log.debug("mDNS unregister failed: %s", exc)
+            try:
+                self._zc.close()
+            except Exception as exc:
+                log.debug("mDNS close failed: %s", exc)
             self._zc = None
             self._browser = None
+        self.advertised = None
