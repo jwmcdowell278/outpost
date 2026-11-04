@@ -9,6 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from outpost import bluetooth as bt
 from outpost.bluetooth import BluetoothManager, BluetoothError, parse_device_info, parse_fields
+from outpost.bt_audio import HeadsetAudio
 from outpost.client import OutpostClient
 from outpost.config import OutpostConfig, Channel
 from outpost.crypto import generate_channel_key
@@ -180,7 +181,14 @@ def _webui(fake) -> WebUI:
                            enable_mdns=False, enable_pex=False)
     ui = WebUI(OutpostClient(config, "ops"))
     ui.bluetooth = BluetoothManager(fake)
+    ui.headset_audio = HeadsetAudio(_no_audio_devices, alsa_routed=lambda: True)
     return ui
+
+
+async def _no_audio_devices(args, timeout):
+    """pactl/wpctl with no Bluetooth audio devices - keeps these tests off
+    the real audio system."""
+    return 0, "[]" if "--format=json" in args else ""
 
 
 def test_web_ui_bluetooth_flow():

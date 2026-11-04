@@ -331,8 +331,8 @@ class OutpostClient:
         # input devices when there's something to do with them: bindings to
         # act on, or the web UI's Buttons page to set them up from.
         self.buttons = (
-            ButtonController(self, config.button_bindings)
-            if not self.relay_only and (config.button_bindings or config.enable_web_ui)
+            ButtonController(self, config.button_bindings, ptt_key=config.ptt_key)
+            if not self.relay_only and (config.button_bindings or config.ptt_key or config.enable_web_ui)
             else None
         )
         # Shared with the web UI's Bluetooth page.

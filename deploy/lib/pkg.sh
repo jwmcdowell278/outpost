@@ -28,7 +28,7 @@ pkg_names() {
         apt-get:runtime)  echo libopus0 libportaudio2 libhidapi-hidraw0 libcap2-bin rfkill kmod ;;
         apt-get:bluetooth) echo bluez ;;
         apt-get:pipewire) echo pipewire pipewire-pulse wireplumber ;;
-        apt-get:audio-extra) echo libspa-0.2-bluetooth pulseaudio-utils libasound2-plugins ;;
+        apt-get:audio-extra) echo libspa-0.2-bluetooth pulseaudio-utils libasound2-plugins pipewire-alsa ;;
         apt-get:tts)      echo espeak-ng ;;
         apt-get:mesh)     echo batctl iw wpasupplicant iproute2 ;;
         apt-get:menu)     echo whiptail ;;

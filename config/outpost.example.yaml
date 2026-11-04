@@ -195,6 +195,11 @@ multicast_min_listeners: 5
 # button_bindings:
 #   - {key: KEY_F13, action: ptt, device: INRICO B01}
 #   - {key: KEY_VOLUMEUP, action: volume_up}
+# Keyboard key to hold to talk, picked on the web UI's Buttons page (press
+# it in the page). On Linux it works on any keyboard plugged into this
+# device, and with --ptt keyboard on a desktop. Unset: no keyboard key is
+# push-to-talk.
+# ptt_key: KEY_F8
 duck_monitored_channels: true
 
 # Which microphone / speaker to use when this node has more than one (e.g. a

@@ -145,6 +145,15 @@ wireplumber.profiles = {
   }
 }
 EOF
+# WirePlumber 0.5 (Trixie) flips a headset between playback-only (A2DP) and
+# hands-free mode whenever the mic opens or closes. On a Pi 3 with a TP-Link
+# UB500 that crashes the adapter, so keep the headset in hands-free mode.
+cat > "$HOME/.config/wireplumber/wireplumber.conf.d/81-outpost-no-autoswitch.conf" <<'EOF'
+# Keep Bluetooth headsets in hands-free mode (no automatic mode switching).
+wireplumber.settings = {
+  bluetooth.autoswitch-to-headset-profile = false
+}
+EOF
 
 echo "== service"
 mkdir -p "$HOME/.config/systemd/user"

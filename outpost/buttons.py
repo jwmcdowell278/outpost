@@ -246,9 +246,13 @@ class ButtonController:
     """Turns key events into client actions according to the configured
     bindings, and records presses for the web UI's "press a button" setup."""
 
-    def __init__(self, client, bindings: list[ButtonBinding], input_factory=None, handsfree_factory=None):
+    def __init__(self, client, bindings: list[ButtonBinding], input_factory=None, handsfree_factory=None,
+                 ptt_key: str | None = None):
         self.client = client
         self.bindings = list(bindings)
+        # Keyboard key that's push-to-talk (hold) on any device - see
+        # OutpostConfig.ptt_key.
+        self.ptt_key = ptt_key
         self._input_factory = input_factory
         # None = the real HandsFreeInput (Linux only); False = don't use one.
         self._handsfree_factory = handsfree_factory
@@ -278,7 +282,7 @@ class ButtonController:
             if evdev is None:
                 if self._handsfree is None:
                     self.unavailable_reason = reason
-                    if self.bindings:
+                    if self.bindings or self.ptt_key:
                         log.warning("buttons: %s - button bindings won't work", reason)
                 return
             factory = lambda on_event: EvdevInput(on_event, evdev)  # noqa: E731
@@ -344,6 +348,8 @@ class ButtonController:
             if value == KEY_UP:
                 self._captured.discard(source)
             return
+        if self.ptt_key is not None and key == self.ptt_key:
+            self._run("ptt", value)
         for binding in self.bindings:
             if binding.key == key and binding.device in (None, device):
                 try:

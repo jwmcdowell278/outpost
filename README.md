@@ -1012,7 +1012,8 @@ pytest tests/ -v
    python scripts/run_client.py --config config/outpost.yaml --channel ops --ptt keyboard
    ```
    `--channel` is optional - omit it to join whichever channel is configured
-   with `id: 1`. Hold Space to talk. Use `--ptt hid|gpio|serial` with the
+   with `id: 1`. No keyboard key talks until you pick one on the web UI's
+   Buttons page (see "Keyboard push-to-talk key"). Use `--ptt hid|gpio|serial` with the
    matching `--vendor-id/--product-id`, `--gpio-pin`, or `--serial-port` flag
    for real hardware.
 6. Optional: set `enable_web_ui: true` in the config (plus the `web` extra)
@@ -1070,6 +1071,17 @@ picks devices up when they connect, so a button that reconnects keeps
 working without a restart. If a paired button never appears there, it
 probably doesn't present itself as a standard input device (its `info` in
 `bluetoothctl` lists no "Human Interface Device") and can't be used.
+
+### Keyboard push-to-talk key
+
+The Buttons page's **Keyboard push-to-talk key** card sets one keyboard key
+to hold to talk: click **Choose key…** and press the key in the page (Esc
+cancels). It's saved as `ptt_key` (e.g. `KEY_F8`) and applies straight
+away. On Linux it works on any keyboard plugged into the device, through
+the same input reader as other buttons (so the `input` group setup above
+applies), and with `--ptt keyboard` on a desktop. No key is set by
+default. **Clear** removes it. Pick a key you don't type with - like other
+buttons, the key still reaches the rest of the system.
 
 Outpost doesn't take exclusive control of a device, so its keys still also
 reach the rest of the system. A volume key bound here can still change the
@@ -1147,9 +1159,25 @@ Bluetooth (e.g. a dedicated service account) needs to be in the
 `bluetooth` group. Not available inside the Docker image, which doesn't
 include BlueZ.
 
-A paired Bluetooth headset or speaker mic can be used for audio too:
-select it under `input_device` / `output_device` (see "Choosing the
-microphone and speaker").
+**Headsets** get an **Audio** column for setting them up for Outpost:
+
+- **Set up as headset** does everything a headset needs: hands-free mode
+  (needed for the mic - playback-only mode has none), 8 kHz where offered
+  (the most reliable on a Pi 3), the headset as the system's default mic
+  and speaker (what Outpost uses unless `input_device` / `output_device`
+  are set), full volume, and WirePlumber's automatic mode switching off.
+  A headset paired from this page is set up this way straight away.
+- **Mode** switches between hands-free (8 or 16 kHz), playback only and
+  off; **Volume** sets the headset's speaker volume; **Use for Outpost**
+  makes it the default mic and speaker without changing its mode.
+- The page warns when headset audio can't reach Outpost because the
+  system default sound device bypasses PipeWire (install `pipewire-alsa`,
+  then restart Outpost), and when automatic mode switching is on.
+
+This needs `pactl` (`pulseaudio-utils`) and, for the mode switching
+setting, WirePlumber 0.5's `wpctl`. A headset can also be chosen by name
+under `input_device` / `output_device` (see "Choosing the microphone and
+speaker").
 
 ### Raspberry Pi with a Bluetooth headset
 

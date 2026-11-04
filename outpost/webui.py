@@ -10,8 +10,10 @@ channel/PTT control endpoints are otherwise unauthenticated. Status/HTML
 responses never include channel or mesh keys.
 """
 from __future__ import annotations
+import asyncio
 import base64
 import html
+import json
 import logging
 import time
 from dataclasses import replace
@@ -22,6 +24,8 @@ except ImportError:
     web = None
 
 from .bluetooth import BluetoothManager, BluetoothError
+from .bt_audio import HeadsetAudio, HeadsetAudioError, NoHandsFreeError
+from .keys import BROWSER_CODES, PTT_KEYS, key_label
 from .crypto import generate_channel_key, KEY_SIZE
 from .config import (
     EDITABLE_FIELDS,
@@ -38,6 +42,7 @@ from .config import (
     _validate_volume,
     BUTTON_ACTIONS,
     load_button_bindings,
+    validate_ptt_key,
     button_bindings_to_raw,
 )
 
@@ -749,6 +754,9 @@ loadPeers();
 _BUTTON_ACTION_OPTIONS = "".join(
     f'<option value="{name}">{html.escape(label)}</option>' for name, label in BUTTON_ACTIONS.items())
 
+# Browser KeyboardEvent.code -> key name, for the Buttons page's key picker.
+_BROWSER_CODES_JSON = json.dumps(BROWSER_CODES)
+
 _BUTTONS_HTML = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -778,6 +786,17 @@ _BUTTONS_HTML = f"""<!doctype html>
   <div class="muted" id="lastPress"></div>
 </div>
 
+<div class="card" id="keyCard">
+  <h2>Keyboard push-to-talk key</h2>
+  <div class="row field-row">
+    <span id="pttKeyLine" class="name">loading...</span>
+    <button id="pickKey" type="button">Choose key&hellip;</button>
+    <button id="clearKey" type="button">Clear</button>
+  </div>
+  <div id="pttKeyMsg"></div>
+  <div class="muted">Click Choose key, then press the key you want to hold to talk (Esc cancels). It works on any keyboard plugged into this device, and for keyboard push-to-talk on a desktop. Applies immediately and is saved to the config file.</div>
+</div>
+
 <div class="card" id="addCard">
   <h2>Add a button</h2>
   <div class="row">
@@ -804,6 +823,67 @@ _BUTTONS_HTML = f"""<!doctype html>
 let actions = {{}};
 let bindings = [];
 let learning = false;
+const KEY_CODES = {_BROWSER_CODES_JSON};
+let picking = null;   // {{ handler, timer }} while waiting for a key
+let lastData = null;
+
+function setKeyMsg(text, cls) {{
+  const m = document.getElementById('pttKeyMsg');
+  m.className = cls || ''; m.textContent = text;
+}}
+
+function renderKey(data) {{
+  const line = document.getElementById('pttKeyLine');
+  line.textContent = data.ptt_key
+    ? `Hold ${{data.ptt_key_label}} to talk`
+    : 'No key set - no keyboard key is push-to-talk';
+  document.getElementById('pickKey').disabled = !!picking || !data.can_save;
+  document.getElementById('pickKey').textContent = picking ? 'Press a key...' : 'Choose key\u2026';
+  document.getElementById('clearKey').disabled = !!picking || !data.ptt_key || !data.can_save;
+  if (!data.can_save) setKeyMsg('no config file - the key can\'t be saved', 'error');
+}}
+
+function stopPicking() {{
+  if (!picking) return;
+  window.removeEventListener('keydown', picking.handler, true);
+  clearTimeout(picking.timer);
+  picking = null;
+  if (lastData) renderKey(lastData);
+}}
+
+async function saveKey(key) {{
+  const data = await api('/api/buttons/ptt_key', {{
+    method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ key }}),
+  }});
+  render(data);
+  return data;
+}}
+
+document.getElementById('pickKey').addEventListener('click', () => {{
+  const handler = async (e) => {{
+    e.preventDefault(); e.stopPropagation();
+    if (e.repeat) return;
+    if (e.code === 'Escape') {{ stopPicking(); setKeyMsg('cancelled', 'muted'); return; }}
+    const name = KEY_CODES[e.code];
+    if (!name) {{ setKeyMsg(`${{e.key || e.code}} can't be used - try another key`, 'error'); return; }}
+    stopPicking();
+    try {{
+      const data = await saveKey(name);
+      setKeyMsg(`Push-to-talk key set: hold ${{data.ptt_key_label}} to talk`, 'ok');
+    }} catch (err) {{ setKeyMsg(err.message, 'error'); }}
+  }};
+  picking = {{ handler, timer: setTimeout(() => {{ stopPicking(); setKeyMsg('no key pressed - try again', 'error'); }}, 15000) }};
+  window.addEventListener('keydown', handler, true);
+  setKeyMsg('Press the key now...', 'ok');
+  document.getElementById('pickKey').blur();
+  if (lastData) renderKey(lastData);
+}});
+
+document.getElementById('clearKey').addEventListener('click', async () => {{
+  try {{ await saveKey(null); setKeyMsg('push-to-talk key cleared', 'ok'); }}
+  catch (err) {{ setKeyMsg(err.message, 'error'); }}
+}});
 
 function esc(s) {{
   const d = document.createElement('div');
@@ -817,6 +897,8 @@ function setMsg(text, cls) {{
 }}
 
 function render(data) {{
+  lastData = data;
+  renderKey(data);
   actions = data.actions;
   bindings = data.bindings;
   const avail = document.getElementById('availability');
@@ -935,10 +1017,12 @@ _BLUETOOTH_HTML = f"""<!doctype html>
 <div class="card">
   <h2>My devices</h2>
   <table id="pairedTable">
-    <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th></th></tr></thead>
+    <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th>Audio</th><th></th></tr></thead>
     <tbody></tbody>
   </table>
   <div class="muted" id="noPaired">No paired devices.</div>
+  <div id="audioNotes"></div>
+  <div class="muted">A headset needs hands-free mode for its mic. <b>Set up as headset</b> does everything it needs: hands-free mode, Outpost's mic and speaker, full volume, and no automatic mode switching. New headsets are set up this way when you pair them.</div>
 </div>
 
 <div class="card">
@@ -973,6 +1057,27 @@ function battery(b) {{
   return `<span class="pill${{b < 20 ? ' low' : ''}}">${{b}}%</span>`;
 }}
 
+function audioCell(d, a) {{
+  if (!a) return d.connected ? '<span class="muted">-</span>' : '<span class="muted">connect to see</span>';
+  const addr = esc(d.address);
+  let pill;
+  if (a.outpost_headset) pill = '<span class="pill live">Outpost headset</span>';
+  else if (a.handsfree) pill = '<span class="pill">hands-free</span>';
+  else if (a.has_handsfree) pill = '<span class="pill low">no mic in this mode</span>';
+  else pill = '<span class="pill">speaker only</span>';
+  const opts = a.profiles.map(p =>
+    `<option value="${{esc(p.name)}}"${{p.name === a.profile ? ' selected' : ''}}${{p.available ? '' : ' disabled'}}>${{esc(p.label)}}</option>`).join('');
+  let html = `<div>${{pill}}</div><div class="row"><label>Mode <select data-audio="profile" data-a="${{addr}}">${{opts}}</select></label></div>`;
+  if (a.sink && a.volume != null) {{
+    html += `<div class="row"><label>Volume <input type="range" min="0" max="100" step="5" value="${{a.volume}}" data-audio="volume" data-a="${{addr}}"></label> <span class="muted">${{a.volume}}%</span></div>`;
+  }}
+  const btns = [];
+  if (a.has_handsfree && !a.outpost_headset) btns.push(`<button type="button" data-audio="setup" data-a="${{addr}}">Set up as headset</button>`);
+  if (a.sink && !(a.default_speaker && (a.default_mic || !a.source))) btns.push(`<button type="button" data-audio="use" data-a="${{addr}}">Use for Outpost</button>`);
+  if (btns.length) html += `<div class="row">${{btns.join(' ')}}</div>`;
+  return html;
+}}
+
 function render(s) {{
   lastState = s;
   const power = document.getElementById('powerBtn');
@@ -1000,11 +1105,15 @@ function render(s) {{
     tr.innerHTML = `<td>${{esc(d.name)}}<div class="muted">${{esc(d.address)}}</div></td>` +
       `<td>${{d.connected ? '<span class="pill live">connected</span>' : '<span class="pill">not connected</span>'}}</td>` +
       `<td>${{battery(d.battery)}}</td>` +
+      `<td>${{audioCell(d, (s.audio || {{}})[d.address])}}</td>` +
       `<td><button type="button" data-a="${{d.address}}" data-act="${{d.connected ? 'disconnect' : 'connect'}}">${{d.connected ? 'Disconnect' : 'Connect'}}</button> ` +
       `<button type="button" data-a="${{d.address}}" data-act="unpair">Unpair</button></td>`;
     pt.appendChild(tr);
   }}
   document.getElementById('noPaired').style.display = paired.length ? 'none' : '';
+  const notes = document.getElementById('audioNotes');
+  notes.innerHTML = (s.audio_notes || []).map(n => `<div class="error">${{esc(n)}}</div>`).join('') +
+    (s.audio_error && paired.some(d => d.connected) ? `<div class="muted">Headset audio: ${{esc(s.audio_error)}}</div>` : '');
   const nt = document.querySelector('#nearbyTable tbody');
   nt.textContent = '';
   for (const d of nearby) {{
@@ -1015,11 +1124,20 @@ function render(s) {{
     nt.appendChild(tr);
   }}
   document.getElementById('noNearby').style.display = nearby.length ? 'none' : '';
-  document.querySelectorAll('button[data-act]').forEach(b => {{ b.disabled = busy || !s.powered; }});
+  document.querySelectorAll('button[data-act], [data-audio]').forEach(b => {{ b.disabled = busy || !s.powered; }});
+}}
+
+// Don't redraw the table under someone who's picking a mode or dragging the volume.
+function editingAudio() {{
+  const el = document.activeElement;
+  return !!(el && el.dataset && el.dataset.audio && (el.tagName === 'SELECT' || el.type === 'range'));
 }}
 
 async function refresh() {{
-  try {{ render(await api('/api/bluetooth')); }}
+  try {{
+    const s = await api('/api/bluetooth');
+    if (editingAudio()) lastState = s; else render(s);
+  }}
   catch (e) {{ setMsg('error: ' + e.message, 'error'); }}
 }}
 
@@ -1046,7 +1164,21 @@ document.getElementById('powerBtn').addEventListener('click', () => {{
 }});
 document.getElementById('scanBtn').addEventListener('click', () => run('Starting scan', '/api/bluetooth/scan'));
 
+document.body.addEventListener('change', (e) => {{
+  const kind = e.target.dataset && e.target.dataset.audio;
+  const address = e.target.dataset && e.target.dataset.a;
+  if (kind === 'profile') run('Switching mode', '/api/bluetooth/audio', {{ address, action: 'profile', profile: e.target.value }});
+  else if (kind === 'volume') run('Setting volume', '/api/bluetooth/audio', {{ address, action: 'volume', volume: Number(e.target.value) }});
+  e.target.blur();
+}});
+
 document.body.addEventListener('click', (e) => {{
+  const audio = e.target.dataset && e.target.dataset.audio;
+  if (audio === 'setup' || audio === 'use') {{
+    const labels = {{ setup: 'Setting up as headset (takes a few seconds)', use: 'Switching Outpost to this device' }};
+    run(labels[audio], '/api/bluetooth/audio', {{ address: e.target.dataset.a, action: audio }});
+    return;
+  }}
   const act = e.target.dataset && e.target.dataset.act;
   if (!act) return;
   const address = e.target.dataset.a;
@@ -1075,6 +1207,7 @@ class WebUI:
         self.token = token
         self._runner: web.AppRunner | None = None
         self.bluetooth = getattr(client, "bluetooth", None) or BluetoothManager()
+        self.headset_audio = HeadsetAudio()
 
         self.app = web.Application(middlewares=[web.middleware(self._make_auth_middleware())])
         self.app.add_routes([
@@ -1089,9 +1222,11 @@ class WebUI:
             web.post("/api/bluetooth/power", self._handle_bluetooth_power),
             web.post("/api/bluetooth/scan", self._handle_bluetooth_scan),
             web.post("/api/bluetooth/device", self._handle_bluetooth_device),
+            web.post("/api/bluetooth/audio", self._handle_bluetooth_audio),
             web.get("/api/buttons", self._handle_get_buttons),
             web.post("/api/buttons/learn", self._handle_learn_button),
             web.post("/api/buttons/bindings", self._handle_set_button_bindings),
+            web.post("/api/buttons/ptt_key", self._handle_set_ptt_key),
             web.get("/api/status", self._handle_status),
             web.post("/api/channel", self._handle_set_channel),
             web.post("/api/ptt", self._handle_set_ptt),
@@ -1173,6 +1308,8 @@ class WebUI:
             "notes": [buttons.handsfree_note] if buttons is not None and buttons.handsfree_note else [],
             "last_press": ({"device": last[0], "key": last[1], "age_s": round(time.monotonic() - last[2], 1)}
                            if last else None),
+            "ptt_key": self.client.config.ptt_key,
+            "ptt_key_label": key_label(self.client.config.ptt_key),
         }
 
     async def _handle_get_buttons(self, request) -> web.Response:
@@ -1206,6 +1343,25 @@ class WebUI:
         self.client.buttons.bindings = list(bindings)
         return web.json_response(self._buttons_state())
 
+    async def _handle_set_ptt_key(self, request) -> web.Response:
+        """{"key": "KEY_F8"} sets the keyboard push-to-talk key, {"key": null}
+        clears it. Applies live and is saved to the config file."""
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        data = await request.json()
+        key = data.get("key") if isinstance(data, dict) else None
+        try:
+            key = validate_ptt_key(key)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if key is not None and key not in PTT_KEYS:
+            raise web.HTTPBadRequest(text=f"{key} can't be used as the push-to-talk key")
+        save_config_fields(self.client.config_path, {"ptt_key": key})
+        self.client.config = replace(self.client.config, ptt_key=key)
+        if self.client.buttons is not None:
+            self.client.buttons.ptt_key = key
+        return web.json_response(self._buttons_state())
+
     async def _handle_bluetooth_page(self, request) -> web.Response:
         return web.Response(text=_BLUETOOTH_HTML, content_type="text/html")
 
@@ -1222,7 +1378,108 @@ class WebUI:
             state = await self.bluetooth.state()
         except BluetoothError as exc:
             return web.json_response({"available": True, "error": str(exc), "devices": []})
-        return web.json_response({"available": True, **state})
+        return web.json_response({"available": True, **state, **await self._headset_audio_state()})
+
+    async def _headset_audio_state(self) -> dict:
+        """Audio mode/volume per connected headset, plus anything stopping
+        headsets from working with Outpost - never fails the whole page."""
+        audio = self.headset_audio
+        reason = audio.unavailable_reason()
+        if reason:
+            return {"audio": {}, "audio_notes": [], "audio_error": reason}
+        notes = []
+        try:
+            devices = await audio.devices()
+        except HeadsetAudioError as exc:
+            return {"audio": {}, "audio_notes": [], "audio_error": str(exc)}
+        uses_default = self.client.config.input_device is None or self.client.config.output_device is None
+        if devices and uses_default and not audio.alsa_routed():
+            notes.append("Outpost's mic and speaker won't reach Bluetooth headsets until the pipewire-alsa "
+                         "package is installed: sudo apt install pipewire-alsa, then restart Outpost.")
+        if devices and await audio.autoswitch():
+            notes.append("Headsets get switched between modes automatically, which can make them drop out. "
+                         "Set up as headset turns that off.")
+        return {"audio": devices, "audio_notes": notes, "audio_error": None}
+
+    async def _handle_bluetooth_audio(self, request) -> web.Response:
+        """{"address", "action": setup|profile|use|volume, "profile"?, "volume"?}"""
+        reason = self.headset_audio.unavailable_reason()
+        if reason:
+            raise web.HTTPConflict(text=reason)
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        address, action = data.get("address"), data.get("action")
+        audio = self.headset_audio
+        try:
+            if action == "setup":
+                message = await self._setup_headset(address)
+            elif action == "profile":
+                message = await audio.set_profile(address, data.get("profile"))
+            elif action == "use":
+                message = await audio.use_for_outpost(address)
+            elif action == "volume":
+                message = await audio.set_volume(address, data.get("volume"))
+            else:
+                raise web.HTTPBadRequest(text=f"unknown action {action!r}")
+        except HeadsetAudioError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response({"message": message})
+
+    async def _setup_after_pairing(self, address: str) -> str | None:
+        """A newly paired headset gets set up for Outpost straight away.
+        None if it isn't an audio device (e.g. a PTT button)."""
+        audio = self.headset_audio
+        if audio.unavailable_reason():
+            return None
+        deadline = time.monotonic() + 6.0
+        while True:
+            try:
+                info = (await audio.devices()).get(address.upper())
+            except HeadsetAudioError:
+                return None
+            if info is not None or time.monotonic() >= deadline:
+                break
+            audio._cache = None
+            await asyncio.sleep(0.5)
+        if info is None or not info["has_handsfree"]:
+            return None
+        try:
+            return await self._setup_headset(address)
+        except HeadsetAudioError as exc:
+            return f"couldn't set it up as a headset: {exc}"
+
+    # How long a reconnected headset gets to offer its hands-free mode.
+    HANDSFREE_RECONNECT_WAIT_S = 10.0
+
+    async def _setup_headset(self, address: str) -> str:
+        """Set up as headset - reconnecting it first if it came up without
+        its hands-free mode (an Inrico that connected to the Pi by itself)."""
+        audio = self.headset_audio
+        try:
+            return await audio.setup(address)
+        except NoHandsFreeError:
+            if self.bluetooth.unavailable_reason():
+                raise
+        log.info("bluetooth audio: %s has no hands-free mode - reconnecting it", address)
+        try:
+            await self.bluetooth.device_action(address, "disconnect")
+            await asyncio.sleep(2.0)
+            await self.bluetooth.device_action(address, "connect")
+        except BluetoothError as exc:
+            raise HeadsetAudioError(f"no hands-free mode, and reconnecting it failed: {exc}")
+        deadline = time.monotonic() + self.HANDSFREE_RECONNECT_WAIT_S
+        while time.monotonic() < deadline:
+            audio._cache = None
+            info = (await audio.devices()).get(address.upper())
+            if info is not None and info["has_handsfree"]:
+                break
+            await asyncio.sleep(0.5)
+        try:
+            return await audio.setup(address)
+        except NoHandsFreeError:
+            raise HeadsetAudioError("it still doesn't offer a hands-free mode after reconnecting - "
+                                    "switch it off and on, then try again")
 
     async def _handle_bluetooth_power(self, request) -> web.Response:
         self._require_bluetooth()
@@ -1251,6 +1508,10 @@ class WebUI:
             message = await self.bluetooth.device_action(data.get("address"), data.get("action"))
         except BluetoothError as exc:
             raise web.HTTPBadRequest(text=str(exc))
+        if data.get("action") == "pair" and message == "paired and connected":
+            setup = await self._setup_after_pairing(data["address"])
+            if setup:
+                message = f"{message} - {setup}"
         return web.json_response({"message": message})
 
     async def _handle_status(self, request) -> web.Response:

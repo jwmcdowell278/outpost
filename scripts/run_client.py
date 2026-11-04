@@ -46,10 +46,10 @@ def web_ui_urls(host: str, port: int) -> list[str]:
     return [f"http://{addr}:{port}" for addr in addrs] or [f"http://<this-device-ip>:{port}"]
 
 
-def build_ptt(args, on_change) -> PTTSource:
+def build_ptt(args, on_change, key_name=None) -> PTTSource:
     if args.ptt == "keyboard":
         from outpost.ptt.keyboard import KeyboardPTT
-        return KeyboardPTT(on_change)
+        return KeyboardPTT(on_change, key_name=key_name)
     if args.ptt == "hid":
         from outpost.ptt.hid import HIDPTT
         if args.vendor_id is None or args.product_id is None:
@@ -139,7 +139,8 @@ async def main() -> None:
         ptt = NullPTT()
     else:
         try:
-            ptt = build_ptt(args, client.set_ptt)
+            # The key picked on the web UI's Buttons page, read live.
+            ptt = build_ptt(args, client.set_ptt, key_name=lambda: client.config.ptt_key)
         except Exception as exc:
             # e.g. pynput's keyboard backend probes for an X11 display at
             # import time and fails outright on a headless box - don't take

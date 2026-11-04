@@ -358,3 +358,77 @@ def test_handsfree_without_permission_explains_why():
             state = await (await tc.get("/api/buttons")).json()
             assert state["notes"] == [client.buttons.handsfree_note]
     asyncio.run(run())
+
+
+# --- Keyboard push-to-talk key (ptt_key) ---------------------------------------------
+
+from outpost.keys import BROWSER_CODES, PTT_KEYS, key_label, pynput_spec
+
+
+def test_key_table_links_browser_codes_and_names():
+    assert BROWSER_CODES["Space"] == "KEY_SPACE"
+    assert BROWSER_CODES["KeyA"] == "KEY_A"
+    assert BROWSER_CODES["F8"] == "KEY_F8"
+    assert BROWSER_CODES["ControlRight"] == "KEY_RIGHTCTRL"
+    assert BROWSER_CODES["Numpad0"] == "KEY_KP0"
+    assert key_label("KEY_RIGHTCTRL") == "Right Ctrl" and key_label(None) is None
+    assert pynput_spec("KEY_A") == "char:a" and pynput_spec("KEY_F8") == "key:f8"
+    assert pynput_spec("KEY_KP0") is None
+    assert len(BROWSER_CODES) == len(PTT_KEYS)  # no two keys share a browser code
+
+
+def test_ptt_key_loads_from_config(tmp_path):
+    path = tmp_path / "outpost.yaml"
+    raw = {"mesh_key": _b64(), "channels": [{"id": 1, "name": "ops", "key": _b64()}], "ptt_key": "KEY_F8"}
+    path.write_text(yaml.safe_dump(raw))
+    assert load_config(str(path)).ptt_key == "KEY_F8"
+    raw["ptt_key"] = "spacebar"
+    with pytest.raises(ValueError):
+        validate_config_yaml(yaml.safe_dump(raw))
+
+
+def test_ptt_key_is_hold_to_talk_on_any_keyboard():
+    async def run():
+        client = _client()
+        b = await _started(client)
+        b.handle_event("Logitech K540e", "KEY_SPACE", KEY_DOWN)
+        assert not client._ptt_active  # no key picked: keyboards do nothing
+        b.ptt_key = "KEY_SPACE"
+        b.handle_event("Logitech K540e", "KEY_SPACE", KEY_DOWN)
+        assert client._ptt_active
+        b.handle_event("Logitech K540e", "KEY_SPACE", KEY_REPEAT)
+        assert client._ptt_active
+        b.handle_event("Logitech K540e", "KEY_SPACE", KEY_UP)
+        assert not client._ptt_active
+    asyncio.run(run())
+
+
+def test_web_ui_sets_and_clears_ptt_key(tmp_path):
+    async def run():
+        client = _client(tmp_path)
+        await _started(client)
+        async with TestClient(TestServer(WebUI(client).app)) as tc:
+            state = await (await tc.get("/api/buttons")).json()
+            assert state["ptt_key"] is None
+
+            resp = await tc.post("/api/buttons/ptt_key", json={"key": "KEY_F8"})
+            assert resp.status == 200
+            state = await resp.json()
+            assert state["ptt_key"] == "KEY_F8" and state["ptt_key_label"] == "F8"
+            assert client.config.ptt_key == "KEY_F8" and client.buttons.ptt_key == "KEY_F8"
+            with open(client.config_path) as f:
+                assert yaml.safe_load(f)["ptt_key"] == "KEY_F8"
+            client.buttons.handle_event("keyboard", "KEY_F8", KEY_DOWN)
+            assert client._ptt_active
+            client.buttons.handle_event("keyboard", "KEY_F8", KEY_UP)
+
+            for bad in ("KEY_NOT_A_KEY", "F8", 5):
+                assert (await tc.post("/api/buttons/ptt_key", json={"key": bad})).status == 400
+
+            resp = await tc.post("/api/buttons/ptt_key", json={"key": None})
+            assert (await resp.json())["ptt_key"] is None and client.buttons.ptt_key is None
+            with open(client.config_path) as f:
+                assert yaml.safe_load(f)["ptt_key"] is None
+            page = await (await tc.get("/buttons")).text()
+            assert "Keyboard push-to-talk key" in page and '"Space": "KEY_SPACE"' in page
+    asyncio.run(run())

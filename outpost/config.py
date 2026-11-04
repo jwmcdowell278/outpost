@@ -269,6 +269,13 @@ class OutpostConfig:
     # only (reads /dev/input via evdev). See README "Hardware buttons".
     button_bindings: list[ButtonBinding] = field(default_factory=list)
 
+    # Keyboard key that works as push-to-talk (hold), picked on the web UI's
+    # Buttons page. A Linux input key name, e.g. "KEY_F8" (see keys.py). On
+    # Linux it works on any keyboard plugged into the device (read through
+    # the Buttons reader); with --ptt keyboard on a desktop it's the key
+    # pynput listens for. None: no keyboard key is push-to-talk.
+    ptt_key: str | None = None
+
     # Reconnect paired, trusted Bluetooth devices (headsets, PTT buttons)
     # that aren't connected, every 15 seconds - for devices that don't
     # reconnect by themselves when switched on or back in range. Linux only;
@@ -460,6 +467,14 @@ def load_button_bindings(raw_value) -> list[ButtonBinding]:
             raise ValueError("button_bindings: 'device' must be a device name")
         bindings.append(ButtonBinding(key=key, action=action, device=device or None))
     return bindings
+
+
+def validate_ptt_key(v) -> str | None:
+    if v is None or v == "":
+        return None
+    if not isinstance(v, str) or not v.startswith("KEY_") or len(v) > 64:
+        raise ValueError("ptt_key must be a key name like KEY_F8, or empty for none")
+    return v
 
 
 def button_bindings_to_raw(bindings: list[ButtonBinding]) -> list[dict]:
@@ -672,6 +687,7 @@ def validate_config_yaml(text: str) -> None:
         if not isinstance(entry, dict) or not {"host", "port"} <= entry.keys():
             raise ValueError("each peers entry needs host and port")
     load_button_bindings(raw.get("button_bindings"))
+    validate_ptt_key(raw.get("ptt_key"))
 
 
 def write_config_text(path: str, text: str) -> None:
@@ -831,6 +847,7 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         monitor_channels=_load_monitor_channels(raw.get("monitor_channels"), channels),
         channel_volumes=_load_channel_volumes(raw.get("channel_volumes")),
         button_bindings=load_button_bindings(raw.get("button_bindings")),
+        ptt_key=validate_ptt_key(raw.get("ptt_key")),
         bluetooth_auto_reconnect=_validate_bool(raw.get("bluetooth_auto_reconnect", True)),
         duck_monitored_channels=raw.get("duck_monitored_channels", True),
         input_device=_validate_audio_device(raw.get("input_device")),
