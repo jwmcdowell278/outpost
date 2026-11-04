@@ -67,6 +67,13 @@ elif [ ! -f /etc/halow-mesh/halow.env ]; then
     sed -i "s/^MESH_PASSWORD=.*/MESH_PASSWORD=$pw/" /etc/halow-mesh/halow.env
     echo "   new mesh password generated - copy /etc/halow-mesh/halow.env to the other nodes"
 fi
+# The board config file morse.conf names must be in the kit; an older kit
+# only has the V1 one.
+bcf=$(sed -n 's/.*bcf=\([^ ]*\).*/\1/p' /etc/modprobe.d/morse.conf | head -1)
+if [ -n "$bcf" ] && [ ! -f "/lib/firmware/morse/$bcf" ] && [ -f /lib/firmware/morse/bcf_HC0P.bin ]; then
+    sed -i "s/bcf=$bcf/bcf=bcf_HC0P.bin/" /etc/modprobe.d/morse.conf
+    echo "   !! $bcf isn't in this kit - using bcf_HC0P.bin (right only for the original V1 module)"
+fi
 # Keep the driver's country in step with the mesh settings.
 country=$(sed -n 's/^COUNTRY=//p' /etc/halow-mesh/halow.env | tr -d "'\"")
 [ -n "$country" ] && sed -i "s/country=[A-Z][A-Z]/country=$country/" /etc/modprobe.d/morse.conf

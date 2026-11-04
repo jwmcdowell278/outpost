@@ -17,6 +17,20 @@ OUT=$HERE/out
 rm -rf "$DEST"; mkdir -p "$DEST"
 cp -R "$OUT/rootfs" "$OUT/boot" "$HERE/files" "$DEST/"
 cp "$OUT/KERNEL_RELEASE" "$DEST/"
+# Kits built (or published) before the V2 board config file was added:
+# fetch it now, so V2 modules get the right one.
+V2=$DEST/rootfs/lib/firmware/morse/bcf_HC01P-V2.bin
+if [ ! -f "$V2" ]; then
+    echo "== adding Heltec's V2 board config file"
+    if curl -fsSL -o "$V2" https://resource.heltec.cn/download/HT-HC01P_V2/BCF/driver_1_15_3/bcf_HC01P-V2.bin &&
+        [ "$( (sha256sum "$V2" 2>/dev/null || shasum -a 256 "$V2") | cut -d' ' -f1)" = \
+          cfff9880cae774b60c18cea88ed9d763b6c9d1e06f4a81fa8d1c2936d0a1c161 ]; then
+        echo "   bcf_HC01P-V2.bin added"
+    else
+        rm -f "$V2"
+        echo "   !! couldn't download it - V2 modules will fall back to the V1 file (poor range)" >&2
+    fi
+fi
 cp "$HERE/pi-install.sh" "$HERE/firstboot.sh" "$DEST/"
 [ -n "$ENV_FILE" ] && install -m 0600 "$ENV_FILE" "$DEST/halow.env"
 

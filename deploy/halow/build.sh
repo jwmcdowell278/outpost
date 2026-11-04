@@ -59,11 +59,17 @@ clone morse-firmware "$FW_BRANCH" morse-firmware
 cd "$W/morse-firmware"
 make TARGET_DIR="$O/rootfs/lib/firmware/morse" install
 
-echo "== Heltec HT-HC01P board config file"
-BCF_URL="https://resource.heltec.cn/download/HT-HC01P/BCF/driver_1_15_3/bcf_HC0P.bin"
-BCF_SHA256=57c50cb2c1d51187667677b392684285c616ddbf3fe262c3aeece342f446773e
-curl -fsSL -o "$O/rootfs/lib/firmware/morse/bcf_HC0P.bin" "$BCF_URL"
-echo "$BCF_SHA256  $O/rootfs/lib/firmware/morse/bcf_HC0P.bin" | sha256sum -c --quiet
+echo "== Heltec HT-HC01P board config files (V2 module, and the original V1)"
+# One per module version - the wrong one leaves the radio nearly deaf and
+# mute (see README "Board config file"). morse.conf picks V2.
+fetch_bcf() {  # fetch_bcf URL SHA256 FILE
+    curl -fsSL -o "$O/rootfs/lib/firmware/morse/$3" "$1"
+    echo "$2  $O/rootfs/lib/firmware/morse/$3" | sha256sum -c --quiet
+}
+fetch_bcf https://resource.heltec.cn/download/HT-HC01P_V2/BCF/driver_1_15_3/bcf_HC01P-V2.bin \
+    cfff9880cae774b60c18cea88ed9d763b6c9d1e06f4a81fa8d1c2936d0a1c161 bcf_HC01P-V2.bin
+fetch_bcf https://resource.heltec.cn/download/HT-HC01P/BCF/driver_1_15_3/bcf_HC0P.bin \
+    57c50cb2c1d51187667677b392684285c616ddbf3fe262c3aeece342f446773e bcf_HC0P.bin
 
 echo "== hostap ($MORSE_VER)"
 clone hostap "$MORSE_VER" hostap

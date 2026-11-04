@@ -10,7 +10,8 @@ What runs on the Pi:
   `/boot/firmware/morse/` via `os_prefix=morse/` in `config.txt`. The stock
   kernel is left as it is, and apt kernel updates don't touch this one.
 - Morse driver, firmware and `wpa_supplicant_s1g` 1.15.3, plus Heltec's board
-  config file (`bcf_HC0P.bin`, made for driver 1.15.3).
+  config files for driver 1.15.3 - `bcf_HC01P-V2.bin` (used) and
+  `bcf_HC0P.bin` for the original module (see "Board config file").
 - Overlay `hc01p-spi` (Heltec pins: RESET 5, WAKE 3, BUSY 7, IRQ 25, CS 8).
   GPIO 3 is I2C SCL, so I2C can't be used alongside the HAT; GPIO 17 (Outpost's
   PTT button) is free.
@@ -88,6 +89,30 @@ cat /run/halow-mesh/wpa_supplicant.log
 Edit `/etc/halow-mesh/halow.env` (channel, country, password, routing
 algorithm, address), then run `sudo systemctl restart halow-mesh`. If you change
 the country, also change it in `/etc/modprobe.d/morse.conf` and reboot.
+
+## Board config file
+
+The HT-HC01P comes in two versions, each with its own Heltec board config
+file. It tells the chip how the module's antenna circuitry is wired; with
+the wrong one the radio still beacons and joins its own mesh, but is nearly
+deaf and mute - two nodes a few metres apart never see each other (no mesh
+peers, `rx_packets` stays 0, and `sudo morse_cli -i halow0 stats` shows
+almost no `DCF STF fired`).
+
+| Module (printed on it) | File |
+|---|---|
+| HT-HC01P **V2** | `bcf_HC01P-V2.bin` (the default) |
+| HT-HC01P (original) | `bcf_HC0P.bin` |
+
+To switch, change `bcf=` in `/etc/modprobe.d/morse.conf`, then reload the
+driver - `systemctl restart halow-mesh` alone keeps the loaded driver:
+
+```sh
+sudo systemctl stop halow-mesh
+sudo modprobe -r morse dot11ah
+sudo systemctl start halow-mesh
+dmesg | grep "Loaded BCF"        # shows the file in use
+```
 
 ## Known issue
 
