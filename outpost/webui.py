@@ -24,6 +24,7 @@ except ImportError:
     web = None
 
 from .bluetooth import BluetoothManager, BluetoothError
+from . import logsetup
 from .bt_audio import HeadsetAudio, HeadsetAudioError, NoHandsFreeError
 from .keys import BROWSER_CODES, PTT_KEYS, key_label
 from .crypto import generate_channel_key, KEY_SIZE
@@ -137,6 +138,11 @@ SETTINGS_GROUPS: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] =
          "Passes other nodes' traffic between the networks this device is on (e.g. mesh and VPN). "
          "It can't decrypt it.", None),
     ]),
+    ("Logging", "Warnings and errors always go to the system log (journalctl --user -u outpost).", [
+        ("log_level", "Log file",
+         "Off: no log file. Normal: what happened. Detailed: every detail, for chasing a problem - "
+         "writes much more, which wears an SD card. Applies straight away.", None),
+    ]),
     ("Bluetooth", "", [
         ("bluetooth_auto_reconnect", "Reconnect Bluetooth devices",
          "Every 15 seconds, reconnects paired devices that dropped out. Ones you disconnect on the "
@@ -145,13 +151,20 @@ SETTINGS_GROUPS: list[tuple[str, str, list[tuple[str, str, str, str | None]]]] =
 ]
 
 
+# Settings shown as a menu of fixed choices: value -> label.
+SETTING_CHOICES: dict[str, list[tuple[str, str]]] = {
+    "log_level": [("off", "Off"), ("info", "Normal"), ("debug", "Detailed")],
+}
+
+
 def settings_layout() -> list[dict]:
     """SETTINGS_GROUPS as JSON for the Settings page, plus an "Other" group
     for any editable setting not placed in one."""
     placed = set()
     groups = []
     for title, description, fields in SETTINGS_GROUPS:
-        entries = [{"name": n, "label": label, "help": help_text, "parent": parent}
+        entries = [{"name": n, "label": label, "help": help_text, "parent": parent,
+                    "choices": SETTING_CHOICES.get(n)}
                    for n, label, help_text, parent in fields if n in EDITABLE_FIELDS]
         placed.update(e["name"] for e in entries)
         if entries:
@@ -502,8 +515,13 @@ function deviceSelect(name, kind, v) {{
   return `<select data-field="${{name}}">${{opts}}</select>`;
 }}
 
-function settingsInput(name, field) {{
+function settingsInput(name, field, choices) {{
   const v = field.value;
+  if (choices) {{
+    const opts = choices.map(([val, label]) =>
+      `<option value="${{escapeHtml(val)}}"${{val === v ? ' selected' : ''}}>${{escapeHtml(label)}}</option>`).join('');
+    return `<select data-field="${{name}}">${{opts}}</select>`;
+  }}
   if (name in AUDIO_DEVICE_FIELDS) {{
     return deviceSelect(name, AUDIO_DEVICE_FIELDS[name], v);
   }}
@@ -556,7 +574,7 @@ async function loadSettings() {{
         row.className = 'setting' + (f.parent ? ' sub' : '');
         if (f.parent) row.dataset.parent = f.parent;
         const pill = field.live ? '<span class="pill live">live</span>' : '<span class="pill" title="takes effect after a restart">restart</span>';
-        row.innerHTML = `<div class="row field-row"><span class="name">${{escapeHtml(f.label)}} ${{pill}} <span class="key">${{escapeHtml(f.name)}}</span></span>${{settingsInput(f.name, field)}}</div>` +
+        row.innerHTML = `<div class="row field-row"><span class="name">${{escapeHtml(f.label)}} ${{pill}} <span class="key">${{escapeHtml(f.name)}}</span></span>${{settingsInput(f.name, field, f.choices)}}</div>` +
           (f.help ? `<div class="help">${{escapeHtml(f.help)}}</div>` : '');
         section.appendChild(row);
       }}
@@ -1954,12 +1972,27 @@ class WebUI:
             self.client.multicast_min_listeners = validated["multicast_min_listeners"]
         if "duck_monitored_channels" in validated:
             self.client.mixer.duck_enabled = validated["duck_monitored_channels"]
+        if "log_level" in validated:
+            self._apply_log_level(validated["log_level"])
 
         return web.json_response({
             "saved": sorted(validated),
             "applied_live": applied_live,
             "restart_required": restart_required,
         })
+
+    def _apply_log_level(self, level: str) -> None:
+        """Switch Outpost's log file live. Turning it on with no log_file
+        configured uses outpost.log in the working directory - a fixed name,
+        so the web UI can't point writes anywhere else."""
+        cfg = self.client.config
+        log_file = cfg.log_file
+        if level != "off" and not log_file:
+            log_file = "outpost.log"
+            save_config_fields(self.client.config_path, {"log_file": log_file})
+            self.client.config = replace(cfg, log_file=log_file)
+        logsetup.set_file_logging(log_file, level, cfg.log_max_bytes, cfg.log_backup_count)
+        log.info("log file: %s", {"off": "off", "info": "normal", "debug": "detailed"}[level])
 
     async def _handle_export_config(self, request) -> web.Response:
         if self.client.config_path is None:

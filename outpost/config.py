@@ -320,9 +320,11 @@ class OutpostConfig:
     log_file: str | None = None
     log_max_bytes: int = 10_000_000
     log_backup_count: int = 5
-    # How much goes into log_file: "info" (default - what happened) or
+    # How much goes into log_file: "info" (default - what happened),
     # "debug" (every detail, for chasing a problem; writes far more, which
-    # wears an SD card).
+    # wears an SD card) or "off" (no log file). Editable live from the web
+    # UI's Settings page; turning it on there with no log_file set uses
+    # outpost.log in the working directory (the path itself isn't editable).
     log_level: str = "info"
 
     def channel_by_name(self, name: str) -> Channel:
@@ -473,7 +475,7 @@ def load_button_bindings(raw_value) -> list[ButtonBinding]:
     return bindings
 
 
-LOG_LEVELS = ("info", "debug")
+LOG_LEVELS = ("off", "info", "debug")
 
 
 def validate_log_level(v) -> str:
@@ -564,6 +566,7 @@ EDITABLE_FIELDS: dict[str, tuple] = {
     "output_device": (_validate_audio_device, False),
     "release_audio_when_idle": (_validate_bool, False),
     "talk_permit_tone": (_validate_bool, True),
+    "log_level": (validate_log_level, True),
 }
 
 

@@ -19,12 +19,12 @@ import logging
 import os
 import signal
 import sys
-from logging.handlers import RotatingFileHandler
 
 import ifaddr
 
 from outpost.config import load_config, OutpostConfig
 from outpost.client import OutpostClient
+from outpost import logsetup
 from outpost.ptt import NullPTT, PTTSource
 
 
@@ -90,44 +90,10 @@ def parse_args() -> argparse.Namespace:
 def configure_logging(verbose: bool, config: OutpostConfig, log_file_override: str | None) -> None:
     """Console output is controlled by -v/--verbose. log_file (if set, via
     config or --log-file) also keeps a size-rotated file at log_level
-    ("info", or "debug" for every detail) regardless of console verbosity.
-
-    Kept light on disk writes (SD cards wear out): run as a systemd service
-    with a log file, the console - which goes into the system journal -
-    only gets warnings, since the file already has the rest; and the web
-    UI's request log (a line per page refresh) is left out unless -v."""
+    ("info", "debug" for every detail, or "off"), which the web UI's
+    Settings page can change live - see outpost/logsetup.py."""
     log_file = log_file_override if log_file_override is not None else config.log_file
-    file_level = logging.DEBUG if config.log_level == "debug" else logging.INFO
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-    console_handler = logging.StreamHandler()
-    if verbose:
-        console_level = logging.DEBUG
-    elif log_file and os.environ.get("JOURNAL_STREAM"):
-        console_level = logging.WARNING   # a service: the file has the rest
-    else:
-        console_level = logging.INFO
-    console_handler.setLevel(console_level)
-    console_handler.setFormatter(formatter)
-
-    root = logging.getLogger()
-    # The root logger has to pass everything any handler wants (logger-level
-    # filtering happens before handler-level filtering).
-    root.setLevel(min(console_level, file_level) if log_file else console_level)
-    root.addHandler(console_handler)
-    if not verbose:
-        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-
-    if log_file:
-        log_dir = os.path.dirname(log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_file, maxBytes=config.log_max_bytes, backupCount=config.log_backup_count,
-        )
-        file_handler.setLevel(file_level)
-        file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
+    logsetup.setup(verbose, log_file, config.log_level, config.log_max_bytes, config.log_backup_count)
 
 
 async def main() -> None:

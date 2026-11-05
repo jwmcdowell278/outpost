@@ -387,10 +387,13 @@ out, and constant small writes are what kills them):
 - the system log is kept in RAM (48 MB at most) - logs from before a
   reboot are lost;
 - swap goes to compressed RAM (zram) instead of a swap file on the card;
-- Outpost's own log file gets what happened, not every detail
-  (`log_level: info`; set `log_level: debug` in its config while chasing a
-  problem), and its console output - which goes into the system log - is
-  only warnings when it runs as a service.
+- Outpost's own log file gets what happened, not every detail. The web
+  UI's Settings page (Logging -> Log file) switches it Off, Normal or
+  Detailed straight away - Detailed while chasing a problem (it writes much
+  more). In the config that's `log_level: off|info|debug`. When it runs as
+  a service with a log file, its console output - which goes into the
+  system log - is only warnings; with the file off, normal messages go to
+  the system log instead.
 
 On piserver this cut writes to the card from about 6 GB a day to under
 1 GB (most of the rest is Pi-hole and Docker). `--no-sd-protect` skips it;

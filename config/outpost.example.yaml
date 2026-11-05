@@ -237,7 +237,8 @@ duck_monitored_channels: true
 # log_file: /var/log/outpost/outpost.log
 # log_max_bytes: 10000000   # 10MB per file
 # log_backup_count: 5       # keep 5 rolled-over files (~60MB total at defaults)
-# log_level: info           # or debug: every detail (writes far more - wears SD cards)
+# log_level: info           # off, info, or debug: every detail (writes far more -
+#                           # wears SD cards). Also on the web UI's Settings page.
 
 # Lightweight local web UI (view status, switch channels, web-based PTT) -
 # off by default. Requires the 'web' extra: pip install -e ".[web]".
