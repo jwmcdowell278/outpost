@@ -88,25 +88,35 @@ def parse_args() -> argparse.Namespace:
 
 
 def configure_logging(verbose: bool, config: OutpostConfig, log_file_override: str | None) -> None:
-    """Console output is controlled by -v/--verbose as before. log_file (if
-    set, via config or --log-file) additionally archives full DEBUG-level
-    detail to a size-rotated file regardless of console verbosity, so
-    diagnosing an intermittent issue after the fact doesn't depend on having
-    had --verbose on at the time it happened."""
+    """Console output is controlled by -v/--verbose. log_file (if set, via
+    config or --log-file) also keeps a size-rotated file at log_level
+    ("info", or "debug" for every detail) regardless of console verbosity.
+
+    Kept light on disk writes (SD cards wear out): run as a systemd service
+    with a log file, the console - which goes into the system journal -
+    only gets warnings, since the file already has the rest; and the web
+    UI's request log (a line per page refresh) is left out unless -v."""
     log_file = log_file_override if log_file_override is not None else config.log_file
+    file_level = logging.DEBUG if config.log_level == "debug" else logging.INFO
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    if verbose:
+        console_level = logging.DEBUG
+    elif log_file and os.environ.get("JOURNAL_STREAM"):
+        console_level = logging.WARNING   # a service: the file has the rest
+    else:
+        console_level = logging.INFO
+    console_handler.setLevel(console_level)
     console_handler.setFormatter(formatter)
 
     root = logging.getLogger()
-    # Only elevate the root logger itself to DEBUG when file logging is on
-    # (needed so DEBUG records reach the file handler at all - logger-level
-    # filtering happens before handler-level filtering) - otherwise behavior
-    # is unchanged from before this feature existed.
-    root.setLevel(logging.DEBUG if (verbose or log_file) else logging.INFO)
+    # The root logger has to pass everything any handler wants (logger-level
+    # filtering happens before handler-level filtering).
+    root.setLevel(min(console_level, file_level) if log_file else console_level)
     root.addHandler(console_handler)
+    if not verbose:
+        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     if log_file:
         log_dir = os.path.dirname(log_file)
@@ -115,7 +125,7 @@ def configure_logging(verbose: bool, config: OutpostConfig, log_file_override: s
         file_handler = RotatingFileHandler(
             log_file, maxBytes=config.log_max_bytes, backupCount=config.log_backup_count,
         )
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(file_level)
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
 

@@ -45,6 +45,8 @@
 #
 #   --usb-bluetooth    Raspberry Pi: turn off the built-in Bluetooth so a USB
 #                      adapter is used (recommended on a Pi 3 with a headset)
+#   --no-sd-protect    Raspberry Pi: leave the system log and swap on the SD
+#                      card (by default both go to RAM, to spare the card)
 #   --reboot           reboot when done (needed after the first install)
 #
 # The machine needs internet access during the install and sudo (without a
@@ -61,7 +63,7 @@ fi
 on_target() {  # run a shell snippet on the machine being set up
     if [ "$LOCAL" = 1 ]; then bash -c "$1"; else ssh "$HOST" "$1"; fi
 }
-CONFIG=; ENV_FILE=; MESH_ENV=; NAME=; USB_BT=0; HALOW=auto; REBOOT=0
+CONFIG=; ENV_FILE=; MESH_ENV=; NAME=; USB_BT=0; HALOW=auto; REBOOT=0; SD_PROTECT=1
 MESH_WIFI=; MESH_ETH=; FORCE_MESH=0; MESH_SELECT=0; WIFI_SETUP=0; NET_SETUP=0; AUTOSTART=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -78,6 +80,7 @@ while [ $# -gt 0 ]; do
         --net-setup) NET_SETUP=1 ;;
         --force-mesh) FORCE_MESH=1 ;;
         --usb-bluetooth) USB_BT=1 ;;
+        --no-sd-protect) SD_PROTECT=0 ;;
         --reboot) REBOOT=1 ;;
         -h|--help) usage ;;
         *) echo "unknown option $1" >&2; usage ;;
@@ -173,6 +176,7 @@ echo "== packing Outpost"
 cp "$HERE/setup-outpost.sh" "$HERE/remote-run.sh" "$D/"
 cp "$HERE/lib/pkg.sh" "$D/lib/"
 cp "$HERE/wifi/outpost-wifi" "$D/wifi/"
+mkdir -p "$D/sd" && cp "$HERE/sd/sd-protect.sh" "$D/sd/"
 mkdir -p "$D/bt" && cp "$HERE"/bt/outpost-bt-watchdog "$HERE"/bt/outpost-bt-watchdog.service "$HERE"/bt/outpost-bt-watchdog.timer "$D/bt/"
 cp "$HERE"/net/outpost-net "$HERE"/net/outpost-net*.service "$HERE"/net/outpost-net-route.timer "$HERE"/net/setup-net.sh "$D/net/"
 cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.env" "$HERE/mesh/setup-mesh.sh" "$D/mesh/"
@@ -182,6 +186,7 @@ cp "$HERE/mesh/outpost-mesh" "$HERE/mesh/outpost-mesh.service" "$HERE/mesh/mesh.
 {
     printf 'HALOW=%q\nMESH_ASKED=%q\nMESH_WIFI=%q\nMESH_ETH=%q\n' "$HALOW" "$MESH_ASKED" "$MESH_WIFI" "$MESH_ETH"
     printf 'FORCE_MESH=%q\nMESH_SELECT=%q\nNODE_NAME=%q\nUSB_BT=%q\n' "$FORCE_MESH" "$MESH_SELECT" "$NAME" "$USB_BT"
+    printf 'SD_PROTECT=%q\n' "$SD_PROTECT"
     printf 'WIFI_SETUP=%q\nNET_SETUP=%q\nAUTOSTART=%q\n' "$WIFI_SETUP" "$NET_SETUP" "$AUTOSTART"
     # Installing on this machine from its own ~/outpost git clone: use the
     # code where it is (setup-outpost.sh checks).

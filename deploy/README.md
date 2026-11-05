@@ -379,6 +379,24 @@ your checkout's code over it - `git status` there shows the difference.)
 ./deploy/install-node.sh john@<node>
 ```
 
+## SD card
+
+On a Raspberry Pi the install keeps writes to the SD card down (cards wear
+out, and constant small writes are what kills them):
+
+- the system log is kept in RAM (48 MB at most) - logs from before a
+  reboot are lost;
+- swap goes to compressed RAM (zram) instead of a swap file on the card;
+- Outpost's own log file gets what happened, not every detail
+  (`log_level: info`; set `log_level: debug` in its config while chasing a
+  problem), and its console output - which goes into the system log - is
+  only warnings when it runs as a service.
+
+On piserver this cut writes to the card from about 6 GB a day to under
+1 GB (most of the rest is Pi-hole and Docker). `--no-sd-protect` skips it;
+`sudo bash deploy/sd/sd-protect.sh undo` puts the system log and swap back.
+For nodes left out in the field, use a "high endurance" SD card too.
+
 ## Watchdogs
 
 - **HaLow:** `halow-mesh-watchdog.timer` reloads the driver if the radio

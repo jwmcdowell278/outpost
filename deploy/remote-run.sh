@@ -18,6 +18,11 @@ fi
 NODE_NAME="$NODE_NAME" USB_BT="$USB_BT" AUTOSTART="$AUTOSTART" SOURCE_DIR="${SOURCE_DIR:-}" \
     bash "$D/setup-outpost.sh" "$D"
 
+# Raspberry Pi: spare the SD card (system log and swap in RAM).
+if [ "${SD_PROTECT:-1}" = 1 ] && tr -d '\0' 2>/dev/null < /proc/device-tree/model | grep -q "Raspberry Pi"; then
+    sudo bash "$D/sd/sd-protect.sh" || echo "!! SD card settings failed (see above) - the rest of the install carries on"
+fi
+
 # Forwarding and NAT gateways.
 sudo bash "$D/net/setup-net.sh" "$D" || echo "!! outpost-net setup failed (see above) - the rest of the install carries on"
 if [ "$NET_SETUP" = 1 ]; then sudo env TERM="${TERM:-dumb}" /usr/local/sbin/outpost-net || true; fi

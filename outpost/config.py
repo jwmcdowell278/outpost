@@ -320,6 +320,10 @@ class OutpostConfig:
     log_file: str | None = None
     log_max_bytes: int = 10_000_000
     log_backup_count: int = 5
+    # How much goes into log_file: "info" (default - what happened) or
+    # "debug" (every detail, for chasing a problem; writes far more, which
+    # wears an SD card).
+    log_level: str = "info"
 
     def channel_by_name(self, name: str) -> Channel:
         for ch in self.channels.values():
@@ -467,6 +471,17 @@ def load_button_bindings(raw_value) -> list[ButtonBinding]:
             raise ValueError("button_bindings: 'device' must be a device name")
         bindings.append(ButtonBinding(key=key, action=action, device=device or None))
     return bindings
+
+
+LOG_LEVELS = ("info", "debug")
+
+
+def validate_log_level(v) -> str:
+    if v is None:
+        return "info"
+    if not isinstance(v, str) or v.lower() not in LOG_LEVELS:
+        raise ValueError(f"log_level must be one of: {', '.join(LOG_LEVELS)}")
+    return v.lower()
 
 
 def validate_ptt_key(v) -> str | None:
@@ -688,6 +703,7 @@ def validate_config_yaml(text: str) -> None:
             raise ValueError("each peers entry needs host and port")
     load_button_bindings(raw.get("button_bindings"))
     validate_ptt_key(raw.get("ptt_key"))
+    validate_log_level(raw.get("log_level"))
 
 
 def write_config_text(path: str, text: str) -> None:
@@ -857,6 +873,7 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         log_file=raw.get("log_file"),
         log_max_bytes=raw.get("log_max_bytes", 10_000_000),
         log_backup_count=raw.get("log_backup_count", 5),
+        log_level=validate_log_level(raw.get("log_level")),
         enable_web_ui=raw.get("enable_web_ui", False),
         web_ui_host=raw.get("web_ui_host", "127.0.0.1"),
         web_ui_port=raw.get("web_ui_port", 8765),
