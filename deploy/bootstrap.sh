@@ -72,36 +72,66 @@ choose() {  # choose PROMPT TAG LABEL [TAG LABEL...] -> TAG
 
 # ------------------------------------------------- joining an existing mesh
 
-# Copy a root-only file from an existing node: sudo without a password if it
-# can (the Raspberry Pi OS default), else with a password prompt over SSH.
-fetch_root_file() {  # fetch_root_file HOST REMOTE-PATH LOCAL-PATH
-    local host=$1 path=$2 dest=$3
-    ssh -o ConnectTimeout=10 "$host" "test -f $path" 2>/dev/null || return 1
+# All SSH to the existing node goes over one shared connection (OpenSSH
+# connection sharing), so its password is asked for once, not per command.
+SSH_SHARE=()
+
+ssh_open() {  # ssh_open HOST DIR - log in once; later ssh/scp reuse it
+    SSH_SHARE=(-o ControlPath="$2/ssh.sock" -o ControlMaster=no)
+    ssh -o ConnectTimeout=10 -o ControlMaster=yes -o ControlPath="$2/ssh.sock" \
+        -o ControlPersist=yes -fN "$1"
+}
+
+ssh_close() {  # ssh_close HOST
+    ssh "${SSH_SHARE[@]}" -O exit "$1" 2>/dev/null
+    SSH_SHARE=()
+}
+
+# Copy the root-only mesh settings from an existing node into DIR: with sudo
+# without a password if it can (the Raspberry Pi OS default), else with one
+# sudo password prompt for all of them.
+fetch_root_files() {  # fetch_root_files HOST DIR
+    local host=$1 dir=$2 f name files=() need=()
+    for f in $(ssh "${SSH_SHARE[@]}" "$host" 'for f in /etc/halow-mesh/halow.env /etc/outpost-mesh/mesh.env; do [ -f "$f" ] && echo "$f"; done'); do
+        files+=("$f")
+    done
     ( umask 077
-      if ssh "$host" "sudo -n cat $path" > "$dest" 2>/dev/null && [ -s "$dest" ]; then exit 0; fi
-      ssh -t "$host" "sudo install -m 600 -o \$(id -un) $path /tmp/outpost-share.\$\$ && mv /tmp/outpost-share.\$\$ /tmp/outpost-share" &&
-          scp -q "$host:/tmp/outpost-share" "$dest" && ssh "$host" "rm -f /tmp/outpost-share" )
+      for f in "${files[@]}"; do
+          name=$(basename "$f")
+          ssh "${SSH_SHARE[@]}" "$host" "sudo -n cat $f" > "$dir/$name" 2>/dev/null && [ -s "$dir/$name" ] || need+=("$f")
+      done
+      [ ${#need[@]} -eq 0 ] && exit 0
+      ssh "${SSH_SHARE[@]}" -t "$host" "set -e; rm -rf /tmp/outpost-share; mkdir -m 700 /tmp/outpost-share
+          sudo cp ${need[*]} /tmp/outpost-share/; sudo chown -R \$(id -un) /tmp/outpost-share" || true
+      for f in "${need[@]}"; do
+          name=$(basename "$f")
+          scp "${SSH_SHARE[@]}" -q "$host:/tmp/outpost-share/$name" "$dir/$name" || rm -f "$dir/$name"
+      done
+      ssh "${SSH_SHARE[@]}" "$host" "rm -rf /tmp/outpost-share" )
 }
 
 fetch_from_node() {  # fetch_from_node HOST DIR - fills DIR with what was found
-    local host=$1 dir=$2
+    local host=$1 dir=$2 ok=0
     echo "== copying the mesh's keys and settings from $host"
-    echo "   (you may be asked for $host's password, and to trust its key)"
-    if ! ( umask 077; scp -q -o ConnectTimeout=10 "$host:outpost/config/outpost.yaml" "$dir/outpost.yaml" ); then
-        echo "!! couldn't copy ~/outpost/config/outpost.yaml from $host" >&2
+    echo "   (you may be asked for $host's password once, and to trust its key)"
+    rm -f "$dir/outpost.yaml" "$dir/halow.env" "$dir/mesh.env"
+    if ! ssh_open "$host" "$dir"; then
+        echo "!! couldn't connect to $host" >&2
         return 1
     fi
-    echo "   Outpost config: copied"
-    if fetch_root_file "$host" /etc/halow-mesh/halow.env "$dir/halow.env"; then
-        echo "   HaLow mesh settings: copied"
+    if ( umask 077; scp "${SSH_SHARE[@]}" -q "$host:outpost/config/outpost.yaml" "$dir/outpost.yaml" ); then
+        echo "   Outpost config: copied"
+        fetch_root_files "$host" "$dir"
+        if [ -s "$dir/halow.env" ]; then echo "   HaLow mesh settings: copied"
+        else rm -f "$dir/halow.env"; echo "   HaLow mesh settings: none on $host"; fi
+        if [ -s "$dir/mesh.env" ]; then echo "   Wi-Fi mesh settings: copied"
+        else rm -f "$dir/mesh.env"; echo "   Wi-Fi mesh settings: none on $host"; fi
+        ok=1
     else
-        rm -f "$dir/halow.env"; echo "   HaLow mesh settings: none on $host"
+        echo "!! couldn't copy ~/outpost/config/outpost.yaml from $host" >&2
     fi
-    if fetch_root_file "$host" /etc/outpost-mesh/mesh.env "$dir/mesh.env"; then
-        echo "   Wi-Fi mesh settings: copied"
-    else
-        rm -f "$dir/mesh.env"; echo "   Wi-Fi mesh settings: none on $host"
-    fi
+    ssh_close "$host"
+    [ "$ok" = 1 ]
 }
 
 # --------------------------------------------------------------- the wizard
