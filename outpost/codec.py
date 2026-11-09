@@ -7,6 +7,17 @@ bandwidth.
 """
 from __future__ import annotations
 import logging
+import os
+import sys
+
+if sys.platform == "win32":
+    # Windows has no system libopus: deploy/windows/setup.ps1 puts opus.dll
+    # next to the virtual environment's python.exe. opuslib looks for it on
+    # PATH, so make sure that folder is there even if the venv isn't activated.
+    _exe_dir = os.path.dirname(sys.executable)
+    if _exe_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = _exe_dir + os.pathsep + os.environ.get("PATH", "")
+
 import opuslib
 import opuslib.api.encoder
 

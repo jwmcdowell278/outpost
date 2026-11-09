@@ -979,6 +979,29 @@ Run the tests:
 pytest tests/ -v
 ```
 
+### Windows (the app only)
+
+A Windows PC can run the Outpost app and talk on the mesh's channels, but
+it can't be a mesh node (no batman-adv, HaLow or the network tools), and
+the Bluetooth and Buttons pages aren't available - pair headsets in
+Windows' own Bluetooth settings. The push-to-talk key is still picked on the
+web UI's Buttons page.
+
+Install 64-bit Python 3.10-3.13 from python.org, get this repo (git clone or
+the GitHub zip), then in PowerShell in its folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\setup.ps1 -FromNode pi@192.168.1.20
+deploy\windows\run-outpost.cmd
+```
+
+`setup.ps1` makes `.venv`, installs Outpost with the web UI, adds the Opus
+codec (`opus.dll`, taken from the PyOgg package on PyPI) and, with
+`-FromNode`, copies the mesh's `config/outpost.yaml` from that node. Without
+`-FromNode` it starts you off with the example config. Allow Python through
+Windows Firewall on private networks when asked, or other nodes can't be
+heard.
+
 ## Running a client
 
 1. Copy `config/outpost.example.yaml` to `config/outpost.yaml`.

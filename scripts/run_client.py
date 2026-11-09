@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 
 import ifaddr
@@ -142,8 +143,13 @@ async def main() -> None:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
+    except NotImplementedError:
+        # Windows: no asyncio signal handlers. Ctrl+C cancels main() instead,
+        # which still runs the cleanup below.
+        pass
 
     try:
         await asyncio.wait(
@@ -156,8 +162,15 @@ async def main() -> None:
 
     if client.restart_requested.is_set():
         print("Restarting...")
+        if sys.platform == "win32":
+            # execv on Windows starts a separate process and returns to the
+            # prompt, so run the new copy as a child and wait for it instead.
+            raise SystemExit(subprocess.call([sys.executable] + sys.argv))
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
