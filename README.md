@@ -21,6 +21,18 @@ update it with `~/outpost/deploy/update.sh` (or `git pull` there). To join an ex
 a node you name. For options, scripted installs and installing from another
 computer over SSH, see [deploy/README.md](deploy/README.md).
 
+On Windows (the app only - it can't be a mesh node), install 64-bit Python
+3.10-3.13 from python.org, then in PowerShell:
+
+```powershell
+cd $HOME; iwr https://github.com/jwmcdowell278/outpost/archive/refs/heads/main.zip -OutFile outpost.zip -UseBasicParsing; Expand-Archive outpost.zip . -Force; rm outpost.zip; cd outpost-main; powershell -ExecutionPolicy Bypass -File deploy\windows\setup.ps1
+```
+
+That puts Outpost in `~\outpost-main`; start it with
+`deploy\windows\run-outpost.cmd`. Running the same command again updates it.
+See [Windows (the app only)](#windows-the-app-only) for copying a mesh's
+config from a node.
+
 ## Design
 
 ```mermaid
@@ -987,8 +999,9 @@ the Bluetooth and Buttons pages aren't available - pair headsets in
 Windows' own Bluetooth settings. The push-to-talk key is still picked on the
 web UI's Buttons page.
 
-Install 64-bit Python 3.10-3.13 from python.org, get this repo (git clone or
-the GitHub zip), then in PowerShell in its folder:
+Install 64-bit Python 3.10-3.13 from python.org, get this repo (git clone,
+the GitHub zip, or the one-line command under [Install](#install)), then in
+PowerShell in its folder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\windows\setup.ps1 -FromNode pi@192.168.1.20
