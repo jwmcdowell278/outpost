@@ -29,6 +29,8 @@ from .bt_audio import HeadsetAudio, HeadsetAudioError, NoHandsFreeError
 from .keys import BROWSER_CODES, PTT_KEYS, key_label
 from .crypto import generate_channel_key, KEY_SIZE
 from .config import (
+    MAX_CHANNEL_ID,
+    validate_channel_id,
     EDITABLE_FIELDS,
     editable_config_values,
     save_config_fields,
@@ -349,7 +351,9 @@ async function refresh() {{
       `sender_id ${{s.sender_id}}${{s.sender_alias ? ' (' + s.sender_alias + ')' : ''}} · AGC ${{s.agc_enabled ? 'on' : 'off'}} · HPF ${{s.highpass_enabled ? 'on' : 'off'}} · squelch ${{s.squelch_enabled ? 'on' : 'off'}} · relay ${{s.relay_only ? 'only' : (s.relay_enabled ? 'on' : 'off')}}${{s.bridge_role ? ' (' + s.bridge_role + ' bridge)' : ''}}` +
       (s.tx_lockout_enabled ? ` · lockout ${{s.channel_busy ? 'BUSY' : 'on'}}` : '') +
       (s.multicast.enabled ? ` · multicast: ${{s.multicast.site_listeners}} on this site` +
-        (s.multicast.active_channel_uses_multicast ? ' (in use)' : ' (unicast - below threshold)') : '');
+        (s.multicast.active_channel_uses_multicast ? ' (in use)' : ' (unicast - below threshold)') : '') +
+      (s.gateways || []).map(g => ` · gateway ${{g.name}}: channels ${{g.channels.join(', ')}}` +
+        (g.routed_channels.length ? ` (members across on ${{g.routed_channels.join(', ')}})` : ' (no members across yet)')).join('');
 
     const speakingLine = document.getElementById('speakingLine');
     speakingLine.textContent = s.speaking.length
@@ -715,11 +719,12 @@ _CHANNELS_HTML = f"""<!doctype html>
   <h2>New channel</h2>
   <div class="row">
     <input id="newName" type="text" size="16" placeholder="name">
+    <input id="newId" type="number" min="1" max="255" style="width:7em" placeholder="id (optional)">
     <input id="newKey" type="text" size="40" placeholder="key (base64, optional - leave blank to generate one)">
     <button id="genNewKey" type="button">Generate key</button>
     <button id="createChannel">Create</button>
   </div>
-  <div class="muted">Creating a channel takes effect immediately on this node - no restart needed. Copy the resulting key into every other peer's config that should be able to join it.</div>
+  <div class="muted">Creating a channel takes effect immediately on this node - no restart needed. Copy the resulting key into every other peer's config that should be able to join it. To join a channel that already exists elsewhere - another node's, or one shared with another mesh - enter its id and key exactly as they have them: both must match.</div>
 </div>
 
 <script>
@@ -800,14 +805,16 @@ document.getElementById('genNewKey').addEventListener('click', () => {{
 document.getElementById('createChannel').addEventListener('click', async () => {{
   const name = document.getElementById('newName').value.trim();
   const key = document.getElementById('newKey').value.trim();
+  const idText = document.getElementById('newId').value.trim();
   const msg = document.getElementById('channelsMsg');
   if (!name) {{ msg.className = 'error'; msg.textContent = 'name is required'; return; }}
   try {{
     const result = await api('/api/channels', {{
       method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify(key ? {{ name, key }} : {{ name }}),
+      body: JSON.stringify(Object.assign({{ name }}, key ? {{ key }} : {{}}, idText ? {{ id: Number(idText) }} : {{}})),
     }});
     document.getElementById('newName').value = '';
+    document.getElementById('newId').value = '';
     document.getElementById('newKey').value = '';
     msg.className = ''; msg.textContent = '';
     document.getElementById('newChannelCard').after(newKeyBanner(result.id, `#${{result.id}} ${{result.name}} key`, result.key));
@@ -1706,6 +1713,7 @@ class WebUI:
             # "active"/"standby" for a site bridge (see README "Redundant
             # bridges"), else None.
             "bridge_role": c.bridge_role(),
+            "gateways": c.gateway_status(),
             "highpass_enabled": c.highpass_enabled,
             "squelch_enabled": c.squelch_enabled,
             "squelch_threshold_rms": c.squelch.threshold_rms,
@@ -1811,7 +1819,25 @@ class WebUI:
         else:
             key = generate_channel_key()
 
-        new_id = max((ch.id for ch in self.client.config.channels.values()), default=0) + 1
+        raw_id = data.get("id")
+        if raw_id not in (None, ""):
+            # Joining a channel another node (or another mesh) already uses:
+            # the id has to match theirs, not just the key.
+            try:
+                new_id = validate_channel_id(int(raw_id) if isinstance(raw_id, str) else raw_id)
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc))
+            if new_id in self.client.config.channels:
+                raise web.HTTPBadRequest(
+                    text=f"channel id {new_id} is already used by "
+                         f"{self.client.config.channels[new_id].name!r}")
+        else:
+            used = set(self.client.config.channels)
+            free = [i for i in range(max(used, default=0) + 1, MAX_CHANNEL_ID + 1)] or \
+                   [i for i in range(1, MAX_CHANNEL_ID + 1) if i not in used]
+            if not free:
+                raise web.HTTPBadRequest(text=f"all {MAX_CHANNEL_ID} channel ids are in use")
+            new_id = free[0]
         add_channel_to_file(self.client.config_path, new_id, name, key)
         self.client.add_channel(new_id, name, key)
         return web.json_response({"id": new_id, "name": name, "key": base64.b64encode(key).decode()})

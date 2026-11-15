@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import socket
 import threading
 import time
 from typing import NamedTuple
@@ -39,7 +40,7 @@ from .replay import ReplayWindow
 from .protocol import audio_pad_size, pad_audio, unpad_audio, TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, TYPE_BRIDGE_HELLO, encode_packet
 from .subnet_scan import SubnetScanner
 from .transport import MeshTransport
-from .config import OutpostConfig, Channel, Peer
+from .config import OutpostConfig, Channel, GatewayLink, Peer
 from .webui import WebUI
 from zeroconf._exceptions import EventLoopBlocked
 
@@ -90,6 +91,9 @@ _PERMIT_TONE_AMPLITUDE = 7000
 # after its last AUDIO/START frame with no STOP seen - a fallback for a lost
 # STOP packet, well above normal frame/announce cadence.
 _SPEAKING_STALE_S = 2.0
+# How often gateway hostnames (see OutpostConfig.gateways) are looked up again.
+_GATEWAY_RESOLVE_S = 300.0
+_RELAYED_TYPES = (TYPE_AUDIO, TYPE_START, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE)
 
 
 def _make_tone_frames(frame_size: int, sample_rate: int, freq_hz: float, duration_ms: float, amplitude: int) -> list[bytes]:
@@ -218,6 +222,9 @@ class OutpostClient:
             if active_channel_name is None:
                 raise ValueError("an active channel is required unless relay_only is set")
             self.active_channel = config.channel_by_name(active_channel_name)
+        if config.gateways and not config.enable_relay:
+            config = replace(config, enable_relay=True)  # a gateway forwards like a relay
+            self.config = config
         self.noise_suppressor = noise_suppressor or PassthroughSuppressor()
         # Always construct the AGC object (cheap, pure DSP) and gate its use
         # with a separate mutable flag, rather than leaving self.agc None
@@ -429,6 +436,32 @@ class OutpostClient:
         # Settable live from the web UI - see the enable_relay property.
         self._enable_relay = config.enable_relay
 
+        # Gateway links to other meshes - see "gateways" below.
+        # (host, port) -> the link it belongs to, for each gateway peer's
+        # current address (hostnames are looked up by _gateway_resolve_loop).
+        self._gateway_addrs: dict[tuple[str, int], GatewayLink] = {}
+        self._gateway_resolved: dict[tuple[str, Peer], list[tuple[str, int]]] = {}
+        for link in config.gateways:
+            for peer in link.peers:
+                try:
+                    ipaddress.IPv4Address(peer.host)
+                except ValueError:
+                    continue  # a hostname - looked up once the loop runs
+                self._gateway_resolved[(link.name, peer)] = [(peer.host, peer.port)]
+        self._rebuild_gateway_addrs()
+        # channel_id -> {gateway address: last seen}: other-mesh gateways that
+        # announces for that channel arrived from first - see _forward_to_gateways.
+        self._gateway_routes: dict[int, dict[tuple[str, int], float]] = {}
+        # sender_id -> (link name, last seen): senders whose traffic arrived
+        # over a gateway link, so their packets aren't sent back over it.
+        self._foreign_senders: dict[int, tuple[str, float]] = {}
+        # (mesh neighbour, link name) -> last seen: neighbours in this mesh
+        # that are gateways to the same other mesh as that link (they pass
+        # its members' announces into this mesh) - see _relay_packet.
+        self._co_gateways: dict[tuple[tuple[str, int], str], float] = {}
+        self._gateway_counts: dict[str, list[int]] = {link.name: [0, 0, 0] for link in config.gateways}
+        self._gateway_task: asyncio.Task | None = None
+
         # Soft half-duplex lockout (see OutpostConfig.enable_tx_lockout) -
         # same always-construct/mutable-flag pattern as AGC/relay above.
         self.enable_tx_lockout = config.enable_tx_lockout
@@ -612,6 +645,8 @@ class OutpostClient:
     def enable_relay(self, value: bool) -> None:
         if self.relay_only and not value:
             raise ValueError("relay can't be turned off on a relay-only node")
+        if self.config.gateways and not value:
+            raise ValueError("relay can't be turned off on a gateway node (remove its gateways: first)")
         # Relays join extra multicast groups (see _update_groups).
         self._enable_relay = value
         self._update_groups()
@@ -808,6 +843,12 @@ class OutpostClient:
                          ", ".join(str(n) for n in self._site_networks), self.config.bridge_priority)
             else:
                 log.info("relaying as a plain transit relay (no site configured)")
+        for link in self.config.gateways:
+            log.info("gateway %r: channels %s cross to/from %s", link.name,
+                     ", ".join(str(c) for c in sorted(link.channels)),
+                     ", ".join(f"{p.host}:{p.port}" for p in link.peers))
+        if self.config.gateways:
+            self._gateway_task = asyncio.create_task(self._gateway_resolve_loop())
         if self.discovery:
             try:
                 # PeerDiscovery.start() blocks on zeroconf's own internal
@@ -966,6 +1007,9 @@ class OutpostClient:
         if self._bridge_hello_task:
             self._bridge_hello_task.cancel()
             self._bridge_hello_task = None
+        if self._gateway_task:
+            self._gateway_task.cancel()
+            self._gateway_task = None
         if self.web_ui:
             await self.web_ui.stop()
         if self.buttons:
@@ -1204,6 +1248,9 @@ class OutpostClient:
         """
         source = (addr[0], addr[1])
         known_source = self.transport.is_known_address(*source)
+        if self._gateway_addrs and header.ptype == TYPE_CHANNEL_ANNOUNCE:
+            # Before the duplicate check: a second copy is evidence too.
+            self._note_co_gateway(header, source)
         if via_multicast and known_source:
             self._relay_mcast_heard[source] = time.monotonic()
         if header.ptype == TYPE_CHANNEL_ANNOUNCE and known_source:
@@ -1214,21 +1261,32 @@ class OutpostClient:
             if new_channel:
                 self._update_groups()  # start carrying this channel's site multicast
 
-        dedup_key = (header.sender_id, header.ptype)
-        last_fwd = self._relay_seen.get(dedup_key)
-        if last_fwd is not None and header.seq <= last_fwd:
+        if not self._relay_first_copy(header):
             return  # already forwarded this or an older/duplicate packet
-        if len(self._relay_seen) > self._RELAY_SEEN_MAX:
-            self._relay_seen.clear()  # safety valve - sender_id is spoofable, don't grow unbounded
-        self._relay_seen[dedup_key] = header.seq
 
         packet = encode_packet(header, ciphertext)
         if self.is_bridge and header.ptype == TYPE_CHANNEL_ANNOUNCE and known_source \
                 and self._is_site_local(source[0]) and source not in self._site_bridge_addresses():
             self._cache_announce(header, packet, source, via_multicast)
         self._forward(header, packet, source, via_multicast)
+        if self._gateway_addrs:
+            self._forward_to_gateways(header, packet, exclude_links=self._links_already_crossed(header, source))
 
-    def _forward(self, header, packet: bytes, source, via_multicast: bool) -> None:
+    def _relay_first_copy(self, header) -> bool:
+        """Loop/duplicate guard shared by relaying and gateways: True the
+        first time a (sender_id, ptype, seq) is seen, False for repeats or
+        anything older."""
+        dedup_key = (header.sender_id, header.ptype)
+        last_fwd = self._relay_seen.get(dedup_key)
+        if last_fwd is not None and header.seq <= last_fwd:
+            return False
+        if len(self._relay_seen) > self._RELAY_SEEN_MAX:
+            self._relay_seen.clear()  # safety valve - sender_id is spoofable, don't grow unbounded
+        self._relay_seen[dedup_key] = header.seq
+        return True
+
+    def _forward(self, header, packet: bytes, source, via_multicast: bool,
+                 flood_if_unknown: bool = True) -> None:
         """Send a relayed packet on to every neighbour that leads to the
         channel's members, except those that already have it:
           - the neighbour it came from,
@@ -1248,7 +1306,7 @@ class OutpostClient:
             # channel membership are learned in the first place.
             targets = [p for p in self.transport.peers if (p.host, p.port) != source]
         else:
-            targets = self._relay_targets(header.channel_id, source)
+            targets = self._relay_targets(header.channel_id, source, flood_if_unknown)
         reached = self._reached_by(source)
         targets = [p for p in _unique(targets)
                    if not ((p.host, p.port) in reached and source in self._reached_by((p.host, p.port)))]
@@ -1576,7 +1634,8 @@ class OutpostClient:
             "and restart it.", addr[0], addr[1], self.config.sender_id,
             self.config_path or "<config>")
 
-    def _relay_targets(self, channel_id: int, source: tuple[str, int]) -> list[Peer]:
+    def _relay_targets(self, channel_id: int, source: tuple[str, int],
+                       flood_if_unknown: bool = True) -> list[Peer]:
         """Where a relay forwards AUDIO/START/STOP for `channel_id`: only
         neighbours that channel's announces have recently arrived from,
         i.e. those that lead to at least one member - possibly via further
@@ -1593,14 +1652,145 @@ class OutpostClient:
             del routes[address]
         known = {(p.host, p.port): p for p in self.transport.peers}
         targets = [known[a] for a in routes if a != source and a in known]
-        if routes:
+        if routes or not flood_if_unknown:
             return targets  # may be empty: the only route leads back to the sender
         return [p for a, p in known.items() if a != source]
 
     def _note_multicast(self, header, addr) -> None:
         self._mcast_heard[header.sender_id] = ((addr[0], addr[1]), time.monotonic())
 
+    # --- gateways to other meshes -----------------------------------------
+    #
+    # A gateway link (OutpostConfig.gateways) connects this mesh to another
+    # one that has its own mesh_key. Only the link's channels cross, both
+    # ways; nothing else does - no other channel, no peer exchange, no
+    # fallback flooding before a route is known. Gateway peers are kept out
+    # of the transport's peer list, so this mesh's nodes never learn their
+    # addresses. Like any relay, a gateway needs no channel keys.
+
+    def _rebuild_gateway_addrs(self) -> None:
+        links = {link.name: link for link in self.config.gateways}
+        self._gateway_addrs = {addr: links[name]
+                               for (name, _peer), addrs in self._gateway_resolved.items()
+                               for addr in addrs}
+
+    async def _resolve_gateways(self) -> None:
+        loop = asyncio.get_running_loop()
+        for link in self.config.gateways:
+            for peer in link.peers:
+                try:
+                    infos = await loop.getaddrinfo(peer.host, peer.port, family=socket.AF_INET,
+                                                   type=socket.SOCK_DGRAM)
+                except OSError as exc:
+                    # Keep the last good address, if any.
+                    log.warning("gateway %r: can't look up %s (%s)", link.name, peer.host, exc)
+                    continue
+                addrs = sorted({(info[4][0], peer.port) for info in infos})
+                if addrs != self._gateway_resolved.get((link.name, peer)):
+                    log.info("gateway %r: %s is %s", link.name, peer.host,
+                             ", ".join(a for a, _ in addrs))
+                self._gateway_resolved[(link.name, peer)] = addrs
+        self._rebuild_gateway_addrs()
+
+    async def _gateway_resolve_loop(self) -> None:
+        while True:
+            await self._resolve_gateways()
+            await asyncio.sleep(_GATEWAY_RESOLVE_S)
+
+    def _on_gateway_packet(self, header, ciphertext: bytes, source, link: GatewayLink) -> None:
+        """A packet from another mesh's gateway: pass it into this mesh (and
+        on to any other link carrying the channel) if its channel is allowed
+        on this link; drop everything else."""
+        counts = self._gateway_counts[link.name]
+        if header.sender_id == self.config.sender_id:
+            return  # our own traffic, echoed back
+        if header.ptype not in _RELAYED_TYPES or header.channel_id not in link.channels:
+            counts[2] += 1
+            return
+        if not self._relay_first_copy(header):
+            return
+        now = time.monotonic()
+        counts[0] += 1
+        if header.ptype == TYPE_CHANNEL_ANNOUNCE:
+            # Only the first copy of an announce makes a route, so with
+            # redundant gateways each frame crosses once, not once per path.
+            self._gateway_routes.setdefault(header.channel_id, {})[source] = now
+        if len(self._foreign_senders) >= self._RELAY_SEEN_MAX:
+            self._foreign_senders.clear()  # sender_id is unauthenticated - bound it
+        self._foreign_senders[header.sender_id] = (link.name, now)
+        packet = encode_packet(header, ciphertext)
+        # Into this mesh: audio only toward neighbours leading to members.
+        self._forward(header, packet, source, via_multicast=False, flood_if_unknown=False)
+        self._forward_to_gateways(header, packet, exclude_links={link.name})
+
+    def _note_co_gateway(self, header, source) -> None:
+        """A mesh neighbour passing on an announce from a sender we know is
+        across one of our links is a gateway to that same mesh."""
+        foreign = self._foreign_senders.get(header.sender_id)
+        if foreign is None or time.monotonic() - foreign[1] >= self._membership_ttl_s:
+            return
+        if len(self._co_gateways) >= self._RELAY_SEEN_MAX:
+            self._co_gateways.clear()
+        self._co_gateways[(source, foreign[0])] = time.monotonic()
+
+    def _links_already_crossed(self, header, source) -> set[str]:
+        """Links a packet from this mesh mustn't be sent over again: the
+        link its sender is across (it's coming back round), and links that
+        the neighbour it came from is a gateway on too (it has sent it
+        across already). Without this, with two gateways on each side,
+        every frame would cross twice."""
+        now = time.monotonic()
+        links = {name for (addr, name), seen in self._co_gateways.items()
+                 if addr == source and now - seen < self._membership_ttl_s}
+        foreign = self._foreign_senders.get(header.sender_id)
+        if foreign and now - foreign[1] < self._membership_ttl_s:
+            links.add(foreign[0])
+        return links
+
+    def _forward_to_gateways(self, header, packet: bytes, exclude_links: set[str]) -> None:
+        """Send a packet over every gateway link that carries its channel:
+        announces to all of the link's gateways (that's how they learn
+        routes), audio/start/stop only to gateways that announces for the
+        channel have arrived from."""
+        routes = self._gateway_routes.get(header.channel_id, {})
+        cutoff = time.monotonic() - self._membership_ttl_s
+        for address in [a for a, seen in routes.items() if seen < cutoff]:
+            del routes[address]
+        targets = [Peer(host=a[0], port=a[1]) for a, link in self._gateway_addrs.items()
+                   if link.name not in exclude_links and header.channel_id in link.channels
+                   and (header.ptype == TYPE_CHANNEL_ANNOUNCE or a in routes)]
+        for link_name in {self._gateway_addrs[(p.host, p.port)].name for p in targets}:
+            self._gateway_counts[link_name][1] += 1
+        if targets:
+            self.transport.forward(packet, targets)
+
+    def gateway_status(self) -> list[dict]:
+        """Per link, for the web UI: its channels, addresses, which channels
+        have a route over it, and packets in / out / refused."""
+        cutoff = time.monotonic() - self._membership_ttl_s
+        result = []
+        for link in self.config.gateways:
+            addrs = {a for a, l in self._gateway_addrs.items() if l.name == link.name}
+            routed = sorted(c for c, routes in self._gateway_routes.items()
+                            if any(a in addrs and seen >= cutoff for a, seen in routes.items()))
+            received, sent, refused = self._gateway_counts[link.name]
+            result.append({
+                "name": link.name,
+                "channels": sorted(link.channels),
+                "peers": [{"host": p.host, "port": p.port,
+                           "addresses": [a for a, _ in self._gateway_resolved.get((link.name, p), [])]}
+                          for p in link.peers],
+                "routed_channels": routed,
+                "received": received, "sent": sent, "refused": refused,
+            })
+        return result
+
     def _on_packet(self, header, ciphertext: bytes, addr, via_multicast: bool = False) -> None:
+        link = self._gateway_addrs.get((addr[0], addr[1]))
+        if link is not None:
+            # From another mesh: never processed here, only passed on.
+            self._on_gateway_packet(header, ciphertext, (addr[0], addr[1]), link)
+            return
         if header.sender_id == self.config.sender_id:
             self._check_sender_id_clash(header, ciphertext, addr)
             # Our own traffic looped back to us - e.g. a multi-hop relay mesh
@@ -1610,7 +1800,7 @@ class OutpostClient:
             # sounds like a (delayed) audio echo whenever relay mode is on.
             return
 
-        if self.enable_relay and header.ptype in (TYPE_AUDIO, TYPE_START, TYPE_STOP, TYPE_CHANNEL_ANNOUNCE):
+        if self.enable_relay and header.ptype in _RELAYED_TYPES:
             self._relay_packet(header, ciphertext, addr, via_multicast)
 
         if header.ptype == TYPE_BRIDGE_HELLO:

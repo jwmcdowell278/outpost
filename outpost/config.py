@@ -28,6 +28,22 @@ class Peer:
     port: int
 
 
+# Channel ids are one byte on the wire (protocol.py); 0 is reserved (PEX and
+# the channel-announce multicast group).
+MAX_CHANNEL_ID = 255
+
+
+@dataclass(frozen=True)
+class GatewayLink:
+    """A link from this node to another mesh's gateway(s) - one entity that
+    runs its own mesh with its own mesh_key. Only packets for `channels`
+    cross it, in either direction, and its peers never join this mesh's peer
+    list. See README "Sharing channels between meshes"."""
+    name: str
+    channels: frozenset[int]
+    peers: tuple[Peer, ...]
+
+
 # Things a hardware button can be bound to (see ButtonBinding) -> label
 # shown in the web UI.
 BUTTON_ACTIONS: dict[str, str] = {
@@ -175,6 +191,9 @@ class OutpostConfig:
     # present, so the relay never holds them. See README "Running a relay
     # on a server".
     relay_only: bool = False
+
+    # Gateway links to other meshes (see GatewayLink). Implies enable_relay.
+    gateways: list[GatewayLink] = field(default_factory=list)
 
     # Soft half-duplex lockout: while enabled, a new local PTT press is
     # ignored if audio from another peer on the active channel was received
@@ -435,6 +454,60 @@ def _validate_subnets(v) -> list[str]:
     if not isinstance(v, list):
         raise ValueError("site_subnets must be a list like [10.0.0.0/24]")
     return [str(ipaddress.IPv4Network(str(n), strict=False)) for n in v]
+
+
+def validate_channel_id(v) -> int:
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ValueError(f"channel id {v!r} must be a whole number")
+    if not 1 <= v <= MAX_CHANNEL_ID:
+        raise ValueError(f"channel id {v} must be 1-{MAX_CHANNEL_ID}")
+    return v
+
+
+def load_gateways(v, peers: list[Peer] = ()) -> list[GatewayLink]:
+    """Parses the `gateways:` list (see GatewayLink). An address may appear in
+    only one link, and never in `peers:` too - each address is either part of
+    this mesh or a gateway into another one."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError("gateways must be a list")
+    links: list[GatewayLink] = []
+    seen_addrs = {(p.host, p.port) for p in peers}
+    for entry in v:
+        if not isinstance(entry, dict):
+            raise ValueError("each gateways entry needs name, channels and peers")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("each gateways entry needs a name")
+        name = name.strip()
+        if any(link.name == name for link in links):
+            raise ValueError(f"gateway {name!r} is listed twice")
+        channels = entry.get("channels")
+        if not isinstance(channels, list) or not channels:
+            raise ValueError(f"gateway {name!r} needs a list of channel ids (channels: [201, 202])")
+        try:
+            channel_ids = frozenset(validate_channel_id(c) for c in channels)
+        except ValueError as exc:
+            raise ValueError(f"gateway {name!r}: {exc}")
+        raw_peers = entry.get("peers")
+        if not isinstance(raw_peers, list) or not raw_peers:
+            raise ValueError(f"gateway {name!r} needs peers (the other mesh's gateway addresses)")
+        link_peers = []
+        for p in raw_peers:
+            if not isinstance(p, dict) or not isinstance(p.get("host"), str) or "port" not in p:
+                raise ValueError(f"gateway {name!r}: each peers entry needs host and port")
+            try:
+                peer = Peer(host=p["host"].strip(), port=_validate_port(p["port"]))
+            except (TypeError, ValueError):
+                raise ValueError(f"gateway {name!r}: port {p['port']!r} must be 1-65535")
+            if (peer.host, peer.port) in seen_addrs:
+                raise ValueError(f"gateway {name!r}: {peer.host}:{peer.port} is already a peer or "
+                                 "another gateway's address - list each address once")
+            seen_addrs.add((peer.host, peer.port))
+            link_peers.append(peer)
+        links.append(GatewayLink(name=name, channels=channel_ids, peers=tuple(link_peers)))
+    return links
 
 
 def _validate_group_base(v):
@@ -701,9 +774,13 @@ def validate_config_yaml(text: str) -> None:
         if len(key) != KEY_SIZE:
             raise ValueError(f"channel {entry.get('name')!r} key must decode to {KEY_SIZE} bytes")
 
+    for entry in channels:
+        validate_channel_id(entry["id"])
     for entry in raw.get("peers", []) or []:
         if not isinstance(entry, dict) or not {"host", "port"} <= entry.keys():
             raise ValueError("each peers entry needs host and port")
+    load_gateways(raw.get("gateways"),
+                  [Peer(host=p["host"], port=p["port"]) for p in raw.get("peers", []) or []])
     load_button_bindings(raw.get("button_bindings"))
     validate_ptt_key(raw.get("ptt_key"))
     validate_log_level(raw.get("log_level"))
@@ -808,12 +885,14 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         raise ValueError("missing or empty required field 'channels' (list) - "
                          "set relay_only: true to run as a relay with no channels")
     for entry in raw_channels:
+        validate_channel_id(entry["id"])
         key = base64.b64decode(entry["key"])
         if len(key) != KEY_SIZE:
             raise ValueError(f"channel {entry['name']!r} key must decode to {KEY_SIZE} bytes")
         channels[entry["id"]] = Channel(id=entry["id"], name=entry["name"], key=key)
 
     peers = [Peer(host=p["host"], port=p["port"]) for p in raw.get("peers", [])]
+    gateways = load_gateways(raw.get("gateways"), peers)
 
     mesh_key = base64.b64decode(raw["mesh_key"])
     if len(mesh_key) != KEY_SIZE:
@@ -847,8 +926,9 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         enable_squelch=raw.get("enable_squelch", False),
         squelch_threshold_rms=raw.get("squelch_threshold_rms", 300.0),
         squelch_hold_ms=raw.get("squelch_hold_ms", 300.0),
-        enable_relay=relay_only or raw.get("enable_relay", False),
+        enable_relay=relay_only or bool(gateways) or raw.get("enable_relay", False),
         relay_only=relay_only,
+        gateways=gateways,
         enable_tx_lockout=raw.get("enable_tx_lockout", False),
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_echo_guard=raw.get("enable_echo_guard", False),

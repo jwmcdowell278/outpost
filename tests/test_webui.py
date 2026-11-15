@@ -376,6 +376,28 @@ async def _create_channel_persists_and_applies_live(tmp_path):
     assert [c["name"] for c in raw["channels"]] == ["ops", "tac", "emergency"]
 
 
+def test_create_channel_with_a_given_id(tmp_path):
+    asyncio.run(_create_channel_with_a_given_id(tmp_path))
+
+
+async def _create_channel_with_a_given_id(tmp_path):
+    config_path = tmp_path / "outpost.yaml"
+    _write_two_channel_config(config_path, generate_channel_key(), generate_channel_key())
+    client = _make_client(config_path=str(config_path))
+    shared_key = base64.b64encode(generate_channel_key()).decode()
+    async with TestClient(TestServer(WebUI(client).app)) as tc:
+        resp = await tc.post("/api/channels", json={"name": "joint", "id": 201, "key": shared_key})
+        assert resp.status == 200
+        assert (await resp.json())["id"] == 201
+        # Taken, out of range, or not a number.
+        for bad in (201, 1, 0, 256, "abc"):
+            resp = await tc.post("/api/channels", json={"name": f"x{bad}", "id": bad})
+            assert resp.status == 400, bad
+    assert client.config.channels[201].name == "joint"
+    raw = yaml.safe_load(config_path.read_text())
+    assert {"id": 201, "name": "joint", "key": shared_key} in raw["channels"]
+
+
 def test_create_channel_rejects_duplicate_name(tmp_path):
     asyncio.run(_create_channel_rejects_duplicate_name(tmp_path))
 

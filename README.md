@@ -923,6 +923,72 @@ files can be saved.
 The web UI (if enabled) shows `relay only` in its status line, along with
 peers and the bridge role.
 
+## Sharing channels between meshes
+
+Two organisations that each run their own mesh, with its own `mesh_key`,
+can share one or more channels without changing either mesh's key or
+merging the meshes. Each side runs a **gateway**: a node in its own mesh
+with a link to the other side's gateway. Only the channels named on the
+link cross, in either direction:
+
+```yaml
+# on mesh A's gateway (usually relay_only: true)
+relay_only: true
+gateways:
+  - name: entity-b
+    channels: [201, 202]          # the shared channels
+    peers:
+      - host: 203.0.113.9         # mesh B's gateway (IP or hostname)
+        port: 5555
+```
+
+Mesh B's gateway has the same block pointing back at mesh A's gateway.
+Then, on every node that should talk on a shared channel, add the channel
+with the **same id and key** on both sides - on the web UI's Channels page
+(fill in the id field) or in `config/outpost.yaml`. Nodes that don't use
+the shared channels need no change, and no node's `mesh_key` changes.
+
+What crosses and what doesn't:
+
+- **Only the link's channels.** Audio, start/stop and channel announces for
+  those ids cross; packets for any other channel, peer exchange and bridge
+  hellos are dropped at the gateway, both ways. Nothing else is forwarded
+  "just in case": audio only crosses once a member on the other side has
+  announced itself, so a talker with no listeners across sends nothing
+  over the link.
+- **No addresses.** The other side's gateway is never added to this mesh's
+  peer list or shared by peer exchange, so the meshes never learn each
+  other's node addresses. Your nodes reach the other side's members
+  through your gateway.
+- **No keys on the gateway.** Like any relay, a gateway forwards encrypted
+  packets without decrypting them, so it needs no channel keys. A gateway
+  that does hold channel keys still doesn't play or answer traffic from
+  across the link itself - use a separate node to talk on shared channels.
+
+Choosing ids: a channel id is one byte (1-255), and relays route by id, so
+a shared channel's id must not be used for anything else in **either**
+mesh. Agree on a range, e.g. 200-255 for shared channels, and keep your own
+channels below it. Send the shared keys to the other side over a secure
+channel (in person, an encrypted messenger) - never a config export, which
+holds all of your own keys.
+
+More than one link: a gateway can have several (one per other mesh). A
+channel listed on two links is shared by all three meshes through it.
+
+Redundancy: run two gateways per side, each linked to both of the other
+side's. Gateways on the same side recognise each other, so each frame still
+crosses once. If a gateway fails, traffic moves to the other one within
+about 2.5 channel-announce intervals (2.5 minutes by default).
+
+Firewalls: the gateways exchange plain UDP on their `listen_port`, so each
+needs to allow the other's address in. Over the internet, put the link
+inside a VPN (WireGuard) between the two gateways rather than exposing the
+port.
+
+The web UI's status line shows each link, its channels, and which channels
+currently have members across it; `/api/status` also has packet counts
+(received, sent, refused) per link.
+
 ## Scaling to large meshes (hundreds to thousands of nodes)
 
 This is a pure peer-to-peer design with no relay/server, so some costs are
