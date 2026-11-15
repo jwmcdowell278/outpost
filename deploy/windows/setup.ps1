@@ -14,7 +14,8 @@ adds the Opus audio codec (opus.dll), and sets up config\outpost.yaml.
 Running it again is safe; it updates what's already there.
 Then start Outpost with deploy\windows\run-outpost.cmd.
 
-Needs Python 3.10-3.13 (64-bit, from python.org) and Windows 10 or later.
+Needs Windows 10 or later. Uses Python 3.10-3.13 (64-bit) if it's installed;
+otherwise it installs Python 3.12 from python.org for this user.
 #>
 param(
     [string]$FromNode = ""
@@ -46,11 +47,46 @@ function Find-Python {
     return $null
 }
 
+# No usable Python: install python.org's 64-bit Python for this user only
+# (no admin needed). The installer is checked for the Python Software
+# Foundation's code signature before it's run.
+$PyVersion = "3.12.10"
+function Install-Python {
+    $exe = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+    if (Test-Path $exe) { return $exe }
+    Say "Python not found - installing Python $PyVersion (64-bit) from python.org"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $url = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-amd64.exe"
+    $installer = Join-Path ([IO.Path]::GetTempPath()) "python-$PyVersion-amd64.exe"
+    try {
+        $ProgressPreference = "SilentlyContinue"   # PowerShell 5.1's progress bar makes downloads crawl
+        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-Host "   couldn't download $url ($($_.Exception.Message))"
+        return $null
+    }
+    try {
+        $sig = Get-AuthenticodeSignature $installer
+        if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Python Software Foundation") {
+            Write-Host "   the downloaded installer isn't signed by the Python Software Foundation - not running it"
+            return $null
+        }
+        $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1", "InstallLauncherAllUsers=0", "Include_test=0"
+        if ($p.ExitCode -ne 0) {
+            Write-Host "   the Python installer failed (exit code $($p.ExitCode))"
+            return $null
+        }
+    } finally { Remove-Item -Force $installer -ErrorAction SilentlyContinue }
+    if (Test-Path $exe) { return $exe }
+    return $null
+}
+
 $Venv = Join-Path $Root ".venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 
 if (-not (Test-Path $VenvPy)) {
     $py = Find-Python
+    if (-not $py) { $py = Install-Python }
     if (-not $py) {
         Fail "Python 3.10-3.13 not found. Install it from https://www.python.org/downloads/windows/ (64-bit), then run this again."
     }
