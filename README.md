@@ -859,8 +859,9 @@ hub, each client only needs to reach the server.
 
 Turn it on with `relay_only: true` in the config, or `--relay-only` on the
 command line. It implies `enable_relay: true`, and any `channels:` in the file
-are ignored, so the relay never holds channel keys. It still needs the
-mesh's `mesh_key`, for peer exchange.
+are ignored, so the relay never holds channel keys - except the channels
+its `patches:` use, if it runs any (see "Patching channels"). It still
+needs the mesh's `mesh_key`, for peer exchange.
 
 Install (no audio libraries needed, only `libopus`):
 
@@ -962,8 +963,9 @@ What crosses and what doesn't:
   through your gateway.
 - **No keys on the gateway.** Like any relay, a gateway forwards encrypted
   packets without decrypting them, so it needs no channel keys. A gateway
-  that does hold channel keys still doesn't play or answer traffic from
-  across the link itself - use a separate node to talk on shared channels.
+  never plays traffic from across the link itself - use a separate node to
+  talk on shared channels. The exception is patching: a gateway that patches
+  a shared channel to one of yours holds both keys (next section).
 
 Choosing ids: a channel id is one byte (1-255), and relays route by id, so
 a shared channel's id must not be used for anything else in **either**
@@ -985,9 +987,81 @@ needs to allow the other's address in. Over the internet, put the link
 inside a VPN (WireGuard) between the two gateways rather than exposing the
 port.
 
-The web UI's status line shows each link, its channels, and which channels
-currently have members across it; `/api/status` also has packet counts
-(received, sent, refused) per link.
+Links can be added, edited and removed on the web UI's **Gateways** page,
+with no restart; it also shows which channels currently have members
+across each link and its packet counts (received, sent, refused). The
+Status page's status line has a one-line summary.
+
+## Patching channels
+
+A **patch** joins two existing channels: a node holding both keys re-sends
+what it hears on one onto the other, like a cross-patch on a radio
+console. It works inside one mesh (`ops` <-> `tac`) and, combined with a
+gateway link, between meshes - **without changing any node's channels**.
+
+```yaml
+patches:
+  - [ops, tac]                 # both ways (channel names or ids)
+  - {from: hq, to: field}      # one way: field hears hq, not the reverse
+patch_priority: 100            # several nodes can run the same patch - see below
+```
+
+Or add them on the web UI's **Gateways** page, live.
+
+### Sharing existing channels with another mesh
+
+Instead of giving every node a new shared channel, give only the gateways
+one, and patch it to each side's own channel:
+
+```
+A's ops (3)  <->  [gateway A]  <->  joint (201)  <->  [gateway B]  <->  B's command (12)
+                  patch ops<->joint   gateway link     patch joint<->command
+```
+
+```yaml
+# gateway A (relay_only works: it keeps just the keys its patches use)
+relay_only: true
+channels:
+  - {id: 3, name: ops, key: "..."}       # your channel, as your nodes have it
+  - {id: 201, name: joint, key: "..."}   # agreed with entity B; only the gateways hold it
+patches:
+  - [ops, joint]
+gateways:
+  - name: entity-b
+    channels: [201]
+    peers: [{host: 203.0.113.9, port: 5555}]
+```
+
+Gateway B mirrors it with `[joint, command]`. Your hundreds of nodes keep
+their mesh key, channel ids and keys; entity B never sees your `ops` key
+and you never see theirs. Only `joint` crosses the link.
+
+### How it behaves
+
+- **Each talker stays separate.** A patched talker is re-sent under a
+  stand-in sender id owned by the patch node, one per talker, so two people
+  talking at once on the source channel don't garble each other. Listeners
+  see them as e.g. "Alice via ops".
+- **No re-encoding.** The audio is re-encrypted, not re-encoded, so a patch
+  adds almost no delay or CPU - but both channels' nodes need the same
+  `frame_ms`.
+- **Only to listeners.** Patched audio goes to the target channel's
+  listening members, never flooded; with no listeners it sends nothing.
+- **Loops stop by themselves.** Patches can form a ring (ops -> tac -> med
+  -> ops, even across nodes and meshes): each patch node remembers the
+  frames it patched for a few seconds and won't patch one again, so audio
+  goes round at most once. Avoid rings anyway - the talker hears themself
+  back once.
+- **Redundancy.** Several nodes in one mesh can run the same patch. They
+  tell each other with a patch hello (every 5 s, mesh key) and only the
+  highest `patch_priority` (then lowest sender_id) runs it; the others take
+  over within about 15 seconds if it goes quiet. They need to reach each
+  other directly (hellos aren't relayed); if they can't, both run it and
+  listeners get the talker twice (but no echo).
+- **Trust.** A patch node can hear every channel it patches - run patches
+  on nodes you control.
+- **Busier channels.** Both groups' talkers land on a patched channel, so
+  talk-over is likelier; `enable_tx_lockout` applies to the merged traffic.
 
 ## Scaling to large meshes (hundreds to thousands of nodes)
 

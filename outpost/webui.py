@@ -31,6 +31,13 @@ from .crypto import generate_channel_key, KEY_SIZE
 from .config import (
     MAX_CHANNEL_ID,
     validate_channel_id,
+    load_gateways,
+    load_patches,
+    gateway_to_yaml,
+    patch_to_yaml,
+    save_gateways_to_file,
+    save_patches_to_file,
+    channels_in_file,
     EDITABLE_FIELDS,
     editable_config_values,
     save_config_fields,
@@ -282,6 +289,7 @@ def _nav(active: str) -> str:
   <a href="/"{cls('status')}>Status</a>
   <a href="/channels"{cls('channels')}>Channels</a>
   <a href="/peers"{cls('peers')}>Peers</a>
+  <a href="/gateways"{cls('gateways')}>Gateways</a>
   <a href="/buttons"{cls('buttons')}>Buttons</a>
   <a href="/bluetooth"{cls('bluetooth')}>Bluetooth</a>
   <a href="/settings"{cls('settings')}>Settings</a>
@@ -935,6 +943,204 @@ loadPeers();
 </html>
 """
 
+_GATEWAYS_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outpost · Gateways</title>
+{_FAVICON_LINK}
+{_STYLE}
+</head>
+<body>
+{_BRAND_H1}
+{_nav('gateways')}
+
+<div class="card">
+  <h2>Connection</h2>
+  <div class="row"><label>Token (if configured): <input id="token" type="password" size="20"></label></div>
+</div>
+
+<div class="card">
+  <h2>Gateway links</h2>
+  <div id="linkList">loading...</div>
+  <div class="muted">A link to another mesh's gateway. Only the link's channel ids cross, both ways; nothing else does, and the meshes never learn each other's addresses. The other side needs the mirror link pointing back here.</div>
+</div>
+
+<div class="card" id="linkCard">
+  <h2 id="linkFormTitle">Add link</h2>
+  <div class="row">
+    <input id="linkName" type="text" size="16" placeholder="name (e.g. entity-b)">
+    <input id="linkChannels" type="text" size="16" placeholder="channel ids, e.g. 201, 202">
+  </div>
+  <div class="row">
+    <textarea id="linkPeers" rows="2" cols="40" placeholder="the other mesh's gateway(s), one host:port per line"></textarea>
+  </div>
+  <div class="row">
+    <button id="saveLink">Save link</button>
+    <button id="cancelEdit" type="button" style="display:none">Cancel</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Patches</h2>
+  <div id="patchList">loading...</div>
+  <div class="muted">A patch joins two channels: this node re-sends what it hears on one onto the other (it needs both keys). Patch an internal channel to a channel on a gateway link to share it with another mesh without changing anyone's channels. Several nodes can run the same patch - the highest patch_priority runs it, the rest stand by.</div>
+</div>
+
+<div class="card">
+  <h2>Add patch</h2>
+  <div class="row">
+    <select id="patchA"></select>
+    <select id="patchDir">
+      <option value="two">&lt;-&gt; both ways</option>
+      <option value="one">-&gt; one way</option>
+    </select>
+    <select id="patchB"></select>
+    <button id="addPatch">Add patch</button>
+  </div>
+  <div class="muted">Both channels' nodes need the same frame_ms (audio is passed through, not re-encoded).</div>
+  <div class="muted" id="gwMsg"></div>
+</div>
+
+<script>
+{_CONNECTION_SCRIPT}
+
+function esc(s) {{
+  return String(s).replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
+}}
+function say(text, ok) {{
+  const msg = document.getElementById('gwMsg');
+  msg.className = ok ? 'ok' : 'error'; msg.textContent = text;
+}}
+async function post(path, body) {{
+  return api(path, {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body) }});
+}}
+
+let data = null;
+let editing = null;
+
+function channelLabel(id) {{
+  const ch = data.channels.find(c => c.id === id);
+  return ch ? `${{ch.name}} (${{id}})` : `#${{id}}`;
+}}
+
+function render() {{
+  const links = document.getElementById('linkList');
+  links.innerHTML = data.links.length ? '' : 'no gateway links';
+  for (const g of data.links) {{
+    const row = document.createElement('div');
+    row.className = 'field-row';
+    const peers = g.peers.map(p => esc(p.host + ':' + p.port) +
+      (p.addresses.length && p.addresses[0] !== p.host ? ' (' + esc(p.addresses.join(', ')) + ')' : '') +
+      (p.addresses.length ? '' : ' (not found)')).join(', ');
+    row.innerHTML = `<div class="row"><span class="name">${{esc(g.name)}}</span>
+        <button type="button" data-edit="${{esc(g.name)}}">Edit</button>
+        <button type="button" data-remove-link="${{esc(g.name)}}">Remove</button></div>
+      <div class="muted">channels ${{g.channels.map(channelLabel).map(esc).join(', ')}} · to ${{peers}}</div>
+      <div class="muted">${{g.routed_channels.length ? 'members across on ' + g.routed_channels.map(channelLabel).map(esc).join(', ') : 'no members across yet'}}
+        · in ${{g.received}} · out ${{g.sent}} · refused ${{g.refused}}</div>`;
+    links.appendChild(row);
+  }}
+
+  const patches = document.getElementById('patchList');
+  patches.innerHTML = data.patches.length ? '' : 'no patches';
+  for (const p of data.patches) {{
+    const row = document.createElement('div');
+    row.className = 'row field-row';
+    row.innerHTML = `<span class="name">${{esc(channelLabel(p.a))}} ${{p.two_way ? '&lt;-&gt;' : '-&gt;'}} ${{esc(channelLabel(p.b))}}</span>
+      <span class="muted">${{p.active ? 'running' : 'standby (another node runs it)'}}${{p.talking.length ? ' · ' + p.talking.length + ' talking' : ''}}</span>
+      <button type="button" data-remove-patch="${{p.a}},${{p.b}}">Remove</button>`;
+    patches.appendChild(row);
+  }}
+
+  for (const id of ['patchA', 'patchB']) {{
+    const sel = document.getElementById(id);
+    const keep = sel.value;
+    sel.innerHTML = data.channels.map(c => `<option value="${{c.id}}">${{esc(c.name)}} (${{c.id}})</option>`).join('');
+    if (keep) sel.value = keep;
+  }}
+  for (const b of ['saveLink', 'addPatch']) document.getElementById(b).disabled = !data.can_save;
+  if (!data.can_save) say('no config file path - gateways are read-only here', false);
+}}
+
+async function load() {{
+  try {{
+    data = await api('/api/gateways');
+    render();
+  }} catch (e) {{
+    document.getElementById('linkList').textContent = 'error: ' + e.message;
+  }}
+}}
+
+function resetForm() {{
+  editing = null;
+  document.getElementById('linkFormTitle').textContent = 'Add link';
+  document.getElementById('linkName').disabled = false;
+  document.getElementById('cancelEdit').style.display = 'none';
+  for (const id of ['linkName', 'linkChannels', 'linkPeers']) document.getElementById(id).value = '';
+}}
+
+document.getElementById('linkList').addEventListener('click', async (e) => {{
+  const edit = e.target.dataset.edit, remove = e.target.dataset.removeLink;
+  if (edit) {{
+    const g = data.links.find(l => l.name === edit);
+    editing = edit;
+    document.getElementById('linkFormTitle').textContent = 'Edit link ' + edit;
+    document.getElementById('linkName').value = g.name;
+    document.getElementById('linkName').disabled = true;
+    document.getElementById('linkChannels').value = g.channels.join(', ');
+    document.getElementById('linkPeers').value = g.peers.map(p => p.host + ':' + p.port).join('\\n');
+    document.getElementById('cancelEdit').style.display = '';
+  }} else if (remove) {{
+    if (!confirm(`Remove gateway link ${{remove}}? Its channels stop crossing straight away.`)) return;
+    try {{ await post('/api/gateways/remove', {{ name: remove }}); say('removed ' + remove, true); load(); }}
+    catch (err) {{ say(err.message, false); }}
+  }}
+}});
+
+document.getElementById('cancelEdit').addEventListener('click', resetForm);
+
+document.getElementById('saveLink').addEventListener('click', async () => {{
+  const name = document.getElementById('linkName').value.trim();
+  const channels = document.getElementById('linkChannels').value.split(/[\\s,]+/).filter(Boolean).map(Number);
+  const peers = [];
+  for (const line of document.getElementById('linkPeers').value.split('\\n').map(l => l.trim()).filter(Boolean)) {{
+    const i = line.lastIndexOf(':');
+    if (i < 1) {{ say(`"${{line}}" isn't host:port`, false); return; }}
+    peers.push({{ host: line.slice(0, i), port: Number(line.slice(i + 1)) }});
+  }}
+  try {{
+    await post('/api/gateways', {{ name, channels, peers, replace: editing !== null }});
+    say('saved ' + name, true);
+    resetForm();
+    load();
+  }} catch (err) {{ say(err.message, false); }}
+}});
+
+document.getElementById('patchList').addEventListener('click', async (e) => {{
+  const v = e.target.dataset.removePatch;
+  if (!v) return;
+  const [a, b] = v.split(',').map(Number);
+  try {{ await post('/api/patches/remove', {{ a, b }}); say('patch removed', true); load(); }}
+  catch (err) {{ say(err.message, false); }}
+}});
+
+document.getElementById('addPatch').addEventListener('click', async () => {{
+  const a = Number(document.getElementById('patchA').value);
+  const b = Number(document.getElementById('patchB').value);
+  const two_way = document.getElementById('patchDir').value === 'two';
+  try {{ await post('/api/patches', {{ a, b, two_way }}); say('patch added', true); load(); }}
+  catch (err) {{ say(err.message, false); }}
+}});
+
+load();
+setInterval(() => {{ if (editing === null) load(); }}, 3000);
+</script>
+</body>
+</html>
+"""
+
 _BUTTON_ACTION_OPTIONS = "".join(
     f'<option value="{name}">{html.escape(label)}</option>' for name, label in BUTTON_ACTIONS.items())
 
@@ -1400,6 +1606,7 @@ class WebUI:
             web.get("/settings", self._handle_settings_page),
             web.get("/channels", self._handle_channels_page),
             web.get("/peers", self._handle_peers_page),
+            web.get("/gateways", self._handle_gateways_page),
             web.get("/buttons", self._handle_buttons_page),
             web.get("/bluetooth", self._handle_bluetooth_page),
             web.get("/api/bluetooth", self._handle_get_bluetooth),
@@ -1427,6 +1634,11 @@ class WebUI:
             web.get("/api/peers", self._handle_get_peers),
             web.post("/api/peers", self._handle_add_peer),
             web.post("/api/peers/remove", self._handle_remove_peer),
+            web.get("/api/gateways", self._handle_get_gateways),
+            web.post("/api/gateways", self._handle_save_gateway),
+            web.post("/api/gateways/remove", self._handle_remove_gateway),
+            web.post("/api/patches", self._handle_add_patch),
+            web.post("/api/patches/remove", self._handle_remove_patch),
             web.post("/api/restart", self._handle_restart),
             web.get("/api/audio_devices", self._handle_audio_devices),
         ])
@@ -1435,7 +1647,7 @@ class WebUI:
     # Authorization header (a plain browser navigation can never send one) -
     # every api/* route stays behind the token below, so viewing live status
     # and every settings/channel/peer/PTT change still requires it.
-    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/buttons", "/bluetooth", "/favicon.svg"})
+    _UNAUTHENTICATED_GET_PATHS = frozenset({"/", "/settings", "/channels", "/peers", "/gateways", "/buttons", "/bluetooth", "/favicon.svg"})
 
     def _make_auth_middleware(self):
         # A plain closure, not a bound method - aiohttp's `middleware`
@@ -1465,6 +1677,9 @@ class WebUI:
 
     async def _handle_peers_page(self, request) -> web.Response:
         return web.Response(text=_PEERS_HTML, content_type="text/html")
+
+    async def _handle_gateways_page(self, request) -> web.Response:
+        return web.Response(text=_GATEWAYS_HTML, content_type="text/html")
 
     async def _handle_buttons_page(self, request) -> web.Response:
         return web.Response(text=_BUTTONS_HTML, content_type="text/html")
@@ -1911,6 +2126,91 @@ class WebUI:
             raise web.HTTPNotFound(text=f"no peer {host}:{port} in config")
         self.client.remove_peer(host, port)
         return web.json_response({"host": host, "port": port})
+
+    # --- gateways and patches ----------------------------------------------
+    # Saved to outpost.yaml and applied to the running client straight away.
+
+    def _require_config_path(self) -> str:
+        if self.client.config_path is None:
+            raise web.HTTPBadRequest(text="this client wasn't started from a config file - nothing to save to")
+        return self.client.config_path
+
+    def _known_channels(self) -> dict:
+        """Every channel this node could patch: those in its config file (a
+        relay-only node doesn't load the ones it doesn't patch yet)."""
+        channels = dict(self.client.config.channels)
+        if self.client.config_path is not None:
+            try:
+                channels.update(channels_in_file(self.client.config_path))
+            except (OSError, ValueError, KeyError):
+                pass
+        return channels
+
+    async def _handle_get_gateways(self, request) -> web.Response:
+        channels = self._known_channels()
+        return web.json_response({
+            "can_save": self.client.config_path is not None,
+            "relay_only": self.client.relay_only,
+            "links": self.client.gateway_status(),
+            "patches": self.client.patches.status(),
+            "channels": [{"id": cid, "name": ch.name} for cid, ch in sorted(channels.items())],
+        })
+
+    async def _handle_save_gateway(self, request) -> web.Response:
+        path = self._require_config_path()
+        data = await request.json()
+        name = (data.get("name") or "").strip()
+        current = [gateway_to_yaml(l) for l in self.client.config.gateways]
+        exists = any(l["name"] == name for l in current)
+        if data.get("replace"):
+            if not exists:
+                raise web.HTTPNotFound(text=f"no gateway link {name!r}")
+            current = [l for l in current if l["name"] != name]
+        elif exists:
+            raise web.HTTPBadRequest(text=f"a gateway link named {name!r} already exists")
+        entry = {"name": name, "channels": data.get("channels"), "peers": data.get("peers")}
+        try:
+            links = load_gateways(current + [entry], self.client.config.peers)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        save_gateways_to_file(path, links)
+        self.client.set_gateways(links)
+        return web.json_response({"name": name})
+
+    async def _handle_remove_gateway(self, request) -> web.Response:
+        path = self._require_config_path()
+        name = ((await request.json()).get("name") or "").strip()
+        links = [l for l in self.client.config.gateways if l.name != name]
+        if len(links) == len(self.client.config.gateways):
+            raise web.HTTPNotFound(text=f"no gateway link {name!r}")
+        save_gateways_to_file(path, links)
+        self.client.set_gateways(links)
+        return web.json_response({"name": name})
+
+    async def _handle_add_patch(self, request) -> web.Response:
+        path = self._require_config_path()
+        data = await request.json()
+        channels = self._known_channels()
+        raw_channels = [{"id": cid, "name": ch.name} for cid, ch in channels.items()]
+        entry = ([data.get("a"), data.get("b")] if data.get("two_way", True)
+                 else {"from": data.get("a"), "to": data.get("b")})
+        try:
+            patches = load_patches([patch_to_yaml(p) for p in self.client.config.patches] + [entry], raw_channels)
+            self.client.set_patches(patches, channels={c: channels[c] for c in (patches[-1].a, patches[-1].b)})
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        save_patches_to_file(path, patches)
+        return web.json_response({"a": patches[-1].a, "b": patches[-1].b})
+
+    async def _handle_remove_patch(self, request) -> web.Response:
+        path = self._require_config_path()
+        data = await request.json()
+        patches = [p for p in self.client.config.patches if (p.a, p.b) != (data.get("a"), data.get("b"))]
+        if len(patches) == len(self.client.config.patches):
+            raise web.HTTPNotFound(text="no such patch")
+        save_patches_to_file(path, patches)
+        self.client.set_patches(patches)
+        return web.json_response({"removed": True})
 
     async def _handle_get_config(self, request) -> web.Response:
         values = editable_config_values(self.client.config)

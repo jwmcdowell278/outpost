@@ -35,6 +35,7 @@ from .crypto import ChannelCipher
 from .discovery import PeerDiscovery
 from .dsp import HighPassFilter, Squelch
 from .noise_suppression import NoiseSuppressor, PassthroughSuppressor
+from .patch import PatchEngine, PATCH_HELLO_INTERVAL_S, TYPE_PATCH_HELLO
 from .pex import PexGossip
 from .replay import ReplayWindow
 from .protocol import audio_pad_size, pad_audio, unpad_audio, TYPE_AUDIO, TYPE_STOP, TYPE_START, TYPE_PEX, TYPE_CHANNEL_ANNOUNCE, TYPE_BRIDGE_HELLO, encode_packet
@@ -215,7 +216,10 @@ class OutpostClient:
         # forwarding (see OutpostConfig.relay_only).
         self.relay_only = config.relay_only
         if self.relay_only:
-            config = replace(config, enable_relay=True, channels={}, monitor_channels=[])
+            # No channels, except those its patches need keys for.
+            patched = {c for p in config.patches for c in (p.a, p.b)}
+            config = replace(config, enable_relay=True, monitor_channels=[],
+                             channels={cid: ch for cid, ch in config.channels.items() if cid in patched})
             self.config = config
             self.active_channel = None
         else:
@@ -461,6 +465,10 @@ class OutpostClient:
         self._co_gateways: dict[tuple[tuple[str, int], str], float] = {}
         self._gateway_counts: dict[str, list[int]] = {link.name: [0, 0, 0] for link in config.gateways}
         self._gateway_task: asyncio.Task | None = None
+
+        # Channel patches (see patch.py).
+        self.patches = PatchEngine(self, config.patches, config.patch_priority)
+        self._patch_hello_task: asyncio.Task | None = None
 
         # Soft half-duplex lockout (see OutpostConfig.enable_tx_lockout) -
         # same always-construct/mutable-flag pattern as AGC/relay above.
@@ -849,6 +857,9 @@ class OutpostClient:
                      ", ".join(f"{p.host}:{p.port}" for p in link.peers))
         if self.config.gateways:
             self._gateway_task = asyncio.create_task(self._gateway_resolve_loop())
+        for p in self.patches.status():
+            log.info("patch: %s %s %s", p["a_name"], "<->" if p["two_way"] else "->", p["b_name"])
+        self._patch_hello_task = asyncio.create_task(self._patch_hello_loop())
         if self.discovery:
             try:
                 # PeerDiscovery.start() blocks on zeroconf's own internal
@@ -1010,6 +1021,9 @@ class OutpostClient:
         if self._gateway_task:
             self._gateway_task.cancel()
             self._gateway_task = None
+        if self._patch_hello_task:
+            self._patch_hello_task.cancel()
+            self._patch_hello_task = None
         if self.web_ui:
             await self.web_ui.stop()
         if self.buttons:
@@ -1158,8 +1172,16 @@ class OutpostClient:
         cipher = self.ciphers.get(channel_id)
         if cipher is None:
             return
-        listening = channel_id in self.listening_channel_ids()
+        # A patch's source channels count as listened to: audio has to reach
+        # this node to be patched.
+        listening = channel_id in self.listening_channel_ids() or self.patches.is_source(channel_id)
         payload = self._instance_token + bytes([1 if listening else 0])
+        gateway_peers = [Peer(host=a[0], port=a[1]) for a, link in self._gateway_addrs.items()
+                         if channel_id in link.channels]
+        if gateway_peers:
+            # Our own membership crosses our gateway links too, so audio from
+            # across reaches us (e.g. to patch it).
+            self.transport.send_encrypted(cipher, channel_id, TYPE_CHANNEL_ANNOUNCE, payload, targets=gateway_peers)
         if self.transport.multicast_enabled:
             local = self._multicast_local_addresses()
             targets = [p for p in self.transport.peers if (p.host, p.port) not in local]
@@ -1702,7 +1724,7 @@ class OutpostClient:
         on to any other link carrying the channel) if its channel is allowed
         on this link; drop everything else."""
         counts = self._gateway_counts[link.name]
-        if header.sender_id == self.config.sender_id:
+        if header.sender_id == self.config.sender_id or self.patches.is_virtual(header.sender_id):
             return  # our own traffic, echoed back
         if header.ptype not in _RELAYED_TYPES or header.channel_id not in link.channels:
             counts[2] += 1
@@ -1722,6 +1744,90 @@ class OutpostClient:
         # Into this mesh: audio only toward neighbours leading to members.
         self._forward(header, packet, source, via_multicast=False, flood_if_unknown=False)
         self._forward_to_gateways(header, packet, exclude_links={link.name})
+        if header.ptype != TYPE_CHANNEL_ANNOUNCE and self.patches.is_source(header.channel_id):
+            self._patch_input(header, ciphertext, source)
+
+    def _patch_input(self, header, ciphertext: bytes, addr) -> None:
+        """Decrypt traffic that arrived over a gateway link and hand it to
+        the patches. (Traffic from this mesh goes through _on_packet.)"""
+        cipher = self.ciphers.get(header.channel_id)
+        if cipher is None or not self._is_fresh(header, addr):
+            return
+        try:
+            plaintext = cipher.decrypt(header, ciphertext)
+            if header.ptype == TYPE_AUDIO:
+                unpad_audio(plaintext)
+        except ValueError:
+            return
+        self._replay.mark(header.sender_id, header.seq)
+        self.patches.on_input(header, plaintext)
+
+    async def _patch_hello_loop(self) -> None:
+        """Tells other nodes running the same patches which ones we run, so
+        only one runs each (see patch.py). Quiet when we run none."""
+        while True:
+            if self.patches.edges:
+                payload = self.patches.hello_payload()
+                if self.transport.multicast_enabled:
+                    local = self._multicast_local_addresses()
+                    targets = [p for p in self.transport.peers if (p.host, p.port) not in local]
+                    self.transport.send_encrypted(self._mesh_cipher, 0, TYPE_PATCH_HELLO, payload,
+                                                  targets=targets, multicast_group=self._group(0))
+                else:
+                    self.transport.send_encrypted(self._mesh_cipher, 0, TYPE_PATCH_HELLO, payload)
+            await asyncio.sleep(PATCH_HELLO_INTERVAL_S * random.uniform(0.9, 1.1))
+
+    def _on_patch_hello(self, header, ciphertext: bytes, addr) -> None:
+        if not self.patches.edges or not self._is_fresh(header, addr):
+            return
+        try:
+            payload = self._mesh_cipher.decrypt(header, ciphertext)
+        except ValueError:
+            return
+        self._replay.mark(header.sender_id, header.seq)
+        self.patches.on_hello(header.sender_id, payload)
+
+    # --- live changes from the web UI's Gateways page ----------------------
+
+    def set_gateways(self, links: list[GatewayLink]) -> None:
+        self.config = replace(self.config, gateways=list(links))
+        self._gateway_resolved = {k: v for k, v in self._gateway_resolved.items()
+                                  if any(l.name == k[0] and k[1] in l.peers for l in links)}
+        for link in links:
+            self._gateway_counts.setdefault(link.name, [0, 0, 0])
+            for peer in link.peers:
+                try:
+                    ipaddress.IPv4Address(peer.host)
+                except ValueError:
+                    continue
+                self._gateway_resolved[(link.name, peer)] = [(peer.host, peer.port)]
+        self._rebuild_gateway_addrs()
+        if links:
+            self._enable_relay = True
+            if self._gateway_task is None and self._loop is not None:
+                self._gateway_task = self._loop.create_task(self._gateway_resolve_loop())
+        elif self._gateway_task is not None:
+            self._gateway_task.cancel()
+            self._gateway_task = None
+
+    def set_patches(self, patches, channels: dict[int, Channel] | None = None) -> None:
+        """`channels`: keys for patched channels this node doesn't have
+        loaded (a relay-only node only loads the ones it already patches)."""
+        for cid, ch in (channels or {}).items():
+            if cid not in self.config.channels:
+                self.config.channels[cid] = ch
+                self.ciphers[cid] = ChannelCipher(ch.key)
+        missing = {c for p in patches for c in (p.a, p.b)} - set(self.ciphers)
+        if missing:
+            raise ValueError(f"no key for channel(s) {sorted(missing)} on this node")
+        self.config = replace(self.config, patches=list(patches))
+        self.patches.set_patches(patches)
+        if self.relay_only:
+            # A relay keeps only the keys its patches need.
+            needed = self.patches.channels
+            for cid in [c for c in self.config.channels if c not in needed]:
+                del self.config.channels[cid]
+                self.ciphers.pop(cid, None)
 
     def _note_co_gateway(self, header, source) -> None:
         """A mesh neighbour passing on an announce from a sender we know is
@@ -1791,6 +1897,8 @@ class OutpostClient:
             # From another mesh: never processed here, only passed on.
             self._on_gateway_packet(header, ciphertext, (addr[0], addr[1]), link)
             return
+        if self.patches.is_virtual(header.sender_id):
+            return  # our own patched traffic, looped back
         if header.sender_id == self.config.sender_id:
             self._check_sender_id_clash(header, ciphertext, addr)
             # Our own traffic looped back to us - e.g. a multi-hop relay mesh
@@ -1805,6 +1913,10 @@ class OutpostClient:
 
         if header.ptype == TYPE_BRIDGE_HELLO:
             self._on_bridge_hello(header, ciphertext, addr)
+            return
+
+        if header.ptype == TYPE_PATCH_HELLO:
+            self._on_patch_hello(header, ciphertext, addr)
             return
 
         if header.ptype == TYPE_PEX:
@@ -1851,8 +1963,11 @@ class OutpostClient:
                     members[header.sender_id] = (peer, now, listening)
             return
 
-        if header.channel_id not in self.listening_channel_ids():
-            return  # only play the active channel and any monitored ones
+        # Play the active channel and any monitored ones; patch the patched.
+        listening = header.channel_id in self.listening_channel_ids()
+        patched = self.patches.is_source(header.channel_id)
+        if not (listening or patched):
+            return
 
         cipher = self.ciphers.get(header.channel_id)
         if cipher is None:
@@ -1869,6 +1984,10 @@ class OutpostClient:
                 log.debug("dropping unauthenticated start from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
+            if patched:
+                self.patches.on_input(header, alias_bytes)
+            if not listening:
+                return
             alias = alias_bytes.decode("utf-8", errors="replace") or None
             if self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1])) and via_multicast:
                 self._note_multicast(header, addr)
@@ -1877,11 +1996,15 @@ class OutpostClient:
             return
         if header.ptype == TYPE_STOP:
             try:
-                cipher.decrypt(header, ciphertext)
+                stop_payload = cipher.decrypt(header, ciphertext)
             except ValueError:
                 log.debug("dropping unauthenticated stop from %s", addr)
                 return
             self._replay.mark(header.sender_id, header.seq)
+            if patched:
+                self.patches.on_input(header, stop_payload)
+            if not listening:
+                return
             self.mixer.stop(header.channel_id, header.sender_id)
             if self.transport.confirm_peer(header.sender_id, Peer(host=addr[0], port=addr[1])) and via_multicast:
                 self._note_multicast(header, addr)
@@ -1889,11 +2012,16 @@ class OutpostClient:
             self._channel_speaking.get(header.channel_id, {}).pop(header.sender_id, None)
             return
         try:
-            opus_bytes = unpad_audio(cipher.decrypt(header, ciphertext))
+            plaintext = cipher.decrypt(header, ciphertext)
+            opus_bytes = unpad_audio(plaintext)
         except ValueError:
             log.debug("dropping packet with bad auth tag or padding from %s", addr)
             return
         self._replay.mark(header.sender_id, header.seq)
+        if patched:
+            self.patches.on_input(header, plaintext)
+        if not listening:
+            return
 
         # Only an authenticated sender teaches us its address - raw UDP
         # source addresses are trivially spoofable and must not be trusted.

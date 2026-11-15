@@ -44,6 +44,20 @@ class GatewayLink:
     peers: tuple[Peer, ...]
 
 
+@dataclass(frozen=True)
+class Patch:
+    """Joins two channels: a node holding both keys re-sends what it hears
+    on one onto the other (decrypt, re-encrypt - the audio itself is passed
+    through untouched). `a` and `b` are channel ids; one-way patches only
+    carry a -> b. See outpost/patch.py and README "Patching channels"."""
+    a: int
+    b: int
+    two_way: bool = True
+
+    def edges(self) -> list[tuple[int, int]]:
+        return [(self.a, self.b), (self.b, self.a)] if self.two_way else [(self.a, self.b)]
+
+
 # Things a hardware button can be bound to (see ButtonBinding) -> label
 # shown in the web UI.
 BUTTON_ACTIONS: dict[str, str] = {
@@ -188,12 +202,18 @@ class OutpostConfig:
     # two networks (e.g. a Linux box that is also the WireGuard server) and
     # forwards traffic between them. Implies enable_relay. Channel keys
     # aren't needed (relays forward without decrypting) and are ignored if
-    # present, so the relay never holds them. See README "Running a relay
+    # present, so the relay never holds them - except those its patches use. See README "Running a relay
     # on a server".
     relay_only: bool = False
 
     # Gateway links to other meshes (see GatewayLink). Implies enable_relay.
     gateways: list[GatewayLink] = field(default_factory=list)
+    # Channel patches run by this node (see Patch) - it needs both channels'
+    # keys. Several nodes can run the same patch for redundancy: the
+    # highest patch_priority (0-255, then lowest sender_id) runs it, the
+    # others stand by.
+    patches: list[Patch] = field(default_factory=list)
+    patch_priority: int = 100
 
     # Soft half-duplex lockout: while enabled, a new local PTT press is
     # ignored if audio from another peer on the active channel was received
@@ -447,6 +467,13 @@ def _validate_priority(v) -> int:
     return v
 
 
+def _validate_patch_priority(v) -> int:
+    v = int(v)
+    if not 0 <= v <= 255:
+        raise ValueError("patch_priority must be 0-255")
+    return v
+
+
 def _validate_subnets(v) -> list[str]:
     import ipaddress
     if v is None:
@@ -508,6 +535,86 @@ def load_gateways(v, peers: list[Peer] = ()) -> list[GatewayLink]:
             link_peers.append(peer)
         links.append(GatewayLink(name=name, channels=channel_ids, peers=tuple(link_peers)))
     return links
+
+
+def _patch_channel(v, channels_by_name: dict[str, int], channel_ids: set[int]) -> int:
+    if isinstance(v, str) and v in channels_by_name:
+        return channels_by_name[v]
+    if isinstance(v, int) and not isinstance(v, bool) and v in channel_ids:
+        return v
+    raise ValueError(f"patch: {v!r} isn't a configured channel (use its name or id)")
+
+
+def load_patches(v, raw_channels) -> list[Patch]:
+    """Parses `patches:` against the configured channels. Each entry is
+    `[a, b]` (two-way) or `{from: a, to: b}` (one-way); a and b are channel
+    names or ids."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError("patches must be a list, e.g. [[ops, joint]]")
+    channels = [c for c in raw_channels or [] if isinstance(c, dict)]
+    by_name = {c.get("name"): c.get("id") for c in channels}
+    ids = {c.get("id") for c in channels}
+    patches: list[Patch] = []
+    edges: set[tuple[int, int]] = set()
+    for entry in v:
+        if isinstance(entry, list) and len(entry) == 2:
+            patch = Patch(_patch_channel(entry[0], by_name, ids), _patch_channel(entry[1], by_name, ids), True)
+        elif isinstance(entry, dict) and set(entry) == {"from", "to"}:
+            patch = Patch(_patch_channel(entry["from"], by_name, ids), _patch_channel(entry["to"], by_name, ids), False)
+        else:
+            raise ValueError(f"patch {entry!r}: use [a, b] for two-way or {{from: a, to: b}} for one-way")
+        if patch.a == patch.b:
+            raise ValueError(f"patch {entry!r}: a channel can't be patched to itself")
+        if edges & set(patch.edges()):
+            raise ValueError(f"patch {entry!r} overlaps another patch")
+        edges.update(patch.edges())
+        patches.append(patch)
+    return patches
+
+
+def patch_to_yaml(patch: Patch):
+    return [patch.a, patch.b] if patch.two_way else {"from": patch.a, "to": patch.b}
+
+
+def gateway_to_yaml(link: GatewayLink) -> dict:
+    return {"name": link.name, "channels": sorted(link.channels),
+            "peers": [{"host": p.host, "port": p.port} for p in link.peers]}
+
+
+def save_gateways_to_file(path: str, links: list[GatewayLink]) -> None:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    if links:
+        raw["gateways"] = [gateway_to_yaml(link) for link in links]
+    else:
+        raw.pop("gateways", None)
+    _atomic_write_yaml(path, raw)
+
+
+def save_patches_to_file(path: str, patches: list[Patch]) -> None:
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    if patches:
+        raw["patches"] = [patch_to_yaml(p) for p in patches]
+    else:
+        raw.pop("patches", None)
+    _atomic_write_yaml(path, raw)
+
+
+def channels_in_file(path: str) -> dict[int, Channel]:
+    """Every channel in the config file, keys included - a relay-only node
+    only loads the ones it patches, so adding a patch live reads the key
+    from here."""
+    with open(path, "r") as f:
+        raw = yaml.safe_load(f) or {}
+    result = {}
+    for entry in raw.get("channels") or []:
+        key = base64.b64decode(entry["key"])
+        if len(key) == KEY_SIZE:
+            result[entry["id"]] = Channel(id=entry["id"], name=entry["name"], key=key)
+    return result
 
 
 def _validate_group_base(v):
@@ -781,6 +888,8 @@ def validate_config_yaml(text: str) -> None:
             raise ValueError("each peers entry needs host and port")
     load_gateways(raw.get("gateways"),
                   [Peer(host=p["host"], port=p["port"]) for p in raw.get("peers", []) or []])
+    load_patches(raw.get("patches"), raw.get("channels"))
+    _validate_patch_priority(raw.get("patch_priority", 100))
     load_button_bindings(raw.get("button_bindings"))
     validate_ptt_key(raw.get("ptt_key"))
     validate_log_level(raw.get("log_level"))
@@ -876,11 +985,16 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         raise ValueError("relay_only must be true or false")
     channels: dict[int, Channel] = {}
     raw_channels = raw.get("channels") or []
+    patches = load_patches(raw.get("patches"), raw_channels)
     if relay_only:
-        if raw_channels:
-            log.info("relay_only: ignoring the %d configured channel(s) - a relay forwards without keys",
-                     len(raw_channels))
-        raw_channels = []
+        # A relay forwards without keys; it only keeps the ones its patches
+        # need (a patch has to decrypt to re-encrypt).
+        patched = {c for p in patches for c in (p.a, p.b)}
+        ignored = [c for c in raw_channels if c.get("id") not in patched]
+        if ignored:
+            log.info("relay_only: ignoring the %d configured channel(s) not used by a patch - "
+                     "a relay forwards without keys", len(ignored))
+        raw_channels = [c for c in raw_channels if c.get("id") in patched]
     elif not raw_channels:
         raise ValueError("missing or empty required field 'channels' (list) - "
                          "set relay_only: true to run as a relay with no channels")
@@ -929,6 +1043,8 @@ def load_config(path: str, relay_only: bool | None = None) -> OutpostConfig:
         enable_relay=relay_only or bool(gateways) or raw.get("enable_relay", False),
         relay_only=relay_only,
         gateways=gateways,
+        patches=patches,
+        patch_priority=_validate_patch_priority(raw.get("patch_priority", 100)),
         enable_tx_lockout=raw.get("enable_tx_lockout", False),
         tx_lockout_timeout_ms=raw.get("tx_lockout_timeout_ms", 500.0),
         enable_echo_guard=raw.get("enable_echo_guard", False),

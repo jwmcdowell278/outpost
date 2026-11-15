@@ -42,13 +42,16 @@ def _gateway(sender_id: int, port: int, link: GatewayLink) -> OutpostClient:
     return OutpostClient(config, None)
 
 
-def _spy(client: OutpostClient) -> list[tuple[int, int]]:
-    """(ptype, channel_id) of every packet the client receives."""
+def _spy(client: OutpostClient, ports) -> list[tuple[int, int]]:
+    """(ptype, channel_id) of every packet the client receives from one of
+    `ports` (this test's own nodes - a stray packet from an earlier test's
+    socket can land on a reused port)."""
     received: list[tuple[int, int]] = []
     original = client._on_packet
 
     def wrapper(header, ciphertext, addr, via_multicast=False):
-        received.append((header.ptype, header.channel_id))
+        if addr[1] in ports.values():
+            received.append((header.ptype, header.channel_id))
         original(header, ciphertext, addr, via_multicast)
 
     client.transport._on_packet = wrapper
@@ -70,8 +73,8 @@ class _TwoMeshes:
             "mesh-b", frozenset(shared_channels), (Peer("127.0.0.1", ports["gB"]),)))
         self.gB = _gateway(20, ports["gB"], GatewayLink(
             "mesh-a", frozenset(shared_channels), (Peer("127.0.0.1", ports["gA"]),)))
-        self.to_a1 = _spy(self.a1)
-        self.to_b1 = _spy(self.b1)
+        self.to_a1 = _spy(self.a1, ports)
+        self.to_b1 = _spy(self.b1, ports)
 
     def peer(self, name: str) -> Peer:
         return Peer("127.0.0.1", self.ports[name])
@@ -139,6 +142,7 @@ async def _audio_needs_a_route():
         m.a1_talks(SHARED)
         await asyncio.sleep(0.2)
         assert (TYPE_AUDIO, SHARED) not in m.to_b1
+        assert m.gA.gateway_status()[0]["sent"] == 0
 
 
 def test_channels_not_on_the_link_never_cross():
@@ -303,7 +307,7 @@ async def _redundant_gateways():
         "gB2": _gateway(22, ports["gB2"], GatewayLink("a", frozenset({SHARED}), (peer("gA1"), peer("gA2")))),
     }
     nodes = {"a1": a1, "b1": b1, **gws}
-    to_b1 = _spy(b1)
+    to_b1 = _spy(b1, ports)
     for n in names:
         await nodes[n].transport.start(ports[n])
     try:

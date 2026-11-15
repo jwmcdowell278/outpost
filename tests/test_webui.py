@@ -783,3 +783,89 @@ def test_settings_api_includes_the_layout():
             shown = [f["name"] for g in body["groups"] for f in g["fields"]]
             assert sorted(shown) == sorted(body["fields"])
     asyncio.run(run())
+
+
+# --- Gateways page -------------------------------------------------------
+
+def _gateway_setup(tmp_path):
+    from outpost.config import load_config
+    config_path = tmp_path / "outpost.yaml"
+    key = lambda: base64.b64encode(generate_channel_key()).decode()
+    config_path.write_text(yaml.safe_dump({
+        "mesh_key": key(),
+        "relay_only": True,
+        "channels": [{"id": 3, "name": "ops", "key": key()}, {"id": 201, "name": "joint", "key": key()}],
+    }))
+    config = load_config(str(config_path))
+    return OutpostClient(config, None, config_path=str(config_path)), config_path
+
+
+def test_gateways_page_loads_without_auth():
+    asyncio.run(_gateways_page_loads())
+
+
+async def _gateways_page_loads():
+    ui = WebUI(_make_client(), token="secret")
+    async with TestClient(TestServer(ui.app)) as tc:
+        assert (await tc.get("/gateways")).status == 200
+        assert (await tc.get("/api/gateways")).status == 401
+
+
+def test_gateway_links_add_edit_remove(tmp_path):
+    asyncio.run(_gateway_links(tmp_path))
+
+
+async def _gateway_links(tmp_path):
+    client, path = _gateway_setup(tmp_path)
+    async with TestClient(TestServer(WebUI(client).app)) as tc:
+        body = await (await tc.get("/api/gateways")).json()
+        assert body["links"] == [] and body["can_save"]
+        # A relay-only node lists the file's channels even before loading their keys.
+        assert [c["id"] for c in body["channels"]] == [3, 201]
+
+        link = {"name": "entity-b", "channels": [201], "peers": [{"host": "127.0.0.1", "port": 6000}]}
+        assert (await tc.post("/api/gateways", json=link)).status == 200
+        assert (await tc.post("/api/gateways", json=link)).status == 400   # name taken
+        bad = dict(link, name="x", channels=[999])
+        assert (await tc.post("/api/gateways", json=bad)).status == 400
+        assert client.enable_relay and ("127.0.0.1", 6000) in client._gateway_addrs
+
+        edited = dict(link, peers=[{"host": "127.0.0.1", "port": 6001}], replace=True)
+        assert (await tc.post("/api/gateways", json=edited)).status == 200
+        assert ("127.0.0.1", 6001) in client._gateway_addrs and ("127.0.0.1", 6000) not in client._gateway_addrs
+        raw = yaml.safe_load(path.read_text())
+        assert raw["gateways"] == [{"name": "entity-b", "channels": [201],
+                                    "peers": [{"host": "127.0.0.1", "port": 6001}]}]
+
+        body = await (await tc.get("/api/gateways")).json()
+        assert body["links"][0]["name"] == "entity-b"
+
+        assert (await tc.post("/api/gateways/remove", json={"name": "entity-b"})).status == 200
+        assert (await tc.post("/api/gateways/remove", json={"name": "entity-b"})).status == 404
+        assert client._gateway_addrs == {}
+        assert "gateways" not in yaml.safe_load(path.read_text())
+
+
+def test_patches_add_and_remove(tmp_path):
+    asyncio.run(_patches(tmp_path))
+
+
+async def _patches(tmp_path):
+    client, path = _gateway_setup(tmp_path)
+    assert client.ciphers == {}   # relay-only, nothing patched yet
+    async with TestClient(TestServer(WebUI(client).app)) as tc:
+        resp = await tc.post("/api/patches", json={"a": 3, "b": 201, "two_way": True})
+        assert resp.status == 200, await resp.text()
+        # The keys were loaded from the file, live.
+        assert sorted(client.ciphers) == [3, 201] and client.patches.is_source(3)
+        assert yaml.safe_load(path.read_text())["patches"] == [[3, 201]]
+
+        assert (await tc.post("/api/patches", json={"a": 201, "b": 3, "two_way": False})).status == 400  # overlaps
+        assert (await tc.post("/api/patches", json={"a": 3, "b": 77})).status == 400                     # no such channel
+
+        body = await (await tc.get("/api/gateways")).json()
+        assert body["patches"][0]["a_name"] == "ops" and body["patches"][0]["active"]
+
+        assert (await tc.post("/api/patches/remove", json={"a": 3, "b": 201})).status == 200
+        assert client.ciphers == {} and not client.patches.is_source(3)
+        assert "patches" not in yaml.safe_load(path.read_text())

@@ -258,7 +258,8 @@ enable_web_ui: false
 # mode" section. Off by default; most nodes are plain clients.
 enable_relay: false
 # A machine that should ONLY relay (a server, e.g. your WireGuard server, with
-# no mic/speaker/PTT) can set relay_only: true instead - no channels needed.
+# no mic/speaker/PTT) can set relay_only: true instead - no channels needed
+# (only the ones its patches: use, if any).
 # See config/relay.example.yaml and README "Running a relay on a server".
 # relay_only: false
 
@@ -274,6 +275,17 @@ enable_relay: false
 #     peers:                         # the other mesh's gateway(s)
 #       - host: 203.0.113.9          # IP address or hostname
 #         port: 5555
+
+# Patches: join two channels - this node re-sends what it hears on one onto
+# the other (it needs both keys; a relay_only node keeps just these). Use it
+# inside the mesh, or patch your own channel to a gateway link's shared
+# channel so no other node needs the shared one. Names or ids. Several nodes
+# can run the same patch: the highest patch_priority runs it, the rest stand
+# by. See README "Patching channels".
+# patches:
+#   - [ops, tac]                     # both ways
+#   - {from: hq, to: field}          # one way
+# patch_priority: 100
 
 # Only needed to seed PEX on a link mDNS can't reach (VPN/mesh radio) - a
 # single reachable peer is enough for the rest to be learned via gossip.
